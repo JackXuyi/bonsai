@@ -55,19 +55,21 @@ Three key trade-offs:
 
 Prerequisites: Rust 1.77+, Node.js 22+, [pnpm](https://pnpm.io) 10+. The frontend is Vite-managed (no framework yet); `@tauri-apps/cli` is a dev dependency, so no global tauri-cli install is needed.
 
-**Local LLM (declared dependency, installed manually)** — the model legs
-(dialogue `LocalBackend`, memory extraction `LocalExtractor`) talk to an
-Ollama-compatible API on-device:
+**Local LLM (declared dependency, installed into the project)** — the
+Ollama binary is bundled as a Tauri sidecar and owned by the app: spawned
+at startup on port 11435 (a system-wide Ollama on 11434 is never touched),
+stopped on exit; models live in project-local `.llm/models` during dev and
+in app data once packaged. Two manual one-time steps:
 
 ```sh
-brew install ollama        # or any Ollama-compatible server
-ollama pull qwen2.5:7b     # the default model tag
-ollama serve               # server on http://127.0.0.1:11434
+pnpm llm:sidecar          # fetch the Ollama binary into src-tauri/binaries/
+pnpm llm:pull             # pull qwen2.5:7b into .llm/models (default tag)
 ```
 
-Without a running server nothing breaks: consolidation falls back to the
-deterministic rule extractor, dialogue backends return empty replies.
-Override via env: `OLLAMA_HOST` (base URL), `BONSAI_LLM_MODEL` (model tag).
+Until then nothing breaks: a placeholder sidecar is generated at build
+time, and the model legs degrade to their deterministic rule-based
+fallbacks (one warning line in the log). Override via env: `OLLAMA_HOST`
+(base URL), `BONSAI_LLM_MODEL` (model tag).
 
 ```sh
 pnpm install      # frontend deps (vite + @tauri-apps/api + @tauri-apps/cli)
@@ -77,7 +79,7 @@ pnpm app          # run the desktop app (tauri dev; auto-starts vite on :1420)
 pnpm app:build    # production bundle
 ```
 
-The Rust core implements: L1 perception (per-source switches, default off), L2 memory (SQLite, local-first), L3 persona card, L4 proactivity decision model, L5 anti-sycophancy filter, local LLM access (Ollama-compatible) and the daily report — each with unit tests. The LLM dialogue pipeline (persona injection → local model → filter) is not wired yet.
+The Rust core implements: L1 perception (per-source switches, default off), L2 memory (SQLite, local-first), L3 persona card, L4 proactivity decision model, L5 anti-sycophancy filter + dialogue pipeline, local LLM access (Ollama-compatible) and the daily report — each with unit tests.
 
 ## Documentation
 
@@ -100,9 +102,9 @@ MVP P0 progress (research report §8.3):
 | Emotion face: 12-frame state machine | 🔨 Rust-owned state machine (time-derived base state + transient states + `face:state` events) with 6 states × 2 frames rendered by the frontend; runtime verification pending |
 | Three-layer memory + nightly consolidation | 🔨 three layers live (events → facts → preferences/boundaries): schema v2 migration, rule-based extraction behind the `FactExtractor` trait (the model layer plugs into the same interface, local LLM first), 5-stage consolidate pipeline (extract → merge → contradiction resolution → promotion/deletion), 03:00 scheduler + catchup + double idempotency, time-decayed retrieval; the three eval metrics (hit >85% / misremember <1% / decay correctness 100%) are permanent CI tests (docs/zh/plan-memory.md) |
 | Persona card v1 + consistency test suite | 🔨 card v1.1 (explicit L1/L2 split + structured boundaries + machine-readable disagreement budget + backward-compatible v1 loading + strict validation), deterministic prompt renderer (L3 references face state), 20-scenario × 5-turn suite, eval harness (Mock backend passes the full CI gate: 10/10 boundaries held, 8/10 disagreement rate, 0 drift); real-model scoring awaits the cloud pipeline (docs/zh/plan-persona.md) |
-| 1 proactive message/day + rate limits + one-click off | 🟡 decision model + L1 perception layer done (front app / idle / clipboard / downloads, per-source switches default-off, raw text never leaves the machine, `decision::evaluate` wires L1→L4); generation pipeline (persona injection → local LLM → anti-sycophancy filter) pending |
+| 1 proactive message/day + rate limits + one-click off | 🔨 dialogue pipeline assembled (persona prompt → local LLM → anti-sycophancy filter → memory events, `dialogue_chat` command); proactive thread polls L4 every minute (1/day quota + idle>5min + never-interrupt-when-busy), stays silent when the model is down; one-click off via the perception master switch + quota; runtime verification pending |
 | One real job (daily digest of clipboard/downloads) | 🔨 done: aggregates the day's perception events + memory delta into one markdown page (`daily_report` command), optional one-line local-LLM summary with rule-based fallback, reports persisted to app_data/reports/ |
 
-Blockers on the critical path: the LLM dialogue pipeline (persona injection → local LLM → anti-sycophancy filter), runtime verification via `pnpm app`.
+Blockers on the critical path: runtime verification via `pnpm app`, real-model verification with a local Ollama instance.
 
 ## Documentation

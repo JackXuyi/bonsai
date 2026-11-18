@@ -55,15 +55,14 @@ L0 壳层     Tauri 2（Rust core），菜单栏常驻，开机自启
 
 前置要求：Rust 1.77+、Node.js 22+、[pnpm](https://pnpm.io) 10+。前端由 Vite 管理（暂未引入框架）；`@tauri-apps/cli` 是开发依赖，无需全局安装 tauri-cli。
 
-**本地 LLM（声明式依赖，手动安装）**——对话后端（`LocalBackend`）与记忆抽取（`LocalExtractor`）通过本机 Ollama 兼容 API 调用模型：
+**本地 LLM（声明式依赖，安装进项目内）**——Ollama 二进制以 Tauri sidecar 形式随应用打包，由应用自己托管：启动时拉起（端口 11435，绝不碰系统级 Ollama 的 11434）、退出时回收；模型存放开发期为项目内 `.llm/models`、打包后为应用数据目录。一次性手动步骤只有两步：
 
 ```sh
-brew install ollama        # 或任意 Ollama 兼容服务
-ollama pull qwen2.5:7b     # 默认模型 tag
-ollama serve               # 服务地址 http://127.0.0.1:11434
+pnpm llm:sidecar          # 把 Ollama 二进制取回 src-tauri/binaries/
+pnpm llm:pull             # 拉取 qwen2.5:7b 到 .llm/models（默认模型）
 ```
 
-服务未启动时一切功能不受影响：consolidate 自动降级为规则抽取器，对话后端返回空回复。可用环境变量覆盖：`OLLAMA_HOST`（服务地址）、`BONSAI_LLM_MODEL`（模型 tag）。
+没做这两步也不影响任何功能：构建期会自动生成占位 sidecar，模型腿自动降级为确定性的规则兜底（日志里只有一行警告）。可用环境变量覆盖：`OLLAMA_HOST`（服务地址）、`BONSAI_LLM_MODEL`（模型 tag）。
 
 ```sh
 pnpm install      # 安装前端依赖（vite + @tauri-apps/api + @tauri-apps/cli）
@@ -73,7 +72,7 @@ pnpm app          # 运行桌面应用（tauri dev；自动启动 vite :1420）
 pnpm app:build    # 生产构建
 ```
 
-Rust 核心已实现：L1 感知层（逐项授权、默认关闭）、L2 记忆层（SQLite，本地优先）、L3 人格卡、L4 主动开口决策模型、L5 反谄媚过滤器、本地 LLM 接入（Ollama 兼容）与日报工具——均带单元测试。LLM 对话管线（人格卡注入 → 本地模型 → 过滤器）尚未接。
+Rust 核心已实现：L1 感知层（逐项授权、默认关闭）、L2 记忆层（SQLite，本地优先）、L3 人格卡、L4 主动开口决策模型、L5 反谄媚过滤器 + 对话管线、本地 LLM 接入（Ollama 兼容）与日报工具——均带单元测试。
 
 ## 文档
 
@@ -96,7 +95,7 @@ MVP P0 进度（调研报告 §8.3）：
 | 情绪脸：12 帧状态机 | 🔨 Rust 持有状态机（按时间推导基态 + 瞬态表情 + `face:state` 事件广播），前端渲染 6 状态 × 2 帧；待运行实测 |
 | 三层记忆 + 夜间整理 | 🔨 三层落地（事件→事实→偏好/边界）：schema v2 迁移、规则抽取（`FactExtractor` trait，模型层走同一接口，本地 LLM 优先）、consolidate 五阶段管线（抽取→合并→矛盾消解→升格/删除）、03:00 调度 + catchup 补跑 + 双重幂等、时间衰减检索；三指标评估（命中率>85% / 误记率<1% / 衰减正确率 100%）为常驻 CI 测试（见 docs/zh/plan-memory.md） |
 | 人格卡 v1 + 一致性测试集 | 🔨 卡 v1.1（L1/L2 显式分层 + 边界结构化 + 反对预算机器可读 + v1 向后兼容 + 强校验）、prompt 确定性渲染器（L3 引用 face 状态）、20 场景 × 5 轮场景集、评测 harness（Mock 后端 CI 全量达标：穿透 10/10 守住、反对率 8/10、漂移 0）；真模型跑分挂云端管线（见 docs/zh/plan-persona.md） |
-| 每日 1 次主动搭话 + 限流 + 可一键关闭 | 🟡 决策模型 + L1 感知层完成（前台 App / idle / 剪贴板 / 下载，逐项授权默认关闭、原文不出机器，`decision::evaluate` 打通 L1→L4）；生成管线（人格卡注入 → 本地 LLM → 反谄媚过滤器）待接 |
+| 每日 1 次主动搭话 + 限流 + 可一键关闭 | 🔨 对话管线拼装完成（persona prompt → 本地 LLM → 反谄媚过滤器 → 记忆层记录，`dialogue_chat` 命令）；主动搭话线程 60s 轮询 L4（每日 1 次配额 + idle>5min + 忙不打断），模型挂时静默不装活；一键关闭走感知层总开关 + 配额；待运行实测 |
 | 一件真活（剪贴板/下载整理成日报） | 🔨 日报完成：按本地日聚合感知事件 + 记忆增量渲染为一页 markdown（`daily_report` 命令），本地 LLM 一句话总结可选、失败降级规则拼接，报告落盘 app_data/reports/ |
 
-关键路径上的阻塞项：LLM 对话管线（人格卡注入 → 本地模型 → 反谄媚过滤器）、`pnpm app` 实测验证。
+关键路径上的阻塞项：`pnpm app` 实测验证、本地模型（Ollama）真机验证。
