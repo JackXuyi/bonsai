@@ -20,7 +20,7 @@ Explicit non-goals: no romance/virtual partner, no roleplay community, no charac
 
 ```text
 L6 Presentation  a face (12–20 frame state-machine animation) + tray icon
-L5 Generation    persona card injected → cloud dialogue; anti-sycophancy filter
+L5 Generation    persona card injected → local LLM dialogue; anti-sycophancy filter
                  fallback: on-device small model (capability degrades, personality doesn't)
 L4 Decision      "should it speak?" interruptibility model + growth events
 L3 Personality   persona.json (traits/values/quirks/boundaries) + drift detector
@@ -33,7 +33,7 @@ L0 Shell         Tauri 2 (Rust core), menu-bar resident, auto-start
 Three key trade-offs:
 
 1. **Personality is independent of the model** — the persona card is plain text + a state machine; swapping models swaps only expression.
-2. **Raw perception data never leaves the machine** — the cloud receives only structured labels.
+2. **Conversations never leave the machine** — the default LLM is local (Ollama-compatible API); cloud APIs are an explicit opt-in only.
 3. **Deciding to speak is separate from what to say** — thresholds, A/B and interruption cost are tuned independently.
 
 ## Platform & stack
@@ -41,7 +41,7 @@ Three key trade-offs:
 - **macOS first**, Windows second
 - **Shell**: Tauri 2.x (Rust core)
 - **Memory**: local SQLite, hybrid retrieval (vector + keyword + time decay)
-- **Models**: hybrid edge-cloud routing; edge for perception/extraction only, cloud for dialogue; on-device fallback in privacy mode
+- **Models**: local LLM first (Ollama-compatible API on-device) for dialogue, extraction and summarization — full functionality offline; cloud APIs are an optional quality upgrade the user must explicitly enable
 
 ## MVP roadmap (8–10 weeks)
 
@@ -63,7 +63,7 @@ pnpm app          # run the desktop app (tauri dev; auto-starts vite on :1420)
 pnpm app:build    # production bundle
 ```
 
-The Rust core implements: L2 memory (SQLite, local-first), L3 persona card, L4 proactivity decision model, L5 anti-sycophancy filter — each with unit tests. L1 perception and the cloud dialogue pipeline are not implemented yet.
+The Rust core implements: L2 memory (SQLite, local-first), L3 persona card, L4 proactivity decision model, L5 anti-sycophancy filter — each with unit tests. L1 perception and the LLM dialogue pipeline (local LLM first) are not implemented yet.
 
 ## Documentation
 
@@ -72,6 +72,7 @@ The Rust core implements: L2 memory (SQLite, local-first), L3 persona card, L4 p
 - 中文
   - [调研报告](./docs/zh/research-report.md) — 立项依据：市场、可行性、记忆、人格、养成、合规、MVP、风险
   - [Plan: three-layer memory + nightly consolidation](./docs/zh/plan-memory.md) — implementation plan for MVP P0 item 3 (M1–M4 implemented)
+  - [Plan: persona card v1 + consistency suite](./docs/zh/plan-persona.md) — implementation plan for MVP P0 item 4 (PM1–PM3 implemented)
 
 ## Status
 
@@ -83,11 +84,11 @@ MVP P0 progress (research report §8.3):
 | --- | --- |
 | macOS menu-bar resident + tray + auto-start | 🔨 implemented, not yet runtime-verified (`pnpm app`) |
 | Emotion face: 12-frame state machine | 🔨 Rust-owned state machine (time-derived base state + transient states + `face:state` events) with 6 states × 2 frames rendered by the frontend; runtime verification pending |
-| Three-layer memory + nightly consolidation | 🔨 three layers live (events → facts → preferences/boundaries): schema v2 migration, rule-based extraction behind the `FactExtractor` trait (cloud model plugs into the same interface), 5-stage consolidate pipeline (extract → merge → contradiction resolution → promotion/deletion), 03:00 scheduler + catchup + double idempotency, time-decayed retrieval; the three eval metrics (hit >85% / misremember <1% / decay correctness 100%) are permanent CI tests (docs/zh/plan-memory.md) |
-| Persona card v1 + consistency test suite | 🟡 card v1 done; test suite (20 scenarios × 5 turns) not started |
+| Three-layer memory + nightly consolidation | 🔨 three layers live (events → facts → preferences/boundaries): schema v2 migration, rule-based extraction behind the `FactExtractor` trait (the model layer plugs into the same interface, local LLM first), 5-stage consolidate pipeline (extract → merge → contradiction resolution → promotion/deletion), 03:00 scheduler + catchup + double idempotency, time-decayed retrieval; the three eval metrics (hit >85% / misremember <1% / decay correctness 100%) are permanent CI tests (docs/zh/plan-memory.md) |
+| Persona card v1 + consistency test suite | 🔨 card v1.1 (explicit L1/L2 split + structured boundaries + machine-readable disagreement budget + backward-compatible v1 loading + strict validation), deterministic prompt renderer (L3 references face state), 20-scenario × 5-turn suite, eval harness (Mock backend passes the full CI gate: 10/10 boundaries held, 8/10 disagreement rate, 0 drift); real-model scoring awaits the cloud pipeline (docs/zh/plan-persona.md) |
 | 1 proactive message/day + rate limits + one-click off | 🟡 decision model done with tests; L1 perception & generation pipeline missing |
 | One real job (daily digest of clipboard/downloads) | ⬜ not started |
 
-Blockers on the critical path: L1 perception layer, cloud dialogue pipeline (persona injection → cloud model → anti-sycophancy filter), runtime verification via `pnpm app`.
+Blockers on the critical path: L1 perception layer, the LLM dialogue pipeline (persona injection → local LLM → anti-sycophancy filter), runtime verification via `pnpm app`.
 
 ## Documentation

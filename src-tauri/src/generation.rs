@@ -2,8 +2,8 @@
 //! personality" cannot rely on model conscience; it must be enforced by
 //! product mechanics).
 //!
-//! Scaffold scope: mechanical filters only. The cloud dialogue pipeline
-//! (persona card injection → cloud model → filter) is a follow-up milestone.
+//! Scaffold scope: mechanical filters only. The LLM dialogue pipeline
+//! (persona card injection → local LLM → filter) is a follow-up milestone.
 //!
 //! Four enforced rules from the research:
 //! 1. Disagreement Budget — at least one substantive disagreement per N turns.
@@ -61,7 +61,7 @@ pub fn filter(text: &str) -> FilterReport {
 pub fn scaffold_reply(user_text: String) -> FilterReport {
     // Scaffold: runs the mechanical filter over user text to demonstrate the
     // pipeline shape. Real generation injects the persona card and calls the
-    // cloud model, then this filter applies to the draft before it ships.
+    // local LLM, then this filter applies to the draft before it ships.
     filter(&user_text)
 }
 

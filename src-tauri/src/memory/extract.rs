@@ -1,9 +1,11 @@
 //! Fact extraction (plan-memory.md §5.2–§5.3).
 //!
 //! `FactExtractor` decouples the consolidate pipeline from the model layer:
-//! - `RuleExtractor` — P0 default; deterministic, offline, privacy-mode safe.
-//! - `CloudExtractor` — lands with the cloud dialogue pipeline (plan M5);
-//!   same trait, structured JSON in / out.
+//! - `RuleExtractor` — offline fallback; deterministic, zero-dependency.
+//! - `LocalExtractor` — the default model leg: a local LLM behind an
+//!   Ollama-compatible API; lands with the LLM pipeline (plan M5);
+//!   same trait, structured JSON in / out. Cloud APIs are an optional,
+//!   explicit opt-in — not part of P0.
 //!
 //! Per the plan's open-question recommendation, stage ① (session summaries)
 //! is NOT built in P0, and `importance` stays a column without logic.

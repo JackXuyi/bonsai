@@ -209,7 +209,7 @@ fn write_audit(conn: &Connection, report: &Report) -> rusqlite::Result<()> {
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'done')",
         rusqlite::params![
             now,
-            now, // started == finished for P0; a long-running CloudExtractor run may differ later
+            now, // started == finished for P0; a long-running LocalExtractor run may differ later
             report.trigger,
             report.window_start,
             report.window_end,

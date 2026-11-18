@@ -1,8 +1,8 @@
 # 方案：三层记忆 + 夜间整理（MVP P0 第 3 项）
 
-> **状态**：M1–M4 已实施（2026-11-18，38 单测全过）；M5（CloudExtractor）挂起等云端对话管线
+> **状态**：M1–M4 已实施（2026-11-18，38 单测全过）；M5（LocalExtractor，本地 LLM）挂起等本地模型接入
 > **日期**：2026-11-18
-> **依赖**：云端对话管线（抽取/消解用模型调用；未接入前走规则 fallback）
+> **依赖**：本地 LLM 接入（Ollama 兼容 API，模型调用全在本机；未接入前走规则 fallback）
 > **对应调研**：docs/zh/research-report.md §4.1–4.4
 
 ---
@@ -74,8 +74,9 @@
    追不到来源的条目视为脏数据，consolidate 时清除。
 2. **不静默改写不变式**：事实被推翻只能 `invalid_at`，旧值永不 UPDATE；
    「用户说忘掉」才走硬删（`forget_*`，级联到所有派生层）。
-3. **本地不变式**：三层全部落本地 SQLite；云端模型只接收
-   *为了抽取而临时必需的片段*，返回的是结构化事实，原文不出机器（隐私模式下抽取降级为规则版）。
+3. **本地不变式**：三层全部落本地 SQLite；模型推理（对话/抽取/消解）**优先本地 LLM**
+   （Ollama 兼容 API），对话与记忆数据不出机器。若用户显式启用云端增强，云端只接收
+   *为了抽取而临时必需的片段*，返回的是结构化事实；离线或隐私模式下抽取降级为规则版。
 
 **偏好四分类**（调研 §4.1，category 枚举）：
 
@@ -155,12 +156,14 @@ pub trait FactExtractor: Send {
     fn extract(&self, session: &SessionDigest) -> Vec<CandidateFact>;
 }
 
-pub struct RuleExtractor;      // P0 默认：无网络/隐私模式可用
-pub struct CloudExtractor { … } // 云端管线就绪后切换，同一 trait
+pub struct RuleExtractor;       // 无模型/离线兜底：确定性、零依赖
+pub struct LocalExtractor { … } // 默认模型腿：本地 LLM（Ollama 兼容 API），同一 trait
 ```
 
-- `CloudExtractor` 走云端对话管线（人格卡注入 → 模型 → 结构化 JSON），
-  prompt 要求返回 JSON 数组：`{fact, category?, contradicts_fact_id?, confidence}`。
+- `LocalExtractor` 走本地 LLM（Ollama 兼容 OpenAI API，默认 `localhost:11434`；
+  人格卡注入 → 模型 → 结构化 JSON），prompt 要求返回 JSON 数组：
+  `{fact, category?, contradicts_fact_id?, confidence}`。对话与记忆原文不出机器。
+- 云端 API 仅作为**可选**质量增强（用户显式开启，同一 trait 换实现即可），不在 P0 范围。
 - 模型失败/超时（10s）→ 自动降级 `RuleExtractor`，审计行记录 `status='failed'` 但不清 consumed，
   下次 catchup 重试，保证**不丢事件**。
 
@@ -245,9 +248,9 @@ ORDER BY (invalid_at IS NULL) DESC,
 | M2（1 周） | RuleExtractor + 管线 ②③④⑤ + 事务幂等 | 种子对话集跑出：抽取正确率 ≥80%（规则可覆盖的句式内）；重复消费不产生重复事实 |
 | M3（0.5 周） | 调度器线程 + catchup + `consolidate:done` 事件 | 伪造系统时间跨 03:00 自动触发；杀进程重启后补跑不丢不重 |
 | M4（0.5 周） | 时间衰减检索 + eval.rs 三指标 | 三指标达标（命中率>85%、误记率<1%、衰减正确率 100%） |
-| M5（云端管线就绪后） | CloudExtractor 实现 + 隐私模式降级验证 | 与 RuleExtractor 跑同一评估集对比，遗漏下降 ≥30%（对照调研数字） |
+| M5（本地模型接入后） | LocalExtractor 实现（本地 LLM）+ 降级验证 | 与 RuleExtractor 跑同一评估集对比，遗漏下降 ≥30%（对照调研数字） |
 
-M1–M4 不依赖云端对话管线，可立即开工；M5 挂起等对话管线落地。
+M1–M4 不依赖模型层，可立即开工；M5 挂起等本地 LLM 接入。
 `pnpm app` 实测（P0 阻塞项之一）时顺带验证：手动触发 consolidate → 前端收到 done 事件。
 
 ---

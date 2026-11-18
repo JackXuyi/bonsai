@@ -6,7 +6,7 @@
 //! - L2 Memory:      local SQLite (events / facts / preferences / boundaries)
 //! - L3 Personality: persona.json, model-independent
 //! - L4 Decision:    "should it speak?" interruptibility model
-//! - L5 Generation:  cloud dialogue + anti-sycophancy filter (scaffold)
+//! - L5 Generation:  local-LLM dialogue + anti-sycophancy filter (scaffold)
 //! - L6 Presentation: frontend in ../ui
 
 pub mod decision;
