@@ -5,6 +5,11 @@
 #
 # Uses the sidecar binary itself as CLI/server — no system Ollama required.
 # Starts a temporary server on the app's port, pulls, then stops it.
+#
+# China-friendly fallback: if `ollama pull` fails (registry.ollama.ai has no
+# official mainland-China mirror), qwen3:4b is re-fetched as an official GGUF
+# from ModelScope (Aliyun domestic CDN) and imported via `ollama create`.
+# Env overrides: BONSAI_GGUF_URL, BONSAI_LLM_PORT.
 
 set -euo pipefail
 
@@ -44,5 +49,49 @@ done
 [ "$up" -eq 1 ] || { echo "error: temporary ollama server failed to start (see output above)" >&2; exit 1; }
 
 echo "pulling $MODEL into $MODELS_DIR ..."
-"$BIN" pull "$MODEL"
-echo "done."
+if "$BIN" pull "$MODEL"; then
+  echo "done."
+  exit 0
+fi
+
+# registry.ollama.ai has no official mainland-China mirror and is frequently
+# unreachable or throttled. Fallback: download the official Qwen GGUF from
+# ModelScope (Aliyun domestic CDN) and import it with `ollama create`.
+GGUF_URL="${BONSAI_GGUF_URL:-}"
+case "$MODEL" in
+  qwen3:4b)
+    GGUF_URL="${GGUF_URL:-https://modelscope.cn/models/Qwen/Qwen3-4B-GGUF/resolve/master/Qwen3-4B-Q4_K_M.gguf}"
+    GGUF_NAME="Qwen3-4B-Q4_K_M.gguf"
+    ;;
+esac
+
+if [ -z "$GGUF_URL" ]; then
+  echo "error: pull failed and no China-mirror GGUF fallback is configured for '$MODEL'" >&2
+  echo "hint: retry with a reachable network, or set BONSAI_GGUF_URL=<gguf url>" >&2
+  exit 1
+fi
+
+GGUF_NAME="${GGUF_NAME:-$(basename "${GGUF_URL%%\?*}")}"
+
+echo "pull failed (registry.ollama.ai unreachable?) — falling back to ModelScope GGUF"
+GGUF_DIR="$MODELS_DIR/gguf"
+mkdir -p "$GGUF_DIR"
+GGUF="$GGUF_DIR/$GGUF_NAME"
+
+if [ ! -f "$GGUF" ]; then
+  echo "downloading $GGUF_URL ..."
+  if curl -fL --connect-timeout 15 --retry 3 --progress-bar "$GGUF_URL" -o "$GGUF.part" \
+     && [ -s "$GGUF.part" ]; then
+    mv "$GGUF.part" "$GGUF"
+  else
+    rm -f "$GGUF.part"
+    echo "error: GGUF download failed from $GGUF_URL" >&2
+    exit 1
+  fi
+else
+  echo "GGUF already cached: $GGUF"
+fi
+
+printf 'FROM %s\n' "$GGUF" > "$GGUF_DIR/Modelfile"
+"$BIN" create "$MODEL" -f "$GGUF_DIR/Modelfile"
+echo "done (imported from ModelScope GGUF)."

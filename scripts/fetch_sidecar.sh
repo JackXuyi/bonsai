@@ -43,12 +43,36 @@ if is_placeholder; then
 fi
 
 VERSION="${OLLAMA_VERSION:-0.40.16}"
-URL="https://github.com/ollama/ollama/releases/download/v${VERSION}/${ARCHIVE}"
+GH_URL="https://github.com/ollama/ollama/releases/download/v${VERSION}/${ARCHIVE}"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-echo "downloading $URL ..."
-curl -fL --progress-bar "$URL" -o "$TMP/ollama.zip"
+# Download sources, tried in order. GitHub release downloads are frequently
+# slow/unstable from mainland China, so a community gh-proxy mirror is tried
+# first and direct GitHub is kept as the fallback. Override the whole list
+# with BONSAI_GH_PROXY (e.g. your own mirror; set BONSAI_GH_PROXY="" to go
+# direct only).
+if [ -n "${BONSAI_GH_PROXY+x}" ]; then
+  SOURCES=("${BONSAI_GH_PROXY%/}/$GH_URL")
+else
+  SOURCES=(
+    "https://gh-proxy.com/$GH_URL"
+    "$GH_URL"
+  )
+fi
+
+ok=""
+for url in "${SOURCES[@]}"; do
+  echo "downloading $url ..."
+  if curl -fL --connect-timeout 15 --retry 2 --progress-bar "$url" -o "$TMP/ollama.zip" \
+     && unzip -tqq "$TMP/ollama.zip" >/dev/null 2>&1; then
+    ok=1
+    break
+  fi
+  echo "source failed, trying next ..." >&2
+  rm -f "$TMP/ollama.zip"
+done
+[ -n "$ok" ] || { echo "all download sources failed: $GH_URL" >&2; exit 1; }
 
 echo "extracting ..."
 unzip -q -o "$TMP/ollama.zip" -d "$TMP/app"
