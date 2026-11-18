@@ -69,6 +69,7 @@ Rust 核心已实现：L2 记忆层（SQLite，本地优先）、L3 人格卡、
 
 - 中文
   - [调研报告](./docs/zh/research-report.md) — 立项依据：市场、可行性、记忆、人格、养成、合规、MVP、风险
+  - [方案：三层记忆 + 夜间整理](./docs/zh/plan-memory.md) — MVP P0 第 3 项的实施计划（评审中 → 待实施）
 - English
   - [Research report](./docs/en/research-report.md) — founding research: market, feasibility, memory, personality, growth, compliance, MVP, risks
 
