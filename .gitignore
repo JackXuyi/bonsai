@@ -1,2 +1,15 @@
 # WorkBuddy workspace metadata (local notes, not project content)
 .workbuddy/
+
+# Local cargo mirror config (rsproxy.cn) — kept out of the repo on purpose
+.cargo/
+
+# Rust
+src-tauri/target/
+src-tauri/gen/
+
+# Node
+node_modules/
+
+# OS noise
+.DS_Store

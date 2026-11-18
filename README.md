@@ -51,6 +51,19 @@ Three key trade-offs:
 | P1 | Predict-verify loop, form-line growth (7-day visible change), boundary onboarding Q&A |
 | P2 | Voice, screen perception, tool calls, relationship-line growth, cross-device |
 
+## Running (scaffold)
+
+Prerequisites: Rust 1.77+, Node.js 22+ (frontend is plain static assets — no bundler yet).
+
+```sh
+cd src-tauri
+cargo check     # verify the Rust core
+cargo test      # unit tests (memory, decision, generation, persona)
+cargo tauri dev # run the desktop app (requires tauri-cli: cargo install tauri-cli)
+```
+
+The Rust core implements: L2 memory (SQLite, local-first), L3 persona card, L4 proactivity decision model, L5 anti-sycophancy filter — each with unit tests. L1 perception and the cloud dialogue pipeline are not implemented yet.
+
 ## Documentation
 
 - English

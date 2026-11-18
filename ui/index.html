@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>bonsai</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <!-- L6: the face. 12–20 frame state-machine animation across 6 emotional
+           states; no Live2D (research report §8.3). Each state maps to 2 frames
+           of CSS keyframes in this scaffold. -->
+      <div class="face" data-state="calm" id="face" role="img" aria-label="bonsai face">
+        <svg viewBox="0 0 200 200" width="180" height="180" aria-hidden="true">
+          <!-- pot -->
+          <path class="pot" d="M70 150 h60 l-8 34 h-44 z" />
+          <rect class="pot-rim" x="64" y="142" width="72" height="12" rx="4" />
+          <!-- trunk & branches -->
+          <path class="trunk" d="M96 142 C 96 120 94 108 90 96 M90 104 C 78 100 72 94 68 86" />
+          <!-- foliage -->
+          <circle class="leaf leaf-a" cx="100" cy="66" r="34" />
+          <circle class="leaf leaf-b" cx="66"  cy="76" r="20" />
+          <circle class="leaf leaf-c" cx="134" cy="76" r="20" />
+          <circle class="leaf leaf-d" cx="100" cy="94" r="22" />
+          <!-- eyes & mouth -->
+          <g class="eyes">
+            <ellipse class="eye eye-l" cx="84"  cy="62" rx="6" ry="8" />
+            <ellipse class="eye eye-r" cx="116" cy="62" rx="6" ry="8" />
+          </g>
+          <path class="mouth" d="M92 82 Q 100 88 108 82" />
+        </svg>
+      </div>
+
+      <p class="name" id="name">bonsai</p>
+      <p class="caption" id="caption">growing quietly…</p>
+
+      <div class="states" id="states">
+        <button data-state="calm" class="active">平静</button>
+        <button data-state="focused">专注</button>
+        <button data-state="sleepy">困</button>
+        <button data-state="greeted">被搭话</button>
+        <button data-state="displeased">不高兴</button>
+        <button data-state="thinking">思考</button>
+      </div>
+    </main>
+    <script src="main.js"></script>
+  </body>
+</html>

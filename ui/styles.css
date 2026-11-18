@@ -1,0 +1,114 @@
+:root {
+  --bg: #f4f1ea;
+  --pot: #8b5a2b;
+  --pot-rim: #a66f38;
+  --trunk: #5c3a20;
+  --leaf: #4c8c2b;
+  --leaf-dark: #3a6e21;
+  --leaf-light: #6aa846;
+  --ink: #33301f;
+  --muted: #8a8468;
+  --accent: #4c8c2b;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: -apple-system, "PingFang SC", "Helvetica Neue", sans-serif;
+  background: var(--bg);
+  color: var(--ink);
+  user-select: none;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 28px 20px;
+}
+
+.face svg { overflow: visible; }
+
+.pot { fill: var(--pot); }
+.pot-rim { fill: var(--pot-rim); }
+.trunk { fill: none; stroke: var(--trunk); stroke-width: 9; stroke-linecap: round; }
+.leaf-a { fill: var(--leaf); }
+.leaf-b, .leaf-d { fill: var(--leaf-dark); }
+.leaf-c { fill: var(--leaf-light); }
+
+.eyes { fill: #2b2818; }
+.mouth { fill: none; stroke: #2b2818; stroke-width: 3; stroke-linecap: round; }
+
+/* --- emotion states: 6 states x 2 keyframes = 12 frames (scaffold) --- */
+
+/* calm: slow breathing */
+.face[data-state="calm"] svg { animation: breathe 4s ease-in-out infinite; }
+@keyframes breathe {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-3px); }
+}
+
+/* focused: still, eyes narrower */
+.face[data-state="focused"] .eye { ry: 5; animation: none; }
+.face[data-state="focused"] svg { animation: none; }
+
+/* sleepy: drooping eyes, gentle sway */
+.face[data-state="sleepy"] .eye { ry: 2; }
+.face[data-state="sleepy"] svg { animation: doze 3s ease-in-out infinite; }
+@keyframes doze {
+  0%, 100% { transform: rotate(-2deg); }
+  50%      { transform: rotate(2deg); }
+}
+
+/* greeted: eyes wide, bounce */
+.face[data-state="greeted"] .eye { rx: 7; ry: 9; }
+.face[data-state="greeted"] svg { animation: bounce 0.6s ease; }
+@keyframes bounce {
+  0%   { transform: translateY(0); }
+  40%  { transform: translateY(-8px); }
+  100% { transform: translateY(0); }
+}
+
+/* displeased: brows down, mouth flat, shiver */
+.face[data-state="displeased"] .mouth { d: path("M92 86 Q 100 80 108 86"); }
+.face[data-state="displeased"] svg { animation: shiver 0.4s linear infinite; }
+@keyframes shiver {
+  0%, 100% { transform: translateX(0); }
+  50%      { transform: translateX(2px); }
+}
+
+/* thinking: one eye squint, slight tilt */
+.face[data-state="thinking"] .eye-r { ry: 3; }
+.face[data-state="thinking"] svg { animation: tilt 2.4s ease-in-out infinite; }
+@keyframes tilt {
+  0%, 100% { transform: rotate(0deg); }
+  50%      { transform: rotate(4deg); }
+}
+
+.name { font-size: 17px; font-weight: 600; }
+.caption { font-size: 12px; color: var(--muted); min-height: 16px; }
+
+.states {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.states button {
+  border: 1px solid #d8d2c0;
+  background: #fff;
+  border-radius: 999px;
+  padding: 5px 12px;
+  font-size: 12px;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.states button.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
