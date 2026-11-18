@@ -1,5 +1,6 @@
 :root {
   --bg: #f4f1ea;
+  --card: #fffdf8;
   --pot: #8b5a2b;
   --pot-rim: #a66f38;
   --trunk: #5c3a20;
@@ -9,41 +10,48 @@
   --ink: #33301f;
   --muted: #8a8468;
   --accent: #4c8c2b;
+  --line: #ddd6c4;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body { height: 100%; }
 
 body {
   font-family: -apple-system, "PingFang SC", "Helvetica Neue", sans-serif;
   background: var(--bg);
   color: var(--ink);
   user-select: none;
+  overflow: hidden;
 }
 
 .app {
   display: flex;
   flex-direction: column;
+  height: 100vh;
+  padding: 14px 14px 12px;
+  gap: 10px;
+}
+
+/* ---- face ---- */
+.top {
+  display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 12px;
-  padding: 28px 20px;
+  gap: 2px;
 }
 
 .face svg { overflow: visible; }
-
 .pot { fill: var(--pot); }
 .pot-rim { fill: var(--pot-rim); }
 .trunk { fill: none; stroke: var(--trunk); stroke-width: 9; stroke-linecap: round; }
 .leaf-a { fill: var(--leaf); }
 .leaf-b, .leaf-d { fill: var(--leaf-dark); }
 .leaf-c { fill: var(--leaf-light); }
-
 .eyes { fill: #2b2818; }
 .mouth { fill: none; stroke: #2b2818; stroke-width: 3; stroke-linecap: round; }
 
-/* --- emotion states --- */
-/* The 12 frames (6 states × 2) are driven by JS (ui/main.js), which sets
-   eye rx/ry, the mouth path and the whole-face transform. CSS only adds a
-   smooth transition between frames and the clickable affordance. */
+/* The 12 frames are driven by JS; CSS only adds transitions. */
 .face svg {
   transition: transform 0.35s ease;
   transform-origin: 100px 90px;
@@ -51,20 +59,130 @@ body {
 }
 .face[data-state="greeted"] svg { transition: transform 0.18s ease-out; }
 
-.name { font-size: 17px; font-weight: 600; }
-.caption { font-size: 12px; color: var(--muted); min-height: 16px; }
+.who { text-align: center; }
+.name { font-size: 15px; font-weight: 600; }
+.caption { font-size: 11px; color: var(--muted); min-height: 14px; }
 
+/* ---- tabs ---- */
+.tabs {
+  display: flex;
+  gap: 4px;
+  background: #e9e4d6;
+  border-radius: 999px;
+  padding: 3px;
+}
+
+.tabs button {
+  flex: 1;
+  border: 0;
+  background: transparent;
+  border-radius: 999px;
+  padding: 5px 0;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.tabs button.active {
+  background: var(--card);
+  color: var(--ink);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+.tab { display: none; flex: 1; min-height: 0; flex-direction: column; gap: 8px; }
+.tab.active { display: flex; }
+
+/* ---- chat ---- */
+.messages {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-right: 2px;
+}
+
+.empty { font-size: 12px; color: var(--muted); text-align: center; margin-top: 18px; line-height: 1.6; }
+
+.bubble {
+  max-width: 84%;
+  padding: 7px 10px;
+  border-radius: 12px;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+
+.bubble.user {
+  align-self: flex-end;
+  background: var(--accent);
+  color: #fff;
+  border-bottom-right-radius: 4px;
+}
+
+.bubble.bot {
+  align-self: flex-start;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-bottom-left-radius: 4px;
+}
+
+.bubble.bot.proactive { border-style: dashed; }
+
+.bubble.typing { color: var(--muted); font-size: 12px; }
+
+.badge {
+  display: inline-block;
+  margin-top: 4px;
+  font-size: 10px;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 1px 6px;
+}
+
+.composer { display: flex; gap: 6px; }
+
+.composer input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 7px 10px;
+  font-size: 13px;
+  background: var(--card);
+  color: var(--ink);
+  outline: none;
+  user-select: text;
+}
+
+.composer input:focus { border-color: var(--accent); }
+.composer button {
+  border: 0;
+  border-radius: 10px;
+  background: var(--accent);
+  color: #fff;
+  padding: 0 14px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.composer button:disabled { opacity: 0.5; cursor: default; }
+
+/* ---- preview tab ---- */
 .states {
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
   gap: 6px;
-  margin-top: 8px;
 }
 
 .states button {
-  border: 1px solid #d8d2c0;
-  background: #fff;
+  border: 1px solid var(--line);
+  background: var(--card);
   border-radius: 999px;
   padding: 5px 12px;
   font-size: 12px;
@@ -76,4 +194,121 @@ body {
   background: var(--accent);
   border-color: var(--accent);
   color: #fff;
+}
+
+.hint {
+  font-size: 11px;
+  color: var(--muted);
+  text-align: center;
+  line-height: 1.6;
+  margin-top: 4px;
+}
+
+/* ---- tools tab ---- */
+.tools { display: flex; gap: 6px; }
+
+button.tool {
+  flex: 1;
+  border: 1px solid var(--line);
+  background: var(--card);
+  border-radius: 10px;
+  padding: 8px 4px;
+  font-size: 12px;
+  color: var(--ink);
+  cursor: pointer;
+}
+button.tool:disabled { opacity: 0.55; cursor: default; }
+button.tool:active:not(:disabled) { background: #f0ece0; }
+
+.switches {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px 10px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: var(--card);
+}
+
+.switches legend {
+  font-size: 10px;
+  color: var(--muted);
+  padding: 0 4px;
+}
+
+.switch {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.switch input { accent-color: var(--accent); }
+
+.status-line { font-size: 10px; color: var(--muted); margin-top: 2px; }
+
+.output {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  font-size: 11px;
+  line-height: 1.5;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px;
+  white-space: pre-wrap;
+  user-select: text;
+}
+
+/* ---- report dialog ---- */
+dialog {
+  width: 320px;
+  max-height: 400px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 0;
+  background: var(--bg);
+  color: var(--ink);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.18);
+}
+
+dialog::backdrop { background: rgba(40, 36, 24, 0.25); }
+
+.dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.dialog-head button {
+  border: 0;
+  background: transparent;
+  font-size: 13px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.report-body {
+  padding: 10px 12px;
+  overflow-y: auto;
+  max-height: 340px;
+  font-size: 12px;
+  line-height: 1.6;
+  user-select: text;
+}
+
+.report-body h1 { font-size: 14px; margin-bottom: 6px; }
+.report-body h2 { font-size: 12px; margin: 10px 0 4px; color: var(--accent); }
+.report-body ul { padding-left: 16px; }
+.report-body li { margin: 2px 0; }
+.report-body blockquote {
+  border-left: 2px solid var(--accent);
+  padding-left: 8px;
+  color: var(--muted);
 }

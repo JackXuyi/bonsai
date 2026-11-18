@@ -8,42 +8,102 @@
   </head>
   <body>
     <main class="app">
-      <!-- L6: the face. 12–20 frame state-machine animation across 6 emotional
-           states; no Live2D (research report §8.3). Each state maps to 2 frames
-           of CSS keyframes in this scaffold. -->
-      <div class="face" data-state="calm" id="face" role="img" aria-label="bonsai face">
-        <svg viewBox="0 0 200 200" width="180" height="180" aria-hidden="true">
-          <!-- pot -->
-          <path class="pot" d="M70 150 h60 l-8 34 h-44 z" />
-          <rect class="pot-rim" x="64" y="142" width="72" height="12" rx="4" />
-          <!-- trunk & branches -->
-          <path class="trunk" d="M96 142 C 96 120 94 108 90 96 M90 104 C 78 100 72 94 68 86" />
-          <!-- foliage -->
-          <circle class="leaf leaf-a" cx="100" cy="66" r="34" />
-          <circle class="leaf leaf-b" cx="66"  cy="76" r="20" />
-          <circle class="leaf leaf-c" cx="134" cy="76" r="20" />
-          <circle class="leaf leaf-d" cx="100" cy="94" r="22" />
-          <!-- eyes & mouth -->
-          <g class="eyes">
-            <ellipse class="eye eye-l" cx="84"  cy="62" rx="6" ry="8" />
-            <ellipse class="eye eye-r" cx="116" cy="62" rx="6" ry="8" />
-          </g>
-          <path class="mouth" d="M92 82 Q 100 88 108 82" />
-        </svg>
-      </div>
+      <!-- L6: the face. 12 frames = 6 states × 2, driven by ui/main.js from
+           the Rust state machine (face:state events). -->
+      <header class="top">
+        <div class="face" data-state="calm" id="face" role="img" aria-label="bonsai face">
+          <svg viewBox="0 0 200 200" width="132" height="132" aria-hidden="true">
+            <path class="pot" d="M70 150 h60 l-8 34 h-44 z" />
+            <rect class="pot-rim" x="64" y="142" width="72" height="12" rx="4" />
+            <path class="trunk" d="M96 142 C 96 120 94 108 90 96 M90 104 C 78 100 72 94 68 86" />
+            <circle class="leaf leaf-a" cx="100" cy="66" r="34" />
+            <circle class="leaf leaf-b" cx="66"  cy="76" r="20" />
+            <circle class="leaf leaf-c" cx="134" cy="76" r="20" />
+            <circle class="leaf leaf-d" cx="100" cy="94" r="22" />
+            <g class="eyes">
+              <ellipse class="eye eye-l" cx="84"  cy="62" rx="6" ry="8" />
+              <ellipse class="eye eye-r" cx="116" cy="62" rx="6" ry="8" />
+            </g>
+            <path class="mouth" d="M92 82 Q 100 88 108 82" />
+          </svg>
+        </div>
+        <div class="who">
+          <p class="name" id="name">阿盆</p>
+          <p class="caption" id="caption">平静地在窗台上待着</p>
+        </div>
+      </header>
 
-      <p class="name" id="name">bonsai</p>
-      <p class="caption" id="caption">growing quietly…</p>
+      <nav class="tabs" id="tabs">
+        <button data-tab="chat" class="active">对话</button>
+        <button data-tab="preview">表情</button>
+        <button data-tab="tools">工具</button>
+      </nav>
 
-      <div class="states" id="states">
-        <button data-state="calm" class="active">平静</button>
-        <button data-state="focused">专注</button>
-        <button data-state="sleepy">困</button>
-        <button data-state="greeted">被搭话</button>
-        <button data-state="displeased">不高兴</button>
-        <button data-state="thinking">思考</button>
-      </div>
+      <!-- 对话 -->
+      <section class="tab active" id="tab-chat">
+        <div class="messages" id="messages">
+          <p class="empty" id="chat-empty">还没聊过。说句话，或者等它自己开口。</p>
+        </div>
+        <form class="composer" id="composer">
+          <input id="input" placeholder="说点什么…" autocomplete="off" />
+          <button type="submit" id="send">发送</button>
+        </form>
+      </section>
+
+      <!-- 表情预览 -->
+      <section class="tab" id="tab-preview">
+        <div class="states" id="states">
+          <button data-state="calm" class="active">平静</button>
+          <button data-state="focused">专注</button>
+          <button data-state="sleepy">困</button>
+          <button data-state="greeted">被搭话</button>
+          <button data-state="displeased">不高兴</button>
+          <button data-state="thinking">思考</button>
+        </div>
+        <p class="hint">点脸 = 打招呼。这里只是预览瞬态表情。</p>
+      </section>
+
+      <!-- 工具：日报 / 整理记忆 / 主动搭话 / 感知开关 -->
+      <section class="tab" id="tab-tools">
+        <div class="tools">
+          <button id="btn-report" class="tool">今日日报</button>
+          <button id="btn-consolidate" class="tool">整理记忆</button>
+          <button id="btn-proactive" class="tool">主动说一句</button>
+        </div>
+
+        <fieldset class="switches">
+          <legend>感知层 · 默认关闭 · 原文不出机器</legend>
+          <label class="switch">
+            <input type="checkbox" id="perc-enabled" />
+            <span>总开关</span>
+          </label>
+          <label class="switch">
+            <input type="checkbox" id="perc-clipboard" />
+            <span>剪贴板</span>
+          </label>
+          <label class="switch">
+            <input type="checkbox" id="perc-app" />
+            <span>前台应用</span>
+          </label>
+          <label class="switch">
+            <input type="checkbox" id="perc-downloads" />
+            <span>下载目录</span>
+          </label>
+          <p class="status-line" id="perception-line">感知层未开启</p>
+        </fieldset>
+
+        <pre class="output" id="output" hidden></pre>
+      </section>
     </main>
+
+    <dialog id="report-dialog">
+      <div class="dialog-head">
+        <span id="report-title">日报</span>
+        <button id="report-close" aria-label="关闭">✕</button>
+      </div>
+      <div class="report-body" id="report-body"></div>
+    </dialog>
+
     <script type="module" src="main.js"></script>
   </body>
 </html>

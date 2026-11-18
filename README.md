@@ -92,7 +92,7 @@ The Rust core implements: L1 perception (per-source switches, default off), L2 m
 
 ## Status
 
-🧱 **Scaffold phase** — toolchain: pnpm + Vite + Tauri 2 (`pnpm app` to run). Two commits: bilingual research docs, then the project scaffold.
+🧱 **Scaffold phase** — toolchain: pnpm + Vite + Tauri 2 (`pnpm app` to run). All six P0 features are implemented in code; the UI has three tabs (chat / face / tools: daily report, consolidate, perception switches, manual proactive nudge). Runtime verification pending.
 
 MVP P0 progress (research report §8.3):
 
