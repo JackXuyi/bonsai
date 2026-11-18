@@ -36,7 +36,9 @@ pub fn run() {
             Some(vec![]),
         ))
         .setup(|app| {
-            // Menu-bar-resident app: no Dock icon on macOS.
+            // Boot to tray: start as a menu-bar resident, no Dock icon. The Dock
+            // tile appears only while the face window is on screen
+            // (see tray::show_main_window).
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
@@ -51,6 +53,11 @@ pub fn run() {
             }
             let store = MemoryStore::open(&db_path)?;
             app.manage(store);
+
+            // L2: nightly consolidation — 03:00 local, catchup on restart.
+            // (Report §4.3: "it thought about what you said last night" is a
+            // real offline job, not a metaphor.)
+            memory::scheduler::spawn(app.handle().clone());
 
             // L3: persona card is plain text + state machine — model-independent.
             // Swapping models swaps only expression, not the being.
@@ -72,12 +79,22 @@ pub fn run() {
 
             Ok(())
         })
+        // Closing the window is "run in the background", not "quit": hide it and
+        // fall back to tray-only so the companion keeps living in the menu bar.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                tray::hide_main_window(window.app_handle());
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             persona::get_persona,
             memory::add_event,
             memory::add_fact,
             memory::search,
             memory::consolidate,
+            memory::forget_session,
+            memory::forget_all,
             generation::scaffold_reply,
             face::face_current,
             face::face_poke,

@@ -1,16 +1,18 @@
 //! L2 — Memory layer: local SQLite, local-first, explainable, forgettable.
 //!
-//! Research constraints (report §4.2):
-//! - Must be explainable: every derived fact traces back to source events.
-//! - Must be forgettable: user says "forget this" → truly delete (compliance
-//!   Art. 16 requires deletability). Superseded facts are stamped `invalid_at`.
-//! - Must be local-first: relationship data never goes to the cloud by default.
-//!
-//! Retrieval plan: hybrid (vector + keyword + time decay). This scaffold ships
-//! the keyword leg (LIKE) only; the vector index is a follow-up milestone.
+//! Research constraints (report §4.2) and plan (docs/zh/plan-memory.md):
+//! - Explainable: every derived fact traces back to source events.
+//! - Forgettable: "forget this" truly deletes (compliance Art. 16).
+//! - Local-first: relationship data never leaves the machine by default.
+//! - Hybrid retrieval: keyword + time decay (vector leg is a follow-up).
 
+pub mod clock;
 pub mod consolidate;
 pub mod db;
+#[cfg(test)]
+pub mod eval;
+pub mod extract;
+pub mod scheduler;
 
 use std::sync::Mutex;
 
@@ -39,9 +41,12 @@ pub fn add_event(
     state: tauri::State<'_, MemoryStore>,
     kind: String,
     content: String,
+    role: Option<String>,
+    session_id: Option<String>,
 ) -> Result<i64, String> {
     let conn = state.inner().0.lock().map_err(|e| e.to_string())?;
-    db::add_event(&conn, &kind, &content).map_err(|e| e.to_string())
+    db::add_event_meta(&conn, &kind, &content, role.as_deref(), session_id.as_deref())
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -54,23 +59,46 @@ pub fn add_fact(
     db::add_fact(&conn, &content, source_event_id).map_err(|e| e.to_string())
 }
 
-/// Hybrid retrieval, keyword leg. Active facts first (not invalidated),
-/// then raw events. Vector + time-decay legs come later.
+/// Hybrid retrieval (keyword + decay). `withDecayed: false` = 翻旧账 mode.
 #[tauri::command]
 pub fn search(
     state: tauri::State<'_, MemoryStore>,
     query: String,
     limit: Option<u32>,
+    with_decayed: Option<bool>,
 ) -> Result<Vec<MemoryHit>, String> {
     let conn = state.inner().0.lock().map_err(|e| e.to_string())?;
-    db::search(&conn, &query, limit.unwrap_or(20).max(1) as usize).map_err(|e| e.to_string())
+    db::search(&conn, &query, limit.unwrap_or(20).max(1) as usize, with_decayed.unwrap_or(true))
+        .map_err(|e| e.to_string())
 }
 
-/// Nightly consolidation job (report §4.3): compress → extract → resolve
-/// contradictions → delete. Exposed as a command for the scaffold so the job
-/// can be triggered manually; the scheduler is a follow-up milestone.
+/// Manual consolidation (frontend button / debugging). The nightly schedule
+/// lives in `scheduler::spawn`.
 #[tauri::command]
 pub fn consolidate(state: tauri::State<'_, MemoryStore>) -> Result<consolidate::Report, String> {
+    let mut conn = state.inner().0.lock().map_err(|e| e.to_string())?;
+    let window_end = clock::now_iso();
+    consolidate::run_with_rules(
+        &mut conn,
+        &consolidate::Options {
+            trigger: "manual",
+            window_start: "1970-01-01T00:00:00Z",
+            window_end: &window_end,
+        },
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// Compliance Art. 16: forget a whole conversation by session id.
+#[tauri::command]
+pub fn forget_session(state: tauri::State<'_, MemoryStore>, session_id: String) -> Result<usize, String> {
     let conn = state.inner().0.lock().map_err(|e| e.to_string())?;
-    consolidate::run(&conn).map_err(|e| e.to_string())
+    db::forget_session(&conn, &session_id).map_err(|e| e.to_string())
+}
+
+/// Compliance Art. 16: forget everything.
+#[tauri::command]
+pub fn forget_all(state: tauri::State<'_, MemoryStore>) -> Result<(), String> {
+    let conn = state.inner().0.lock().map_err(|e| e.to_string())?;
+    db::forget_all(&conn).map_err(|e| e.to_string())
 }

@@ -71,7 +71,7 @@ The Rust core implements: L2 memory (SQLite, local-first), L3 persona card, L4 p
   - [Research report](./docs/en/research-report.md) — founding research: market, feasibility, memory, personality, growth, compliance, MVP, risks
 - 中文
   - [调研报告](./docs/zh/research-report.md) — 立项依据：市场、可行性、记忆、人格、养成、合规、MVP、风险
-  - [方案：三层记忆 + 夜间整理](./docs/zh/plan-memory.md) — MVP P0 第 3 项的实施计划（评审中 → 待实施）
+  - [Plan: three-layer memory + nightly consolidation](./docs/zh/plan-memory.md) — implementation plan for MVP P0 item 3 (M1–M4 implemented)
 
 ## Status
 
@@ -83,7 +83,7 @@ MVP P0 progress (research report §8.3):
 | --- | --- |
 | macOS menu-bar resident + tray + auto-start | 🔨 implemented, not yet runtime-verified (`pnpm app`) |
 | Emotion face: 12-frame state machine | 🔨 Rust-owned state machine (time-derived base state + transient states + `face:state` events) with 6 states × 2 frames rendered by the frontend; runtime verification pending |
-| Three-layer memory + nightly consolidation | 🟡 SQLite schema + keyword retrieval + dedupe; extraction/contradiction resolution need the model layer |
+| Three-layer memory + nightly consolidation | 🔨 three layers live (events → facts → preferences/boundaries): schema v2 migration, rule-based extraction behind the `FactExtractor` trait (cloud model plugs into the same interface), 5-stage consolidate pipeline (extract → merge → contradiction resolution → promotion/deletion), 03:00 scheduler + catchup + double idempotency, time-decayed retrieval; the three eval metrics (hit >85% / misremember <1% / decay correctness 100%) are permanent CI tests (docs/zh/plan-memory.md) |
 | Persona card v1 + consistency test suite | 🟡 card v1 done; test suite (20 scenarios × 5 turns) not started |
 | 1 proactive message/day + rate limits + one-click off | 🟡 decision model done with tests; L1 perception & generation pipeline missing |
 | One real job (daily digest of clipboard/downloads) | ⬜ not started |
