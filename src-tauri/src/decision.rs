@@ -84,6 +84,37 @@ pub fn should_speak(
     Decision::Speak
 }
 
+// ---------------------------------------------------------------- command
+
+/// L4 entry: run `should_speak` on the latest L1 signals. The frontend (or a
+/// future proactive loop) calls this; the daily quota lives in `AppState`, so
+/// repeated calls respect the 1-per-day cap. L1 never decides on its own.
+#[tauri::command]
+pub fn evaluate(
+    store: tauri::State<'_, crate::memory::MemoryStore>,
+    perception: tauri::State<'_, crate::perception::PerceptionState>,
+    app_state: tauri::State<'_, crate::AppState>,
+) -> Result<Decision, String> {
+    let signals = perception
+        .inner()
+        .latest
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone();
+    // Value input: how much did L1 record today (worth talking about?).
+    let day = chrono::Local::now().date_naive();
+    let signals_today = crate::report::local_day_window(day)
+        .and_then(|(start, end)| {
+            let conn = store.inner().0.lock().ok()?;
+            crate::memory::db::events_in_window(&conn, &start, &end).ok()
+        })
+        .map(|events| events.iter().filter(|e| e.kind == "perception").count())
+        .unwrap_or(0);
+    let input = crate::perception::decision_input(&signals, signals_today);
+    let mut proactivity = app_state.proactivity.lock().map_err(|e| e.to_string())?;
+    Ok(should_speak(&input, &mut proactivity, DEFAULT_DAILY_LIMIT))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

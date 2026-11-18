@@ -77,7 +77,7 @@ pnpm app          # run the desktop app (tauri dev; auto-starts vite on :1420)
 pnpm app:build    # production bundle
 ```
 
-The Rust core implements: L2 memory (SQLite, local-first), L3 persona card, L4 proactivity decision model, L5 anti-sycophancy filter — each with unit tests. L1 perception and the LLM dialogue pipeline (local LLM first) are not implemented yet.
+The Rust core implements: L1 perception (per-source switches, default off), L2 memory (SQLite, local-first), L3 persona card, L4 proactivity decision model, L5 anti-sycophancy filter, local LLM access (Ollama-compatible) and the daily report — each with unit tests. The LLM dialogue pipeline (persona injection → local model → filter) is not wired yet.
 
 ## Documentation
 
@@ -100,9 +100,9 @@ MVP P0 progress (research report §8.3):
 | Emotion face: 12-frame state machine | 🔨 Rust-owned state machine (time-derived base state + transient states + `face:state` events) with 6 states × 2 frames rendered by the frontend; runtime verification pending |
 | Three-layer memory + nightly consolidation | 🔨 three layers live (events → facts → preferences/boundaries): schema v2 migration, rule-based extraction behind the `FactExtractor` trait (the model layer plugs into the same interface, local LLM first), 5-stage consolidate pipeline (extract → merge → contradiction resolution → promotion/deletion), 03:00 scheduler + catchup + double idempotency, time-decayed retrieval; the three eval metrics (hit >85% / misremember <1% / decay correctness 100%) are permanent CI tests (docs/zh/plan-memory.md) |
 | Persona card v1 + consistency test suite | 🔨 card v1.1 (explicit L1/L2 split + structured boundaries + machine-readable disagreement budget + backward-compatible v1 loading + strict validation), deterministic prompt renderer (L3 references face state), 20-scenario × 5-turn suite, eval harness (Mock backend passes the full CI gate: 10/10 boundaries held, 8/10 disagreement rate, 0 drift); real-model scoring awaits the cloud pipeline (docs/zh/plan-persona.md) |
-| 1 proactive message/day + rate limits + one-click off | 🟡 decision model done with tests; L1 perception & generation pipeline missing |
-| One real job (daily digest of clipboard/downloads) | ⬜ not started |
+| 1 proactive message/day + rate limits + one-click off | 🟡 decision model + L1 perception layer done (front app / idle / clipboard / downloads, per-source switches default-off, raw text never leaves the machine, `decision::evaluate` wires L1→L4); generation pipeline (persona injection → local LLM → anti-sycophancy filter) pending |
+| One real job (daily digest of clipboard/downloads) | 🔨 done: aggregates the day's perception events + memory delta into one markdown page (`daily_report` command), optional one-line local-LLM summary with rule-based fallback, reports persisted to app_data/reports/ |
 
-Blockers on the critical path: L1 perception layer, the LLM dialogue pipeline (persona injection → local LLM → anti-sycophancy filter), runtime verification via `pnpm app`.
+Blockers on the critical path: the LLM dialogue pipeline (persona injection → local LLM → anti-sycophancy filter), runtime verification via `pnpm app`.
 
 ## Documentation

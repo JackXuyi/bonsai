@@ -2,7 +2,8 @@
 //!
 //! Layered architecture (see docs/zh/research-report.md §8.2):
 //! - L0 Shell:       Tauri 2, menu-bar resident, auto-start at login
-//! - L1 Perception:  (not implemented in scaffold) raw text never leaves the machine
+//! - L1 Perception:  per-source switches, default off; local-only labels
+//!   (front app / idle / clipboard / downloads) — see perception.rs
 //! - L2 Memory:      local SQLite (events / facts / preferences / boundaries)
 //! - L3 Personality: persona.json, model-independent
 //! - L4 Decision:    "should it speak?" interruptibility model
@@ -14,7 +15,9 @@ pub mod face;
 pub mod generation;
 pub mod llm;
 pub mod memory;
+pub mod perception;
 pub mod persona;
+pub mod report;
 pub mod tray;
 
 use memory::MemoryStore;
@@ -23,7 +26,7 @@ use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
 /// L4 runtime state shared across the app.
 pub struct AppState {
-    pub proactivity: decision::ProactivityState,
+    pub proactivity: std::sync::Mutex<decision::ProactivityState>,
 }
 
 pub fn run() {
@@ -55,6 +58,18 @@ pub fn run() {
             let store = MemoryStore::open(&db_path)?;
             app.manage(store);
 
+            // L1: perception — managed state (latest signals + collector with
+            // primed downloads dedup) and the poll thread. Config is per-source
+            // and defaults to all-off; the poll loop only records what the
+            // user explicitly enabled.
+            let cfg_path = db_path.parent().unwrap().join("perception.json");
+            app.manage(perception::PerceptionState {
+                latest: std::sync::Mutex::new(perception::LatestSignals::default()),
+                collector: std::sync::Mutex::new(perception::Collector::primed()),
+                cfg_path: cfg_path.clone(),
+            });
+            perception::spawn(app.handle().clone(), cfg_path);
+
             // L2: nightly consolidation — 03:00 local, catchup on restart.
             // (Report §4.3: "it thought about what you said last night" is a
             // real offline job, not a metaphor.)
@@ -66,7 +81,7 @@ pub fn run() {
 
             // L4: decision-layer runtime state.
             app.manage(AppState {
-                proactivity: decision::ProactivityState::default(),
+                proactivity: std::sync::Mutex::new(decision::ProactivityState::default()),
             });
 
             // L6: face state machine — Rust owns the state, the frontend only
@@ -100,6 +115,11 @@ pub fn run() {
             face::face_current,
             face::face_poke,
             face::face_preview,
+            perception::perception_get_config,
+            perception::perception_set_config,
+            perception::perception_status,
+            decision::evaluate,
+            report::daily_report,
         ])
         .run(tauri::generate_context!())
         .expect("error while running bonsai");

@@ -407,6 +407,56 @@ pub fn stale_low_confidence_facts(
     rows.collect()
 }
 
+// ---------------------------------------------------------- time-window reads
+
+/// All events in an ISO-time window `[start, end)`, oldest first.
+/// Feeds the daily report and the proactive-candidate value heuristic.
+pub fn events_in_window(
+    conn: &Connection,
+    start_iso: &str,
+    end_iso: &str,
+) -> rusqlite::Result<Vec<EventRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, ts, kind, role, session_id, content FROM events
+         WHERE ts >= ?1 AND ts < ?2 ORDER BY id ASC",
+    )?;
+    let rows = stmt.query_map(params![start_iso, end_iso], |row| {
+        Ok(EventRow {
+            id: row.get(0)?,
+            ts: row.get(1)?,
+            kind: row.get(2)?,
+            role: row.get(3)?,
+            session_id: row.get(4)?,
+            content: row.get(5)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// Facts created in the window (regardless of validity — the report shows
+/// what was *learned* that day, corrections included).
+pub fn facts_in_window(
+    conn: &Connection,
+    start_iso: &str,
+    end_iso: &str,
+) -> rusqlite::Result<Vec<ActiveFact>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, ts, content, confidence, importance, source_event_id FROM facts
+         WHERE ts >= ?1 AND ts < ?2 ORDER BY id ASC",
+    )?;
+    let rows = stmt.query_map(params![start_iso, end_iso], |row| {
+        Ok(ActiveFact {
+            id: row.get(0)?,
+            ts: row.get(1)?,
+            content: row.get(2)?,
+            confidence: row.get(3)?,
+            importance: row.get(4)?,
+            source_event_id: row.get(5)?,
+        })
+    })?;
+    rows.collect()
+}
+
 // ------------------------------------------------- retrieval (M4: decayed hybrid)
 
 /// Parse an RFC3339 ts; unparsable strings are treated as "fresh" (age 0).
