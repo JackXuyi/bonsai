@@ -10,6 +10,7 @@
 //! - L6 Presentation: frontend in ../ui
 
 pub mod decision;
+pub mod face;
 pub mod generation;
 pub mod memory;
 pub mod persona;
@@ -60,6 +61,11 @@ pub fn run() {
                 proactivity: decision::ProactivityState::default(),
             });
 
+            // L6: face state machine — Rust owns the state, the frontend only
+            // renders the 12 frames (6 states × 2 frames).
+            app.manage(std::sync::Mutex::new(face::FaceController::default()));
+            face::spawn_tick_loop(app.handle().clone());
+
             // L0: tray icon + menu. The main window is created lazily on click,
             // keeping "boot to tray ready" fast.
             tray::setup(app)?;
@@ -73,6 +79,9 @@ pub fn run() {
             memory::search,
             memory::consolidate,
             generation::scaffold_reply,
+            face::face_current,
+            face::face_poke,
+            face::face_preview,
         ])
         .run(tauri::generate_context!())
         .expect("error while running bonsai");

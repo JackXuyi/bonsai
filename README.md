@@ -81,7 +81,7 @@ MVP P0 progress (research report §8.3):
 | P0 item | State |
 | --- | --- |
 | macOS menu-bar resident + tray + auto-start | 🔨 implemented, not yet runtime-verified (`pnpm app`) |
-| Emotion face: 12-frame state machine | 🟡 6 states × 2 CSS keyframes, demo-driven (not yet wired to L4) |
+| Emotion face: 12-frame state machine | 🔨 Rust-owned state machine (time-derived base state + transient states + `face:state` events) with 6 states × 2 frames rendered by the frontend; runtime verification pending |
 | Three-layer memory + nightly consolidation | 🟡 SQLite schema + keyword retrieval + dedupe; extraction/contradiction resolution need the model layer |
 | Persona card v1 + consistency test suite | 🟡 card v1 done; test suite (20 scenarios × 5 turns) not started |
 | 1 proactive message/day + rate limits + one-click off | 🟡 decision model done with tests; L1 perception & generation pipeline missing |
