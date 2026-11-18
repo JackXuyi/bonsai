@@ -74,4 +74,19 @@ The Rust core implements: L2 memory (SQLite, local-first), L3 persona card, L4 p
 
 ## Status
 
-📋 Project initialization phase — research compiled into bilingual docs; implementation not started.
+🧱 **Scaffold phase** — toolchain: pnpm + Vite + Tauri 2 (`pnpm app` to run). Two commits: bilingual research docs, then the project scaffold.
+
+MVP P0 progress (research report §8.3):
+
+| P0 item | State |
+| --- | --- |
+| macOS menu-bar resident + tray + auto-start | 🔨 implemented, not yet runtime-verified (`pnpm app`) |
+| Emotion face: 12-frame state machine | 🟡 6 states × 2 CSS keyframes, demo-driven (not yet wired to L4) |
+| Three-layer memory + nightly consolidation | 🟡 SQLite schema + keyword retrieval + dedupe; extraction/contradiction resolution need the model layer |
+| Persona card v1 + consistency test suite | 🟡 card v1 done; test suite (20 scenarios × 5 turns) not started |
+| 1 proactive message/day + rate limits + one-click off | 🟡 decision model done with tests; L1 perception & generation pipeline missing |
+| One real job (daily digest of clipboard/downloads) | ⬜ not started |
+
+Blockers on the critical path: L1 perception layer, cloud dialogue pipeline (persona injection → cloud model → anti-sycophancy filter), runtime verification via `pnpm app`.
+
+## Documentation
