@@ -3,12 +3,15 @@
 //! `FactExtractor` decouples the consolidate pipeline from the model layer:
 //! - `RuleExtractor` — offline fallback; deterministic, zero-dependency.
 //! - `LocalExtractor` — the default model leg: a local LLM behind an
-//!   Ollama-compatible API; lands with the LLM pipeline (plan M5);
-//!   same trait, structured JSON in / out. Cloud APIs are an optional,
-//!   explicit opt-in — not part of P0.
+//!   Ollama-compatible API; same trait, structured JSON in / out. On any
+//!   failure (server down, timeout, bad output) it falls back to the rules,
+//!   per plan §5.2 — the pipeline never loses events to a bad model night.
+//!   Cloud APIs are an explicit opt-in and deliberately NOT implemented.
 //!
 //! Per the plan's open-question recommendation, stage ① (session summaries)
 //! is NOT built in P0, and `importance` stays a column without logic.
+
+use serde::Deserialize;
 
 use super::db::{ActiveFact, EventRow};
 
@@ -178,6 +181,133 @@ impl FactExtractor for RuleExtractor {
         }
         out
     }
+}
+
+// ------------------------------------------------------------------ local LLM leg
+
+/// One extraction pass over a day's utterances. Local 7B models can take a
+/// while on first load; on timeout the caller falls back to rules.
+pub const EXTRACT_TIMEOUT_SECS: u64 = crate::llm::EXTRACT_TIMEOUT_SECS;
+
+/// Model leg of the extractor (plan §5.2). One LLM call per consolidate run:
+/// all of the day's utterances in, a JSON array of candidate facts out.
+/// Any failure → `RuleExtractor` fallback (plan §5.2), so the pipeline's
+/// guarantees never depend on the model behaving.
+pub struct LocalExtractor {
+    pub client: crate::llm::OllamaClient,
+}
+
+impl LocalExtractor {
+    pub fn new() -> Self {
+        LocalExtractor { client: crate::llm::OllamaClient::from_env() }
+    }
+
+    /// The model call, isolated so `extract` can fall back on any error.
+    fn extract_via_llm(&self, digest: &SessionDigest) -> Option<Vec<CandidateFact>> {
+        let reply = self
+            .client
+            .chat(
+                &[
+                    crate::llm::Msg::system(EXTRACTION_SYSTEM_PROMPT),
+                    crate::llm::Msg::user(extraction_user_prompt(digest)),
+                ],
+                0.2, // extraction wants determinism, not creativity
+                EXTRACT_TIMEOUT_SECS,
+            )
+            .ok()?;
+        parse_candidates(&reply, digest.user_utterances)
+    }
+}
+
+impl Default for LocalExtractor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FactExtractor for LocalExtractor {
+    fn extract(&self, digest: &SessionDigest) -> Vec<CandidateFact> {
+        self.extract_via_llm(digest).unwrap_or_else(|| RuleExtractor.extract(digest))
+    }
+}
+
+const EXTRACTION_SYSTEM_PROMPT: &str = r#"你是记忆抽取模块。输入是一天的用户发言（带编号）和当前已知事实。你的任务：从发言中提炼出值得长期记住的候选事实。
+
+只输出一个 JSON 数组，不要输出任何其他文字、解释或 markdown。每条候选的格式：
+{"idx": <发言编号>, "fact": "<一句话事实，第三人称>", "category": "like|habit|context|boundary", "confidence": <0.0-1.0>, "correction": <true|false>}
+
+规则：
+- fact 必须是可断言的单一事实，改写为第三人称（如用户说"我喜欢雨天"→"用户喜欢雨天"）。
+- category：like=显式喜好/厌恶；habit=行为规律；context=稳定背景；boundary=用户明确说"别/不要再做X"。
+- correction=true 表示该发言在更正一个已有事实（"说错了，其实是…"）。
+- 只抽有把握的。宁漏勿误：拿不准就不要输出。没有可抽取的内容时输出 []。"#;
+
+/// Build the user-side prompt: numbered utterances + the active facts (so the
+/// model can mark corrections and avoid re-stating what is already known).
+fn extraction_user_prompt(digest: &SessionDigest) -> String {
+    let mut out = String::with_capacity(1024);
+    out.push_str("【今日用户发言】\n");
+    for (i, ev) in digest.user_utterances.iter().enumerate() {
+        out.push_str(&format!("{}. {}\n", i, ev.content));
+    }
+    if !digest.active_facts.is_empty() {
+        out.push_str("\n【当前已知事实】\n");
+        for f in digest.active_facts {
+            out.push_str(&format!("- {}\n", f.content));
+        }
+    }
+    out.push_str("\n请输出候选事实 JSON 数组。");
+    out
+}
+
+/// Strip markdown code fences the model may wrap its array in.
+fn strip_fences(text: &str) -> &str {
+    let t = text.trim();
+    if let Some(rest) = t.strip_prefix("```") {
+        // drop an optional language tag line ("json")
+        let rest = rest.trim_start_matches(['j', 's', 'o', 'n']).trim_start_matches('\n');
+        return rest.strip_suffix("```").unwrap_or(rest).trim();
+    }
+    t
+}
+
+#[derive(Debug, Deserialize)]
+struct RawCandidate {
+    idx: i64,
+    fact: String,
+    category: String,
+    #[serde(default)]
+    confidence: Option<f64>,
+    #[serde(default)]
+    correction: bool,
+}
+
+/// Parse the model's JSON array into candidates. Traceability invariant: a
+/// candidate is only kept if `idx` maps to a real utterance event. Unknown
+/// categories and out-of-range confidences are dropped/clamped (宁漏勿误).
+fn parse_candidates(reply: &str, events: &[EventRow]) -> Option<Vec<CandidateFact>> {
+    let cleaned = strip_fences(reply);
+    let raw: Vec<RawCandidate> = serde_json::from_str(cleaned).ok()?;
+    let mut out = Vec::new();
+    for c in raw {
+        let ev = events.get(c.idx.max(0) as usize)?;
+        let category = match c.category.as_str() {
+            "like" => Category::Like,
+            "habit" => Category::Habit,
+            "context" => Category::Context,
+            "boundary" => Category::Boundary,
+            _ => continue,
+        };
+        let confidence = c.confidence.unwrap_or(0.7).clamp(0.0, 1.0);
+        out.push(CandidateFact {
+            content: c.fact.trim().to_string(),
+            category,
+            confidence,
+            source_event_id: Some(ev.id),
+            is_correction: c.correction,
+        });
+    }
+    Some(out)
 }
 
 #[cfg(test)]

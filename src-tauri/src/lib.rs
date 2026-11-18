@@ -12,6 +12,7 @@
 pub mod decision;
 pub mod face;
 pub mod generation;
+pub mod llm;
 pub mod memory;
 pub mod persona;
 pub mod tray;
