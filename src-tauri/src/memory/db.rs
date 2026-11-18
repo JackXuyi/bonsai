@@ -391,6 +391,55 @@ pub fn active_facts(conn: &Connection) -> rusqlite::Result<Vec<ActiveFact>> {
     rows.collect()
 }
 
+/// Active user boundaries (prompt-injection source, plan-persona §3.2
+/// 双源对齐: card boundaries + user-collected boundaries merged at render).
+pub fn boundaries(conn: &Connection) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT content FROM boundaries ORDER BY id ASC")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    rows.collect()
+}
+
+/// Last `max_turns` dialogue turns for a session, oldest first. Dialogue
+/// events carry kind="dialogue", role user/assistant, and a session id.
+pub fn dialogue_history(
+    conn: &Connection,
+    session_id: &str,
+    max_turns: usize,
+) -> rusqlite::Result<Vec<crate::persona::eval::Turn>> {
+    let mut stmt = conn.prepare(
+        "SELECT role, content FROM events
+         WHERE session_id = ?1 AND kind = 'dialogue'
+           AND role IN ('user', 'assistant')
+         ORDER BY id DESC LIMIT ?2",
+    )?;
+    let mut rows: Vec<(String, String)> = stmt
+        .query_map(params![session_id, (max_turns * 2) as i64], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<_, _>>()?;
+    rows.reverse(); // oldest first
+
+    // Pair consecutive user → assistant rows into turns. An assistant row
+    // without a preceding user row is a proactive message — kept, with a
+    // synthetic user marker, so later chats still see what the companion
+    // said on its own. A user row with no assistant reply is dropped (the
+    // turn scrolled out of the limit or the model died mid-turn).
+    let mut out = Vec::new();
+    let mut pending_user: Option<String> = None;
+    for (role, content) in rows {
+        match role.as_str() {
+            "user" => pending_user = Some(content),
+            "assistant" => {
+                let user =
+                    pending_user.take().unwrap_or_else(|| "(盆栽主动说的)".to_string());
+                out.push(crate::persona::eval::Turn { user, assistant: content });
+            }
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
 /// Facts whose ts is older than `iso_cutoff` and confidence below `max_conf`.
 /// Used by stage ⑤ deletion (defensive: rule-extracted facts stay ≥ 0.5,
 /// so this currently only sweeps legacy/manual low-confidence entries).

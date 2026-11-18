@@ -81,6 +81,12 @@ pub fn load() -> Persona {
         .expect("persona.json is invalid — it is versioned like code and must always parse")
 }
 
+/// The dialogue backend used at runtime: the local LLM (decision
+/// 2026-11-18, local-first). Tests construct `MockBackend` directly.
+pub fn backend() -> Result<Box<dyn eval::DialogueBackend>, String> {
+    Ok(Box::new(eval::LocalBackend::new()))
+}
+
 /// Parse + validate a card from raw JSON. v1.1 gets strict validation;
 /// v1 cards are auto-mapped (plan §3.1) and lightly validated so old files
 /// keep loading forever.

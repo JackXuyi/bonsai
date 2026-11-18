@@ -11,6 +11,7 @@
 //! - L6 Presentation: frontend in ../ui
 
 pub mod decision;
+pub mod dialogue;
 pub mod face;
 pub mod generation;
 pub mod llm;
@@ -84,10 +85,21 @@ pub fn run() {
                 proactivity: std::sync::Mutex::new(decision::ProactivityState::default()),
             });
 
+            // LLM: spawn the bundled Ollama sidecar (best effort — missing
+            // binary = degraded mode, rule legs keep working). Health check
+            // runs in the background; `llm:ready` fires when the server is up.
+            app.manage(llm::serve::ServerHandle::default());
+            llm::serve::start(app.handle().clone());
+
             // L6: face state machine — Rust owns the state, the frontend only
             // renders the 12 frames (6 states × 2 frames).
             app.manage(std::sync::Mutex::new(face::FaceController::default()));
             face::spawn_tick_loop(app.handle().clone());
+
+            // L5 dialogue pipeline + proactive loop: L4 owns the 1-per-day
+            // quota and idle gates; this loop only speaks on a `Speak` verdict
+            // (and stays silent when the local model is down).
+            dialogue::spawn_proactive(app.handle().clone());
 
             // L0: tray icon + menu. The main window is created lazily on click,
             // keeping "boot to tray ready" fast.
@@ -119,8 +131,16 @@ pub fn run() {
             perception::perception_set_config,
             perception::perception_status,
             decision::evaluate,
+            dialogue::dialogue_chat,
+            dialogue::dialogue_proactive_now,
             report::daily_report,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running bonsai");
+        .build(tauri::generate_context!())
+        .expect("error while running bonsai")
+        .run(|app, event| {
+            // Take the bundled LLM server down with us — nothing may leak.
+            if let tauri::RunEvent::Exit = event {
+                app.state::<llm::serve::ServerHandle>().stop();
+            }
+        });
 }

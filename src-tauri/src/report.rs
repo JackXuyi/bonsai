@@ -22,14 +22,14 @@ pub fn local_day_window(day: NaiveDate) -> Option<(String, String)> {
 
 /// Everything one report needs, already split by signal kind.
 pub struct DayDigest {
-    clipboards: Vec<String>,
-    downloads: Vec<String>,
-    apps: Vec<(String, usize)>,
-    facts: Vec<String>,
-    total_events: usize,
+    pub clipboards: Vec<String>,
+    pub downloads: Vec<String>,
+    pub apps: Vec<(String, usize)>,
+    pub facts: Vec<String>,
+    pub total_events: usize,
 }
 
-fn collect(conn: &Connection, day: NaiveDate) -> DayDigest {
+pub fn collect(conn: &Connection, day: NaiveDate) -> DayDigest {
     let (start, end) = match local_day_window(day) {
         Some(w) => w,
         None => return DayDigest {
@@ -222,12 +222,17 @@ mod tests {
     use super::*;
 
     fn mem() -> Connection {
-        // Fresh file per process: tests re-run against an empty store
-        // (accumulated rows from earlier runs would break counts).
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+        // Unique file per call: tests run in parallel inside one process, and
+        // a shared path lets one test's rows leak into another's window.
         let dir = std::env::temp_dir().join("bonsai-report-test");
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(format!("test-{}.sqlite3", std::process::id()));
-        let _ = std::fs::remove_file(&path);
+        let path = dir.join(format!(
+            "test-{}-{}.sqlite3",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::SeqCst)
+        ));
         db::open(&path).unwrap()
     }
 
