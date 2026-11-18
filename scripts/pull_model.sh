@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Pull the default model into the project-local model store (.llm/models).
-#   pnpm llm:pull            # qwen2.5:7b (default)
+#   pnpm llm:pull            # qwen3:4b (default)
 #   pnpm llm:pull <model>    # any other tag
 #
 # Uses the sidecar binary itself as CLI/server — no system Ollama required.
@@ -9,7 +9,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-MODEL="${1:-qwen2.5:7b}"
+MODEL="${1:-qwen3:4b}"
 PORT="${BONSAI_LLM_PORT:-11435}"
 
 ARCH="$(uname -m)"
@@ -33,10 +33,15 @@ SERVER_PID=$!
 trap 'kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null' EXIT
 
 # wait for the server
+up=0
 for i in $(seq 1 30); do
-  curl -sf "http://127.0.0.1:$PORT/api/version" >/dev/null && break
+  if curl -sf "http://127.0.0.1:$PORT/api/version" >/dev/null; then
+    up=1
+    break
+  fi
   sleep 1
 done
+[ "$up" -eq 1 ] || { echo "error: temporary ollama server failed to start (see output above)" >&2; exit 1; }
 
 echo "pulling $MODEL into $MODELS_DIR ..."
 "$BIN" pull "$MODEL"

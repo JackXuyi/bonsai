@@ -15,14 +15,14 @@
 //!
 //! Config via env (so the binary needs no UI settings yet):
 //! - `OLLAMA_HOST` — base URL, default `http://127.0.0.1:11435`
-//! - `BONSAI_LLM_MODEL` — model tag, default `qwen2.5:7b`
+//! - `BONSAI_LLM_MODEL` — model tag, default `qwen3:4b`
 
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_BASE_URL: &str = "http://127.0.0.1:11435";
-pub const DEFAULT_MODEL: &str = "qwen2.5:7b";
+pub const DEFAULT_MODEL: &str = "qwen3:4b";
 /// One dialogue turn. Long enough for a cold-loaded 7B model on Apple Silicon.
 pub const CHAT_TIMEOUT_SECS: u64 = 120;
 /// One extraction pass over a day's utterances (plan §5.2: on timeout the

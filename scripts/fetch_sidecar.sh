@@ -22,10 +22,24 @@ case "$ARCH" in
 esac
 
 DEST="$BIN_DIR/ollama-$TARGET"
-if [ -x "$DEST" ]; then
+
+# build.rs generates a tiny placeholder script at the same path when the real
+# binary is missing (keeps cargo check / tauri dev working). Treat a file that
+# small / self-labelled as "not installed" so the real download can proceed.
+is_placeholder() {
+  [ "$(wc -c < "$DEST" 2>/dev/null || echo 0)" -lt 1048576 ] \
+    && head -c 256 "$DEST" 2>/dev/null | grep -q "bonsai placeholder"
+}
+
+if [ -x "$DEST" ] && ! is_placeholder; then
   echo "sidecar already present: $DEST"
   "$DEST" --version || true
   exit 0
+fi
+
+if is_placeholder; then
+  echo "placeholder detected at $DEST — fetching the real binary"
+  rm -f "$DEST"
 fi
 
 VERSION="${OLLAMA_VERSION:-0.40.16}"

@@ -59,7 +59,7 @@ L0 壳层     Tauri 2（Rust core），菜单栏常驻，开机自启
 
 ```sh
 pnpm llm:sidecar          # 把 Ollama 二进制取回 src-tauri/binaries/
-pnpm llm:pull             # 拉取 qwen2.5:7b 到 .llm/models（默认模型）
+pnpm llm:pull             # 拉取 qwen3:4b 到 .llm/models（默认模型）
 ```
 
 没做这两步也不影响任何功能：构建期会自动生成占位 sidecar，模型腿自动降级为确定性的规则兜底（日志里只有一行警告）。可用环境变量覆盖：`OLLAMA_HOST`（服务地址）、`BONSAI_LLM_MODEL`（模型 tag）。
