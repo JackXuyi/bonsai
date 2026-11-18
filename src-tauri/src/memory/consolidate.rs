@@ -229,6 +229,20 @@ pub fn run_with_rules(conn: &mut Connection, opts: &Options) -> rusqlite::Result
     run(conn, &RuleExtractor, opts)
 }
 
+/// Model-first entry (plan §5.2): use `LocalExtractor` when the local LLM
+/// is reachable, fall back to rules otherwise. One cheap probe decides —
+/// a dead server must never cost the pipeline its guarantees.
+pub fn run_with_local_or_rules(conn: &mut Connection, opts: &Options) -> rusqlite::Result<Report> {
+    let local = super::extract::LocalExtractor::new();
+    if local.client.is_up() {
+        log::info!("consolidate: model leg = LocalExtractor ({})", local.client.model());
+        run(conn, &local, opts)
+    } else {
+        log::info!("consolidate: local LLM unreachable, falling back to RuleExtractor");
+        run_with_rules(conn, opts)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

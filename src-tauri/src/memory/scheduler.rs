@@ -138,7 +138,7 @@ fn tick(app: &AppHandle) -> Result<(), String> {
         window_end: &window_end,
     };
 
-    let report = consolidate::run_with_rules(&mut conn, &opts)
+    let report = consolidate::run_with_local_or_rules(&mut conn, &opts)
         .map_err(|e| format!("consolidate run failed: {e}"))?;
     drop(conn);
 

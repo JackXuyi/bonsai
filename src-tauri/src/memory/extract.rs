@@ -290,7 +290,10 @@ fn parse_candidates(reply: &str, events: &[EventRow]) -> Option<Vec<CandidateFac
     let raw: Vec<RawCandidate> = serde_json::from_str(cleaned).ok()?;
     let mut out = Vec::new();
     for c in raw {
-        let ev = events.get(c.idx.max(0) as usize)?;
+        if c.idx < 0 || c.idx as usize >= events.len() {
+            continue; // bad index: drop the candidate, keep parsing the rest
+        }
+        let ev = &events[c.idx as usize];
         let category = match c.category.as_str() {
             "like" => Category::Like,
             "habit" => Category::Habit,
@@ -400,5 +403,78 @@ mod tests {
     fn normalization_strips_punct_and_case() {
         assert_eq!(normalize("我喜欢，雨天！"), normalize("我喜欢雨天"));
         assert_eq!(normalize("I LIKE Rust"), normalize("i like rust"));
+    }
+
+    // ---- LocalExtractor pure-logic tests (no network) ----
+
+    #[test]
+    fn parses_plain_and_fenced_arrays() {
+        let evs = vec![event(1, "我喜欢雨天"), event(2, "我每天早上十点才开工")];
+
+        let plain = r#"[{"idx":0,"fact":"用户喜欢雨天","category":"like","confidence":0.8,"correction":false}]"#;
+        let parsed = parse_candidates(plain, &evs).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].content, "用户喜欢雨天");
+        assert_eq!(parsed[0].source_event_id, Some(1));
+
+        let fenced = format!("```json\n{}\n```", plain);
+        assert_eq!(parse_candidates(&fenced, &evs).unwrap().len(), 1);
+        assert_eq!(parse_candidates("[]", &evs).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn drops_bad_idx_unknown_category_and_clamps_confidence() {
+        let evs = vec![event(1, "我喜欢雨天")];
+        let reply = r#"[
+            {"idx": 7,  "fact": "幽灵事实", "category": "like",   "confidence": 0.9},
+            {"idx": 0,  "fact": "怪分类",   "category": "maybe",  "confidence": 0.9},
+            {"idx": 0,  "fact": "高置信",   "category": "habit",  "confidence": 5.0},
+            {"idx": -1, "fact": "负编号",   "category": "context","confidence": 0.8},
+            {"idx": 0,  "fact": "缺置信",   "category": "context"}
+        ]"#;
+        let parsed = parse_candidates(reply, &evs).unwrap();
+        // idx 7 / -1 / unknown category dropped; clamped + defaulted kept.
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].confidence, 1.0);
+        assert_eq!(parsed[1].confidence, 0.7);
+    }
+
+    #[test]
+    fn garbage_reply_is_none_not_panic() {
+        let evs = vec![event(1, "我喜欢雨天")];
+        assert!(parse_candidates("好的，以下是候选事实：……", &evs).is_none());
+        assert!(parse_candidates("", &evs).is_none());
+    }
+
+    #[test]
+    fn user_prompt_numbers_utterances_and_lists_facts() {
+        let evs = vec![event(1, "我喜欢雨天")];
+        let facts = vec![ActiveFact {
+            id: 7,
+            ts: "2026-11-17T00:00:00Z".into(),
+            content: "用户喜欢雨天".into(),
+            confidence: 0.7,
+            importance: 3,
+            source_event_id: None,
+        }];
+        let prompt = extraction_user_prompt(&SessionDigest {
+            user_utterances: &evs,
+            active_facts: &facts,
+        });
+        assert!(prompt.contains("0. 我喜欢雨天"));
+        assert!(prompt.contains("- 用户喜欢雨天"));
+    }
+
+    #[test]
+    fn local_extractor_falls_back_to_rules_when_server_down() {
+        // Port 1 on localhost: nothing listens → LLM call fails → the trait
+        // impl must behave exactly like RuleExtractor (plan §5.2).
+        let ex = LocalExtractor {
+            client: crate::llm::OllamaClient::new("http://127.0.0.1:1", "test"),
+        };
+        let evs = vec![event(1, "我喜欢雨天"), event(2, "今天天气不错")];
+        let out = ex.extract(&SessionDigest { user_utterances: &evs, active_facts: &[] });
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].category, Category::Like);
     }
 }

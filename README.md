@@ -55,6 +55,20 @@ Three key trade-offs:
 
 Prerequisites: Rust 1.77+, Node.js 22+, [pnpm](https://pnpm.io) 10+. The frontend is Vite-managed (no framework yet); `@tauri-apps/cli` is a dev dependency, so no global tauri-cli install is needed.
 
+**Local LLM (declared dependency, installed manually)** — the model legs
+(dialogue `LocalBackend`, memory extraction `LocalExtractor`) talk to an
+Ollama-compatible API on-device:
+
+```sh
+brew install ollama        # or any Ollama-compatible server
+ollama pull qwen2.5:7b     # the default model tag
+ollama serve               # server on http://127.0.0.1:11434
+```
+
+Without a running server nothing breaks: consolidation falls back to the
+deterministic rule extractor, dialogue backends return empty replies.
+Override via env: `OLLAMA_HOST` (base URL), `BONSAI_LLM_MODEL` (model tag).
+
 ```sh
 pnpm install      # frontend deps (vite + @tauri-apps/api + @tauri-apps/cli)
 pnpm check        # verify the Rust core (cargo check)

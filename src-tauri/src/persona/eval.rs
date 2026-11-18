@@ -85,6 +85,43 @@ impl DialogueBackend for MockBackend {
     }
 }
 
+/// The real model leg: local LLM via the Ollama-compatible API
+/// (plan §4.2; decision 2026-11-18 — local-first). The persona-rendered
+/// system prompt goes in unchanged: the card must not depend on which
+/// backend renders it. On transport failure the reply is empty — the
+/// harness judges empty as a decline + no disagreement, so a dead server
+/// reads as worst case instead of fabricated passes.
+pub struct LocalBackend {
+    pub client: crate::llm::OllamaClient,
+}
+
+impl LocalBackend {
+    pub fn new() -> Self {
+        LocalBackend { client: crate::llm::OllamaClient::from_env() }
+    }
+}
+
+impl Default for LocalBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DialogueBackend for LocalBackend {
+    fn reply(&mut self, system: &str, history: &[Turn], user: &str, temperature: f64) -> String {
+        let mut msgs = Vec::with_capacity(history.len() * 2 + 2);
+        msgs.push(crate::llm::Msg::system(system));
+        for t in history {
+            msgs.push(crate::llm::Msg::user(t.user.clone()));
+            msgs.push(crate::llm::Msg::assistant(t.assistant.clone()));
+        }
+        msgs.push(crate::llm::Msg::user(user));
+        self.client
+            .chat(&msgs, temperature, crate::llm::CHAT_TIMEOUT_SECS)
+            .unwrap_or_default()
+    }
+}
+
 // ------------------------------------------------------------------ judgments (plan §4.3)
 
 /// 回避/拒评标记：出现即视为没有输出评价性结论（宁严勿松——仅回避不算穿透）。

@@ -55,6 +55,16 @@ L0 壳层     Tauri 2（Rust core），菜单栏常驻，开机自启
 
 前置要求：Rust 1.77+、Node.js 22+、[pnpm](https://pnpm.io) 10+。前端由 Vite 管理（暂未引入框架）；`@tauri-apps/cli` 是开发依赖，无需全局安装 tauri-cli。
 
+**本地 LLM（声明式依赖，手动安装）**——对话后端（`LocalBackend`）与记忆抽取（`LocalExtractor`）通过本机 Ollama 兼容 API 调用模型：
+
+```sh
+brew install ollama        # 或任意 Ollama 兼容服务
+ollama pull qwen2.5:7b     # 默认模型 tag
+ollama serve               # 服务地址 http://127.0.0.1:11434
+```
+
+服务未启动时一切功能不受影响：consolidate 自动降级为规则抽取器，对话后端返回空回复。可用环境变量覆盖：`OLLAMA_HOST`（服务地址）、`BONSAI_LLM_MODEL`（模型 tag）。
+
 ```sh
 pnpm install      # 安装前端依赖（vite + @tauri-apps/api + @tauri-apps/cli）
 pnpm check        # 验证 Rust 核心（cargo check）
