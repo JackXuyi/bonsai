@@ -8,8 +8,9 @@
 src-tauri/target/
 src-tauri/gen/
 
-# Node
+# Node / pnpm
 node_modules/
+dist/
 
 # OS noise
 .DS_Store

@@ -1,0 +1,3 @@
+# pnpm settings (v10+: no longer read from package.json)
+allowBuilds:
+  esbuild: true

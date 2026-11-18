@@ -53,13 +53,14 @@ Three key trade-offs:
 
 ## Running (scaffold)
 
-Prerequisites: Rust 1.77+, Node.js 22+ (frontend is plain static assets — no bundler yet).
+Prerequisites: Rust 1.77+, Node.js 22+, [pnpm](https://pnpm.io) 10+. The frontend is Vite-managed (no framework yet); `@tauri-apps/cli` is a dev dependency, so no global tauri-cli install is needed.
 
 ```sh
-cd src-tauri
-cargo check     # verify the Rust core
-cargo test      # unit tests (memory, decision, generation, persona)
-cargo tauri dev # run the desktop app (requires tauri-cli: cargo install tauri-cli)
+pnpm install      # frontend deps (vite + @tauri-apps/api + @tauri-apps/cli)
+pnpm check        # verify the Rust core (cargo check)
+pnpm test         # Rust unit tests (memory, decision, generation, persona)
+pnpm app          # run the desktop app (tauri dev; auto-starts vite on :1420)
+pnpm app:build    # production bundle
 ```
 
 The Rust core implements: L2 memory (SQLite, local-first), L3 persona card, L4 proactivity decision model, L5 anti-sycophancy filter — each with unit tests. L1 perception and the cloud dialogue pipeline are not implemented yet.

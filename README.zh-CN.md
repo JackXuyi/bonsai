@@ -53,13 +53,14 @@ L0 壳层     Tauri 2（Rust core），菜单栏常驻，开机自启
 
 ## 运行（骨架阶段）
 
-前置要求：Rust 1.77+、Node.js 22+（前端为纯静态资源，暂无打包器）。
+前置要求：Rust 1.77+、Node.js 22+、[pnpm](https://pnpm.io) 10+。前端由 Vite 管理（暂未引入框架）；`@tauri-apps/cli` 是开发依赖，无需全局安装 tauri-cli。
 
 ```sh
-cd src-tauri
-cargo check     # 验证 Rust 核心
-cargo test      # 单元测试（记忆、决策、生成、人格）
-cargo tauri dev # 运行桌面应用（需先安装 tauri-cli：cargo install tauri-cli）
+pnpm install      # 安装前端依赖（vite + @tauri-apps/api + @tauri-apps/cli）
+pnpm check        # 验证 Rust 核心（cargo check）
+pnpm test         # Rust 单元测试（记忆、决策、生成、人格）
+pnpm app          # 运行桌面应用（tauri dev；自动启动 vite :1420）
+pnpm app:build    # 生产构建
 ```
 
 Rust 核心已实现：L2 记忆层（SQLite，本地优先）、L3 人格卡、L4 主动开口决策模型、L5 反谄媚过滤器——均带单元测试。L1 感知层与云端对话管线尚未实现。

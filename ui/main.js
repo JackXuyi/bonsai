@@ -17,10 +17,9 @@ const face = document.getElementById("face");
 const caption = document.getElementById("caption");
 const buttons = document.getElementById("states");
 
-let tauri = null;
-if (window.__TAURI__) {
-  tauri = window.__TAURI__.core ?? window.__TAURI__;
-}
+import { invoke } from "@tauri-apps/api/core";
+
+const tauri = { invoke };
 
 function setState(state) {
   if (!FACE_STATES.includes(state)) return;
