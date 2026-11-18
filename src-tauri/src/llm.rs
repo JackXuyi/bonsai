@@ -53,6 +53,11 @@ struct ChatRequest<'a> {
     model: &'a str,
     messages: &'a [Msg],
     stream: bool,
+    /// Qwen3-class models default to a visible reasoning pass that can burn
+    /// the whole token budget before emitting any answer (observed with
+    /// qwen3:4b: `content` came back empty, `done_reason: length`). Both legs
+    /// want direct output — dialogue for latency, extraction for clean JSON.
+    think: bool,
     options: Options<'a>,
 }
 
@@ -131,6 +136,7 @@ impl OllamaClient {
             model: &self.model,
             messages,
             stream: false,
+            think: false,
             options: Options { temperature, num_ctx: &0 },
         };
         let resp = ureq::AgentBuilder::new()
@@ -173,6 +179,20 @@ mod tests {
     }
 
     #[test]
+    fn chat_request_disables_thinking() {
+        let msgs = vec![Msg::user("hi")];
+        let req = ChatRequest {
+            model: "qwen3:4b",
+            messages: &msgs,
+            stream: false,
+            think: false,
+            options: Options { temperature: 0.7, num_ctx: &0 },
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["think"], serde_json::json!(false));
+    }
+
+    #[test]
     fn is_up_fails_fast_on_closed_port() {
         // Nothing listens here (port 1 on localhost) → probe must return
         // false within the probe timeout, not panic.
@@ -197,7 +217,8 @@ pub mod serve {
 /// touch it — one app, one server, one model store.
 pub const PORT: u16 = 11435;
 
-/// Tauri sidecar file name for the current platform (`ollama-<triple>`).
+/// Tauri sidecar file name for the current platform (`ollama-<triple>`), as
+/// it sits in `src-tauri/binaries/` before the build copies it.
 fn sidecar_name() -> String {
     let arch = match std::env::consts::ARCH {
         "aarch64" => "aarch64",
@@ -207,12 +228,21 @@ fn sidecar_name() -> String {
     format!("ollama-{arch}-apple-darwin")
 }
 
-/// The bundled binary sits next to the app executable in both layouts:
-/// dev = `target/debug/`, packaged macOS = `Contents/MacOS/`.
+/// Candidate paths for the bundled binary, in lookup order.
+///
+/// tauri-build strips the target-triple suffix when it copies `externalBin`
+/// next to the app executable: dev = `target/debug/ollama`, packaged macOS =
+/// `Contents/MacOS/ollama`. The suffixed name is only present if someone
+/// dropped the raw build asset there by hand, so it is just a fallback.
+fn sidecar_candidates() -> Vec<PathBuf> {
+    let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) else {
+        return Vec::new();
+    };
+    vec![dir.join("ollama"), dir.join(sidecar_name())]
+}
+
 fn sidecar_path() -> Option<PathBuf> {
-    let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
-    let path = dir.join(sidecar_name());
-    path.exists().then_some(path)
+    sidecar_candidates().into_iter().find(|p| p.exists())
 }
 
 /// Model store: project-local during dev (so `pnpm llm:pull` and the app
@@ -240,64 +270,137 @@ impl ServerHandle {
     }
 }
 
+/// How one startup attempt ended.
+enum Outcome {
+    /// A server answers on the port and `llm:ready` was emitted.
+    Ready,
+    /// Worth another attempt (port race, child died, cold start timed out).
+    Retry,
+    /// Retrying cannot help (nothing bundled, spawn refused, app shutting down).
+    Fatal,
+}
+
 /// Spawn the sidecar (best effort) and emit `llm:ready` once healthy.
 /// Runs in a background thread: a cold or missing sidecar must never
 /// delay startup — the model legs degrade on their own.
+///
+/// Retries a few times because attempts collide in practice: a sidecar
+/// orphaned by a force-killed dev run keeps the port busy for a moment after
+/// it is killed, and `tauri dev` restarts the app faster than that.
 pub fn start(app: tauri::AppHandle) {
     std::thread::spawn(move || {
-        let Some(path) = sidecar_path() else {
-            log::warn!("llm sidecar not bundled; model legs stay on fallbacks");
-            return;
-        };
-        let models = if tauri::is_dev() {
-            dev_models_dir()
-        } else {
-            app.path()
-                .app_data_dir()
-                .unwrap_or_else(|_| std::env::temp_dir())
-                .join("models")
-        };
-        if let Err(e) = std::fs::create_dir_all(&models) {
-            log::warn!("cannot create model dir {}: {e}", models.display());
-            return;
-        }
-
-        let child = Command::new(&path)
-            .env("OLLAMA_MODELS", &models)
-            .env("OLLAMA_HOST", format!("127.0.0.1:{PORT}"))
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
-        let Ok(child) = child else {
-            log::warn!("failed to spawn llm sidecar at {}", path.display());
-            return;
-        };
-        let handle = app.state::<ServerHandle>();
-        *handle.child.lock().unwrap() = Some(child);
-
         let probe = OllamaClient::new(DEFAULT_BASE_URL, DEFAULT_MODEL);
-        let deadline = std::time::Instant::now() + Duration::from_secs(60);
-        while std::time::Instant::now() < deadline {
-            // Bail early if the server process died (placeholder binary,
-            // port clash, crash) instead of burning the whole timeout.
-            if let Some(child) = handle.child.lock().unwrap().as_mut() {
-                if child.try_wait().map(|s| s.is_some()).unwrap_or(false) {
-                    log::warn!("llm sidecar process exited immediately — run 'pnpm llm:sidecar'?");
-                    return;
-                }
+        for attempt in 1..=3 {
+            if attempt > 1 {
+                log::warn!("retrying llm sidecar start (attempt {attempt}/3)");
+                std::thread::sleep(Duration::from_secs(3));
             }
-            if probe.is_up() {
-                log::info!("llm sidecar ready on :{PORT} (model {})", probe.model());
-                let _ = app.emit("llm:ready", probe.model());
-                return;
+            match attempt_start(&app, &probe) {
+                Outcome::Ready | Outcome::Fatal => return,
+                Outcome::Retry => continue,
             }
-            if handle.child.lock().unwrap().is_none() {
-                return; // stopped via ServerHandle::stop
-            }
-            std::thread::sleep(Duration::from_millis(500));
         }
-        log::warn!("llm sidecar did not become healthy within 60s");
+        log::warn!("llm sidecar did not start after 3 attempts; model legs stay on fallbacks");
     });
+}
+
+fn attempt_start(app: &tauri::AppHandle, probe: &OllamaClient) -> Outcome {
+    // Reuse a server that is already answering (orphan from a force-killed
+    // dev run, or a second app instance). Spawning into a taken port would
+    // only produce a child that exits at once.
+    if probe.is_up() {
+        log::info!("llm server already answering on :{PORT} — reusing it");
+        let _ = app.emit("llm:ready", probe.model());
+        return Outcome::Ready;
+    }
+
+    let Some(path) = sidecar_path() else {
+        log::warn!("llm sidecar not bundled; model legs stay on fallbacks");
+        return Outcome::Fatal;
+    };
+    // Since v0.40 inference needs the separate `llama-server` runner next
+    // to the CLI; without it the server starts but every chat call fails.
+    if let Some(dir) = path.parent() {
+        if !dir.join("llama-server").exists() {
+            log::warn!(
+                "llama-server runner missing next to the sidecar — run 'pnpm llm:sidecar' (chats will fail otherwise)"
+            );
+        }
+    }
+    let models = if tauri::is_dev() {
+        dev_models_dir()
+    } else {
+        app.path()
+            .app_data_dir()
+            .unwrap_or_else(|_| std::env::temp_dir())
+            .join("models")
+    };
+    if let Err(e) = std::fs::create_dir_all(&models) {
+        log::warn!("cannot create model dir {}: {e}", models.display());
+        return Outcome::Fatal;
+    }
+
+    // A bare `ollama` invocation is the CLI (it prints usage / tries to
+    // reach a server and exits) — the server only starts with `serve`.
+    // Sidecar stderr goes to a file so a failed start is diagnosable.
+    let log_path = app
+        .path()
+        .app_log_dir()
+        .unwrap_or_else(|_| std::env::temp_dir())
+        .join("llm-sidecar.log");
+    if let Some(dir) = log_path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let stderr = std::fs::File::create(&log_path)
+        .map(Stdio::from)
+        .unwrap_or_else(|_| Stdio::null());
+
+    let child = Command::new(&path)
+        .arg("serve")
+        .env("OLLAMA_MODELS", &models)
+        .env("OLLAMA_HOST", format!("127.0.0.1:{PORT}"))
+        .stdout(Stdio::null())
+        .stderr(stderr)
+        .spawn();
+    let Ok(child) = child else {
+        log::warn!("failed to spawn llm sidecar at {}", path.display());
+        return Outcome::Fatal;
+    };
+    let handle = app.state::<ServerHandle>();
+    *handle.child.lock().unwrap() = Some(child);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while std::time::Instant::now() < deadline {
+        // Bail early if the server process died (placeholder binary,
+        // port clash, crash) instead of burning the whole timeout.
+        if let Some(child) = handle.child.lock().unwrap().as_mut() {
+            if child.try_wait().map(|s| s.is_some()).unwrap_or(false) {
+                // Someone else may have bound the port between our probe
+                // and the spawn — if a server answers now, that is fine.
+                if probe.is_up() {
+                    log::info!("llm sidecar exited but :{PORT} is served — reusing it");
+                    let _ = app.emit("llm:ready", probe.model());
+                    return Outcome::Ready;
+                }
+                log::warn!(
+                    "llm sidecar exited immediately (port {PORT} taken?) — see {}",
+                    log_path.display()
+                );
+                return Outcome::Retry;
+            }
+        }
+        if probe.is_up() {
+            log::info!("llm sidecar ready on :{PORT} (model {})", probe.model());
+            let _ = app.emit("llm:ready", probe.model());
+            return Outcome::Ready;
+        }
+        if handle.child.lock().unwrap().is_none() {
+            return Outcome::Fatal; // stopped via ServerHandle::stop (app exit)
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    log::warn!("llm sidecar did not become healthy within 60s");
+    Outcome::Retry
 }
 
 #[cfg(test)]
@@ -309,6 +412,20 @@ mod serve_tests {
         let name = sidecar_name();
         assert!(name.starts_with("ollama-"));
         assert!(name.ends_with("-apple-darwin"));
+    }
+
+    #[test]
+    fn sidecar_lookup_prefers_the_stripped_name_tauri_copies() {
+        // tauri-build drops the triple suffix when copying externalBin next to
+        // the executable, so plain `ollama` must be probed first — this was
+        // exactly why the server never started in dev.
+        let candidates = sidecar_candidates();
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].file_name().unwrap().to_str(), Some("ollama"));
+        assert_eq!(
+            candidates[1].file_name().unwrap().to_str(),
+            Some(sidecar_name().as_str())
+        );
     }
 
     #[test]

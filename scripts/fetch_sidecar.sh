@@ -22,6 +22,11 @@ case "$ARCH" in
 esac
 
 DEST="$BIN_DIR/ollama-$TARGET"
+# Since v0.40 the inference engine is a separate `llama-server` executable plus
+# its dylibs, not embedded in the `ollama` binary. Both live flat in
+# `Ollama.app/Contents/Resources/` and `ollama` looks for the runner next to
+# itself, so we stage them as one sibling set.
+RUNTIME_DIR="$BIN_DIR/ollama-runtime"
 
 # build.rs generates a tiny placeholder script at the same path when the real
 # binary is missing (keeps cargo check / tauri dev working). Treat a file that
@@ -31,8 +36,11 @@ is_placeholder() {
     && head -c 256 "$DEST" 2>/dev/null | grep -q "bonsai placeholder"
 }
 
-if [ -x "$DEST" ] && ! is_placeholder; then
+have_runtime() { [ -x "$RUNTIME_DIR/llama-server" ]; }
+
+if [ -x "$DEST" ] && ! is_placeholder && have_runtime; then
   echo "sidecar already present: $DEST"
+  echo "runtime already present: $RUNTIME_DIR"
   "$DEST" --version || true
   exit 0
 fi
@@ -77,11 +85,25 @@ done
 echo "extracting ..."
 unzip -q -o "$TMP/ollama.zip" -d "$TMP/app"
 
+RES="$(find "$TMP/app" -type d -name Resources -maxdepth 4 | head -1)"
+[ -n "${RES:-}" ] || { echo "Ollama.app/Contents/Resources not found in archive" >&2; exit 1; }
+
 # The CLI binary lives inside the app bundle.
-SRC="$TMP/app/Ollama.app/Contents/Resources/ollama"
-[ -f "$SRC" ] || SRC="$(find "$TMP/app" -type f -name ollama -perm +111 | head -1)"
-[ -n "${SRC:-}" ] && [ -f "$SRC" ] || { echo "ollama CLI not found in archive" >&2; exit 1; }
+SRC="$RES/ollama"
+[ -f "$SRC" ] || { echo "ollama CLI not found in archive" >&2; exit 1; }
 
 install -m 0755 "$SRC" "$DEST"
 echo "sidecar installed: $DEST"
+
+# Runner + shared libraries. Skipped on purpose: mlx_metal_* (MLX-only models,
+# ~500 MB), libggml-cpu-*.so (Linux CPU variants) and the GUI/licence assets.
+echo "staging runtime into $RUNTIME_DIR ..."
+rm -rf "$RUNTIME_DIR"
+mkdir -p "$RUNTIME_DIR"
+install -m 0755 "$RES/llama-server" "$RUNTIME_DIR/llama-server"
+for f in "$RES"/libllama*.dylib "$RES"/libggml*.dylib "$RES"/libmtmd*.dylib; do
+  [ -e "$f" ] && cp -a "$f" "$RUNTIME_DIR/"
+done
+echo "runtime installed: $(ls "$RUNTIME_DIR" | wc -l | tr -d ' ') files, $(du -sh "$RUNTIME_DIR" | cut -f1)"
+
 "$DEST" --version

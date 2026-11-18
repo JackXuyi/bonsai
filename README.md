@@ -62,7 +62,7 @@ stopped on exit; models live in project-local `.llm/models` during dev and
 in app data once packaged. Two manual one-time steps:
 
 ```sh
-pnpm llm:sidecar          # fetch the Ollama binary into src-tauri/binaries/
+pnpm llm:sidecar          # fetch the Ollama runtime (CLI + llama-server) into src-tauri/binaries/
 pnpm llm:pull             # pull qwen3:4b into .llm/models (default tag)
 ```
 

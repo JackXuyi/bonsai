@@ -58,7 +58,7 @@ L0 壳层     Tauri 2（Rust core），菜单栏常驻，开机自启
 **本地 LLM（声明式依赖，安装进项目内）**——Ollama 二进制以 Tauri sidecar 形式随应用打包，由应用自己托管：启动时拉起（端口 11435，绝不碰系统级 Ollama 的 11434）、退出时回收；模型存放开发期为项目内 `.llm/models`、打包后为应用数据目录。一次性手动步骤只有两步：
 
 ```sh
-pnpm llm:sidecar          # 把 Ollama 二进制取回 src-tauri/binaries/
+pnpm llm:sidecar          # 把 Ollama 运行时（CLI + llama-server 推理器）取回 src-tauri/binaries/
 pnpm llm:pull             # 拉取 qwen3:4b 到 .llm/models（默认模型）
 ```
 
