@@ -9,7 +9,6 @@
 pub mod clock;
 pub mod consolidate;
 pub mod db;
-#[cfg(test)]
 pub mod eval;
 pub mod extract;
 pub mod scheduler;

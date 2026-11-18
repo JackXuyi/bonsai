@@ -7,6 +7,15 @@
 //!   2. Misremember rate— top hit must never be a superseded value           <  1%
 //!   3. Decay correctness— expired memories never outrank fresh ones        = 100%
 
+/// One dialogue turn (user → assistant), shared by history readers and
+/// dialogue pipelines. Lives here because both `db::dialogue_history` and
+/// the eval corpus speak in turns.
+#[derive(Debug, Clone)]
+pub struct Turn {
+    pub user: String,
+    pub assistant: String,
+}
+
 #[cfg(test)]
 mod tests {
     use crate::memory::clock;

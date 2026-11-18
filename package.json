@@ -12,6 +12,8 @@
     "app": "tauri dev",
     "app:build": "tauri build",
     "icons": "node scripts/gen_icons.mjs",
+    "llm:sidecar": "bash scripts/fetch_sidecar.sh",
+    "llm:pull": "bash scripts/pull_model.sh",
     "check": "cargo check --manifest-path src-tauri/Cargo.toml",
     "test": "cargo test --manifest-path src-tauri/Cargo.toml"
   },

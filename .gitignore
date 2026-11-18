@@ -12,5 +12,9 @@ src-tauri/gen/
 node_modules/
 dist/
 
+# Local LLM sidecar + models (build assets, downloaded by `pnpm llm:sidecar`)
+src-tauri/binaries/
+.llm/
+
 # OS noise
 .DS_Store

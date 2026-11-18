@@ -4,20 +4,24 @@
 //! - dialogue: persona card injected as the system prompt (`LocalBackend`)
 //! - extraction/consolidation: structured-JSON replies (`LocalExtractor`)
 //!
-//! Transport is the Ollama-compatible chat API (default
-//! `http://127.0.0.1:11434`, model `qwen2.5:7b`). Everything runs on-device;
-//! conversations and memory text never leave the machine. Cloud APIs are an
-//! explicit user opt-in and deliberately NOT implemented here.
+//! Transport is the Ollama-compatible chat API. The server itself is the
+//! Ollama binary bundled as a Tauri sidecar (`bundle.externalBin`), owned by
+//! the app: spawned at startup on port 11435 (never 11434 — that belongs to
+//! a system-wide Ollama, if any), stopped on exit, models stored in
+//! project-local `.llm/models` during dev and app data at runtime.
+//! Everything runs on-device; conversations and memory text never leave the
+//! machine. Cloud APIs are an explicit user opt-in and deliberately NOT
+//! implemented here.
 //!
 //! Config via env (so the binary needs no UI settings yet):
-//! - `OLLAMA_HOST` — base URL, default `http://127.0.0.1:11434`
+//! - `OLLAMA_HOST` — base URL, default `http://127.0.0.1:11435`
 //! - `BONSAI_LLM_MODEL` — model tag, default `qwen2.5:7b`
 
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-pub const DEFAULT_BASE_URL: &str = "http://127.0.0.1:11434";
+pub const DEFAULT_BASE_URL: &str = "http://127.0.0.1:11435";
 pub const DEFAULT_MODEL: &str = "qwen2.5:7b";
 /// One dialogue turn. Long enough for a cold-loaded 7B model on Apple Silicon.
 pub const CHAT_TIMEOUT_SECS: u64 = 120;
@@ -175,4 +179,141 @@ mod tests {
         let client = OllamaClient::new("http://127.0.0.1:1", "test");
         assert!(!client.is_up());
     }
+}
+
+// -------------------------------------------------------------- sidecar lifecycle
+
+/// Everything that owns the bundled server process, namespaced as `llm::serve`.
+pub mod serve {
+    use std::path::PathBuf;
+    use std::process::{Child, Command, Stdio};
+    use std::time::Duration;
+
+    use tauri::{Emitter, Manager};
+
+    use super::{DEFAULT_BASE_URL, DEFAULT_MODEL, OllamaClient};
+
+/// The app-owned port. System-wide Ollama (if any) owns 11434; we never
+/// touch it — one app, one server, one model store.
+pub const PORT: u16 = 11435;
+
+/// Tauri sidecar file name for the current platform (`ollama-<triple>`).
+fn sidecar_name() -> String {
+    let arch = match std::env::consts::ARCH {
+        "aarch64" => "aarch64",
+        "x86_64" => "x86_64",
+        other => other,
+    };
+    format!("ollama-{arch}-apple-darwin")
+}
+
+/// The bundled binary sits next to the app executable in both layouts:
+/// dev = `target/debug/`, packaged macOS = `Contents/MacOS/`.
+fn sidecar_path() -> Option<PathBuf> {
+    let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    let path = dir.join(sidecar_name());
+    path.exists().then_some(path)
+}
+
+/// Model store: project-local during dev (so `pnpm llm:pull` and the app
+/// share one store), app data once packaged.
+fn dev_models_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("src-tauri always has a parent")
+        .join(".llm/models")
+}
+
+/// App-owned state: the spawned server child, if any.
+#[derive(Default)]
+pub struct ServerHandle {
+    child: std::sync::Mutex<Option<Child>>,
+}
+
+impl ServerHandle {
+    /// Kill the sidecar. Idempotent; safe on the exit path.
+    pub fn stop(&self) {
+        if let Some(mut child) = self.child.lock().unwrap().take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+/// Spawn the sidecar (best effort) and emit `llm:ready` once healthy.
+/// Runs in a background thread: a cold or missing sidecar must never
+/// delay startup — the model legs degrade on their own.
+pub fn start(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        let Some(path) = sidecar_path() else {
+            log::warn!("llm sidecar not bundled; model legs stay on fallbacks");
+            return;
+        };
+        let models = if tauri::is_dev() {
+            dev_models_dir()
+        } else {
+            app.path()
+                .app_data_dir()
+                .unwrap_or_else(|_| std::env::temp_dir())
+                .join("models")
+        };
+        if let Err(e) = std::fs::create_dir_all(&models) {
+            log::warn!("cannot create model dir {}: {e}", models.display());
+            return;
+        }
+
+        let child = Command::new(&path)
+            .env("OLLAMA_MODELS", &models)
+            .env("OLLAMA_HOST", format!("127.0.0.1:{PORT}"))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        let Ok(child) = child else {
+            log::warn!("failed to spawn llm sidecar at {}", path.display());
+            return;
+        };
+        let handle = app.state::<ServerHandle>();
+        *handle.child.lock().unwrap() = Some(child);
+
+        let probe = OllamaClient::new(DEFAULT_BASE_URL, DEFAULT_MODEL);
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while std::time::Instant::now() < deadline {
+            // Bail early if the server process died (placeholder binary,
+            // port clash, crash) instead of burning the whole timeout.
+            if let Some(child) = handle.child.lock().unwrap().as_mut() {
+                if child.try_wait().map(|s| s.is_some()).unwrap_or(false) {
+                    log::warn!("llm sidecar process exited immediately — run 'pnpm llm:sidecar'?");
+                    return;
+                }
+            }
+            if probe.is_up() {
+                log::info!("llm sidecar ready on :{PORT} (model {})", probe.model());
+                let _ = app.emit("llm:ready", probe.model());
+                return;
+            }
+            if handle.child.lock().unwrap().is_none() {
+                return; // stopped via ServerHandle::stop
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        log::warn!("llm sidecar did not become healthy within 60s");
+    });
+}
+
+#[cfg(test)]
+mod serve_tests {
+    use super::*;
+
+    #[test]
+    fn sidecar_name_follows_tauri_convention() {
+        let name = sidecar_name();
+        assert!(name.starts_with("ollama-"));
+        assert!(name.ends_with("-apple-darwin"));
+    }
+
+    #[test]
+    fn dev_models_dir_is_project_local() {
+        assert!(dev_models_dir().ends_with(".llm/models"));
+    }
+}
 }
