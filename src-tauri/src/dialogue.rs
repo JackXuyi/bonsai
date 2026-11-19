@@ -48,6 +48,9 @@ pub struct DialogueOutcome {
     pub filter: generation::FilterReport,
     /// False = model unavailable, the honest fallback line was used.
     pub model_used: bool,
+    /// True = the crisis intercept fired (plan-onboarding.md §3.3): the
+    /// reply is the fixed resource card, no model was consulted.
+    pub crisis: bool,
 }
 
 const FALLBACK_REPLY: &str = "（盆栽这会儿状态不太好，脑子转不动——稍后再聊，别走开。）";
@@ -132,6 +135,24 @@ fn chat_turn_inner(
     raining: bool,
     mut on_delta: Option<&mut dyn FnMut(&str)>,
 ) -> rusqlite::Result<DialogueOutcome> {
+    // Crisis intercept (plan-onboarding.md §3.3): rule-level, BEFORE any
+    // model call — a dead model must not change this behavior. Both sides
+    // are still recorded (compliance audit), no streaming deltas are sent.
+    if crate::onboarding::crisis_hit(user_text) {
+        let reply = crate::onboarding::CRISIS_REPLY.to_string();
+        db::add_event_meta(conn, "dialogue", user_text, Some("user"), Some(session_id))?;
+        db::add_event_meta(conn, "dialogue", &reply, Some("assistant"), Some(session_id))?;
+        return Ok(DialogueOutcome {
+            reply,
+            filter: generation::FilterReport {
+                unconditional_affirmation: false,
+                hedged_disagreement: false,
+            },
+            model_used: false,
+            crisis: true,
+        });
+    }
+
     let system = system_prompt(conn, card, hour, raining)?;
     let history = db::dialogue_history(conn, session_id, MAX_HISTORY_TURNS)?;
     let raw = match on_delta.as_deref_mut() {
@@ -147,7 +168,7 @@ fn chat_turn_inner(
     let filter = generation::filter(&reply);
     db::add_event_meta(conn, "dialogue", user_text, Some("user"), Some(session_id))?;
     db::add_event_meta(conn, "dialogue", &reply, Some("assistant"), Some(session_id))?;
-    Ok(DialogueOutcome { reply, filter, model_used })
+    Ok(DialogueOutcome { reply, filter, model_used, crisis: false })
 }
 
 /// Today's observations as the proactive seed (counts, not raw dumps).
@@ -276,6 +297,7 @@ pub fn dialogue_chat(
     let hour = chrono::Local::now().hour() as u32;
     let mut backend = crate::persona::backend().map_err(|e| e.to_string())?;
     let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+    crate::onboarding::ensure_not_minor(&conn)?;
     chat_turn(
         &conn,
         backend.as_mut(),
@@ -305,6 +327,7 @@ pub fn dialogue_chat_stream(
     let hour = chrono::Local::now().hour() as u32;
     let mut backend = crate::persona::backend().map_err(|e| e.to_string())?;
     let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+    crate::onboarding::ensure_not_minor(&conn)?;
     let mut emit = |delta: &str| {
         let _ = on_delta.send(serde_json::json!({ "delta": delta }));
     };
@@ -331,6 +354,7 @@ pub fn dialogue_proactive_now(
     let hour = chrono::Local::now().hour() as u32;
     let mut backend = crate::persona::backend().map_err(|e| e.to_string())?;
     let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+    crate::onboarding::ensure_not_minor(&conn)?;
     proactive_text(&conn, backend.as_mut(), &card, hour, false).map_err(|e| e.to_string())
 }
 
@@ -404,6 +428,31 @@ mod tests {
         let out = chat_turn(&conn, &mut backend, &c, "s1", "在吗", 10, false).unwrap();
         assert!(!out.model_used);
         assert_eq!(out.reply, FALLBACK_REPLY);
+    }
+
+    #[test]
+    fn crisis_input_intercepts_before_any_model_call() {
+        let conn = mem();
+        let c = card();
+        // A dead backend proves no model call happened: the intercept is
+        // rule-level and must work when the local LLM never came up.
+        let mut backend = crate::persona::eval::LocalBackend::new();
+        backend.client = crate::llm::OllamaClient::new("http://127.0.0.1:1", "test");
+        let out = chat_turn(&conn, &mut backend, &c, "s1", "说实话，我最近有点不想活了", 10, false).unwrap();
+        assert!(out.crisis);
+        assert!(out.reply.contains("12356"), "reply must carry the hotline");
+        let history = db::dialogue_history(&conn, "s1", 6).unwrap();
+        assert_eq!(history.len(), 1, "both sides still recorded for audit");
+    }
+
+    #[test]
+    fn minor_gate_blocks_dialogue() {
+        let conn = mem();
+        crate::onboarding::ensure_not_minor(&conn).unwrap(); // no record → allowed
+        db::set_setting(&conn, "age_group", "minor").unwrap();
+        assert!(crate::onboarding::ensure_not_minor(&conn).is_err());
+        db::set_setting(&conn, "age_group", "adult").unwrap();
+        crate::onboarding::ensure_not_minor(&conn).unwrap();
     }
 
     #[test]

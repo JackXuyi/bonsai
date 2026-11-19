@@ -119,6 +119,9 @@ const percepSubs = $("perc-subs");
 const reportDialog = $("report-dialog");
 const reportBody = $("report-body");
 const toastEl = $("toast");
+const onboarding = $("onboarding");
+const boundaryList = $("boundary-list");
+const boundaryEmpty = $("boundary-empty");
 
 const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -312,7 +315,10 @@ function selectTab(name) {
   for (const tab of document.querySelectorAll(".tab")) {
     tab.classList.toggle("active", tab.id === `tab-${name}`);
   }
-  if (name === "tools") refreshPerceptionStatus();
+  if (name === "tools") {
+    refreshPerceptionStatus();
+    loadBoundaries();
+  }
   if (name === "chat") input.focus({ preventScroll: true });
 }
 
@@ -459,6 +465,7 @@ function appendNote(bubble, note) {
 }
 
 function noteFor(outcome) {
+  if (outcome.crisis) return "危机资源 · 常规回复已拦截";
   const notes = [];
   if (!outcome.model_used) notes.push("本地模型未就绪");
   if (outcome.filter?.unconditional_affirmation) notes.push("反谄媚过滤：拦截了无条件肯定");
@@ -565,6 +572,183 @@ $("suggest").addEventListener("click", (e) => {
   if (!chip) return;
   sendMessage(chip.dataset.text);
 });
+
+// ---------------------------------------------------------------- onboarding
+// P1-3 boundary questions (plan-onboarding.md §3.4): a modal overlay — the
+// flow must be walked through (all-skip counts) before the main UI shows.
+// Question wording travels with onboarding_status from Rust (single source
+// of truth); this file only renders and forwards.
+
+let obAgeGroup = null;
+let obCrisisAcked = false;
+let obQuestions = [];
+let obQIndex = 0;
+const obCollected = []; // {question, answer, skipped}
+
+// Browser-preview fallback mirrors the Rust QUESTIONS (demo only).
+const OB_QUESTIONS_FALLBACK = [
+  { id: "q1", kind: "text", prompt: "有什么话题是我永远不该主动提的？", hint: "比如钱、家人、某段经历。多条用顿号隔开，也可以跳过。", options: [] },
+  { id: "q2", kind: "text", prompt: "有什么话是我永远不该对你说的？", hint: "比如「你应该冷静」这种。多条用顿号隔开。", options: [] },
+  { id: "q3", kind: "choice", prompt: "半夜可以打扰你吗？", hint: "主动搭话只有一天一次的额度，这里定它敢不敢用。", options: ["随便打扰", "只在工作时间", "永远别主动"] },
+  { id: "q4", kind: "text", prompt: "我会把你记在本地数据库里。有哪类事是不准记的？", hint: "写下来的这类内容会停止进入记忆抽取。多条用顿号隔开。", options: [] },
+  { id: "q5", kind: "choice", prompt: "我记性不好，猜错你别惯着我，直接说。什么语气你能接受？", hint: "这决定它纠正你、被纠正时的措辞基调。", options: ["直说就行", "委婉点", "别猜我"] },
+];
+
+function obShow(step) {
+  for (const el of onboarding.querySelectorAll(".ob-step")) {
+    el.hidden = el.dataset.step !== step;
+  }
+}
+
+function obRenderQuestion() {
+  const q = obQuestions[obQIndex];
+  $("ob-q-title").textContent = q.prompt;
+  $("ob-q-hint").textContent = q.hint || "";
+  const box = $("ob-q-input");
+  box.replaceChildren();
+  if (q.kind === "choice") {
+    for (const opt of q.options) {
+      const b = document.createElement("button");
+      b.className = "ob-btn ob-choice";
+      b.textContent = opt;
+      b.addEventListener("click", () => {
+        for (const x of box.querySelectorAll(".ob-btn")) x.classList.remove("active");
+        b.classList.add("active");
+      });
+      box.appendChild(b);
+    }
+    box.style.cssText = "display:flex;flex-wrap:wrap;gap:8px;margin-top:10px;";
+  } else {
+    const ta = document.createElement("textarea");
+    ta.className = "ob-input";
+    ta.id = "ob-text";
+    ta.placeholder = "想到什么写什么，或直接跳过";
+    box.appendChild(ta);
+    box.style.cssText = "";
+  }
+  $("ob-skip").hidden = false;
+  $("ob-next").textContent = obQIndex === obQuestions.length - 1 ? "就这些" : "下一条";
+  obShow("question");
+}
+
+function obCollectCurrent() {
+  const q = obQuestions[obQIndex];
+  const box = $("ob-q-input");
+  if (q.kind === "choice") {
+    const active = box.querySelector(".ob-btn.active");
+    if (!active) return null; // nothing selected yet
+    obCollected.push({ question: q.id, answer: active.textContent, skipped: false });
+    return true;
+  }
+  const ta = $("ob-text");
+  const answer = (ta?.value || "").trim();
+  obCollected.push({ question: q.id, answer, skipped: !answer });
+  return true;
+}
+
+async function obFinish() {
+  onboarding.hidden = true;
+  if (!inTauri) {
+    toast("（预览）引导流程走完了");
+    return;
+  }
+  try {
+    const r = await invoke("onboarding_submit", {
+      payload: {
+        ageGroup: obAgeGroup,
+        crisisAck: obCrisisAcked,
+        answers: obCollected,
+      },
+    });
+    if (r.minor) {
+      // Terminal gate: show the minor page and stay there.
+      obShow("minor");
+      onboarding.hidden = false;
+      return;
+    }
+    toast(`阿盆记住了 ${r.boundaries_added} 条底线、${r.preferences_added} 条偏好`);
+    selectTab("chat");
+  } catch (err) {
+    showResult("引导提交失败", String(err));
+  }
+}
+
+function obWire() {
+  for (const b of onboarding.querySelectorAll("[data-age]")) {
+    b.addEventListener("click", () => {
+      obAgeGroup = b.dataset.age;
+      if (obAgeGroup === "minor") {
+        obShow("minor");
+        return;
+      }
+      obShow("crisis");
+    });
+  }
+  $("ob-exit").addEventListener("click", () => {}); // terminal: nowhere to go
+  $("ob-crisis-ack").addEventListener("click", () => {
+    obCrisisAcked = true;
+    obQIndex = 0;
+    obRenderQuestion();
+  });
+  $("ob-skip").addEventListener("click", () => {
+    const q = obQuestions[obQIndex];
+    obCollected.push({
+      question: q.id,
+      answer: q.kind === "choice" ? "" : ($("ob-text")?.value || "").trim(),
+      skipped: true,
+    });
+    obAdvance();
+  });
+  $("ob-next").addEventListener("click", () => {
+    if (obCollectCurrent() === null) {
+      toast("选一个，或者跳过");
+      return;
+    }
+    obAdvance();
+  });
+  $("ob-finish").addEventListener("click", obFinish);
+}
+
+function obAdvance() {
+  obQIndex += 1;
+  if (obQIndex >= obQuestions.length) {
+    const n = obCollected.filter((a) => !a.skipped && ["q1", "q2", "q4"].includes(a.question)).length;
+    const m = obCollected.filter((a) => !a.skipped && ["q3", "q5"].includes(a.question)).length;
+    $("ob-done-text").textContent =
+      n || m
+        ? `记住了 ${n} 条底线、${m} 条偏好。猜错的时候，直接骂我就行。`
+        : "什么都没写也没关系——想说的时候，随时告诉我。";
+    obShow("done");
+  } else {
+    obRenderQuestion();
+  }
+}
+
+async function checkOnboarding() {
+  if (!inTauri) return;
+  try {
+    const st = await invoke("onboarding_status");
+    if (st.done && st.age_group !== "minor") {
+      onboarding.hidden = true;
+      return;
+    }
+    obQuestions = st.questions?.length ? st.questions : OB_QUESTIONS_FALLBACK;
+    onboarding.hidden = false;
+    if (st.done && st.age_group === "minor") {
+      obShow("minor"); // permanent gate
+    } else {
+      obAgeGroup = null;
+      obCrisisAcked = false;
+      obQIndex = 0;
+      obCollected.length = 0;
+      obShow("age");
+    }
+  } catch {
+    /* status unreachable: don't block the UI */
+  }
+}
+
+obWire();
 
 // ---------------------------------------------------------------- tools
 
@@ -814,6 +998,57 @@ async function refreshPerceptionStatus() {
   }
 }
 
+// ---------------------------------------------------------------- boundaries
+
+async function loadBoundaries() {
+  if (!inTauri) {
+    boundaryList.replaceChildren();
+    const demo = ["不要主动提：我妈", "不要说：你应该冷静"];
+    for (const c of demo) {
+      const row = document.createElement("div");
+      row.className = "boundary-row";
+      const label = document.createElement("span");
+      label.className = "row-label";
+      label.textContent = c;
+      row.appendChild(label);
+      boundaryList.appendChild(row);
+    }
+    boundaryEmpty.hidden = true;
+    return;
+  }
+  try {
+    const rows = await invoke("boundary_list");
+    boundaryList.replaceChildren();
+    boundaryEmpty.hidden = rows.length > 0;
+    for (const r of rows) {
+      const row = document.createElement("div");
+      row.className = "boundary-row";
+      const label = document.createElement("span");
+      label.className = "row-label";
+      label.textContent = r.content;
+      const del = document.createElement("button");
+      del.className = "boundary-del";
+      del.textContent = "×";
+      del.setAttribute("aria-label", "删除这条边界");
+      del.addEventListener("click", async () => {
+        try {
+          await invoke("boundary_delete", { id: r.id });
+          toast("边界已删除");
+        } catch {
+          toast("删除失败");
+        }
+        loadBoundaries();
+      });
+      row.append(label, del);
+      boundaryList.appendChild(row);
+    }
+  } catch {
+    boundaryList.replaceChildren();
+    boundaryEmpty.hidden = false;
+    boundaryEmpty.textContent = "边界清单读取失败";
+  }
+}
+
 // ---------------------------------------------------------------- boot
 
 setInterval(() => {
@@ -854,8 +1089,10 @@ if (inTauri) {
   }).catch(() => {});
   listen("window:shown", () => {
     drainGrowthAnnouncements().catch(() => {});
+    checkOnboarding(); // tray "重新做一次引导" re-opens the flow here
   }).catch(() => {});
   drainGrowthAnnouncements().catch(() => {});
+  checkOnboarding();
 
   face.addEventListener("click", () => {
     poke();
@@ -884,6 +1121,10 @@ if (inTauri) {
   demoCard.querySelector(".predict-row").remove();
   demoCard.querySelector(".badge").textContent = "预览示例 · 预测卡片长这样";
   perceptionLine.textContent = "浏览器预览模式：后端未连接";
+  // Preview: walk the onboarding flow once so it can be inspected.
+  obQuestions = OB_QUESTIONS_FALLBACK;
+  onboarding.hidden = false;
+  obShow("age");
 }
 
 // Preview chips: show the expression right away, then let the Rust state

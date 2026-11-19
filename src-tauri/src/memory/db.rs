@@ -1,7 +1,7 @@
-//! SQLite schema (v4) and primitives for the memory layer.
+//! SQLite schema (v5) and primitives for the memory layer.
 //!
 //! Plans: docs/zh/plan-memory.md §3–§4, docs/zh/plan-predict.md §3.4,
-//! docs/zh/plan-morph.md §3.2.
+//! docs/zh/plan-morph.md §3.2, docs/zh/plan-onboarding.md §3.1.
 //! Three layers: events (ground truth) → facts (traced assertions) →
 //! preferences/boundaries (high-confidence user model).
 //!
@@ -16,7 +16,7 @@ use rusqlite::{params, Connection};
 
 use super::clock;
 
-pub(crate) const SCHEMA_VERSION: i64 = 4;
+pub(crate) const SCHEMA_VERSION: i64 = 5;
 
 pub fn open(path: &std::path::Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
@@ -125,6 +125,24 @@ CREATE TABLE IF NOT EXISTS growth_log (
     unlocked_at TEXT NOT NULL,
     notified_at TEXT,
     note        TEXT
+);
+
+-- Onboarding (plan-onboarding.md §3.1). `settings` is a tiny KV for
+-- app-level state (onboarding_done / age_group / crisis_ack). The answers
+-- table is the audit trail — SKIPPED answers are recorded too (skipped=1
+-- is itself a signal for tuning the questions later).
+CREATE TABLE IF NOT EXISTS settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS onboarding_answers (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    question TEXT NOT NULL,                 -- 'q1'..'q5' | 'age' | 'crisis'
+    answer   TEXT NOT NULL,
+    skipped  INTEGER NOT NULL DEFAULT 0,    -- 1 = user skipped
+    ts       TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
@@ -377,9 +395,67 @@ pub fn forget_session(conn: &Connection, session_id: &str) -> rusqlite::Result<u
 /// the honest interpretation of "forget everything").
 pub fn forget_all(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
-        "DELETE FROM growth_log; DELETE FROM growth; DELETE FROM predictions; DELETE FROM boundaries; DELETE FROM preferences; DELETE FROM facts; DELETE FROM events;",
+        "DELETE FROM onboarding_answers; DELETE FROM settings; DELETE FROM growth_log; DELETE FROM growth; DELETE FROM predictions; DELETE FROM boundaries; DELETE FROM preferences; DELETE FROM facts; DELETE FROM events;",
     )?;
     Ok(())
+}
+
+// ----------------------------------------------- settings + onboarding audit
+// (docs/zh/plan-onboarding.md §3.1)
+
+/// Read a settings key. Missing key → None (this is how "old user without
+/// onboarding_done" is detected: they get the flow on next window open).
+pub fn get_setting(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
+    match conn.query_row("SELECT value FROM settings WHERE key = ?1", params![key], |r| r.get(0)) {
+        Ok(v) => Ok(Some(v)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Upsert a settings key.
+pub fn set_setting(conn: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO settings (key, value, updated_at) VALUES (?1, ?2, ?3)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+        params![key, value, clock::now_iso()],
+    )?;
+    Ok(())
+}
+
+/// Clear a settings key (the tray "redo onboarding" path: keep the answers,
+/// drop only the done flag).
+pub fn remove_setting(conn: &Connection, key: &str) -> rusqlite::Result<usize> {
+    conn.execute("DELETE FROM settings WHERE key = ?1", params![key])
+}
+
+/// One onboarding answer, audit form (skipped answers included).
+pub fn record_onboarding_answer(
+    conn: &Connection,
+    question: &str,
+    answer: &str,
+    skipped: bool,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO onboarding_answers (question, answer, skipped, ts) VALUES (?1, ?2, ?3, ?4)",
+        params![question, answer, skipped as i64, clock::now_iso()],
+    )?;
+    Ok(())
+}
+
+/// All recorded answers, oldest first.
+pub fn onboarding_answers(conn: &Connection) -> rusqlite::Result<Vec<(String, String, bool)>> {
+    let mut stmt = conn.prepare(
+        "SELECT question, answer, skipped FROM onboarding_answers ORDER BY id ASC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)? != 0,
+        ))
+    })?;
+    rows.collect()
 }
 
 // ------------------------------------------------------- predict-verify loop
@@ -1248,6 +1324,34 @@ mod tests {
         // A later ensure re-anchors from scratch (events are gone too).
         let s = ensure_growth(&conn).unwrap();
         assert_eq!(s.stage, 0);
+    }
+
+    #[test]
+    fn settings_upsert_remove_and_onboarding_cascade() {
+        let conn = mem();
+        // Missing key reads as None — that's the "old user" signal.
+        assert!(get_setting(&conn, "onboarding_done").unwrap().is_none());
+        set_setting(&conn, "onboarding_done", "1").unwrap();
+        // Upsert overwrites, never duplicates.
+        set_setting(&conn, "onboarding_done", "0").unwrap();
+        assert_eq!(get_setting(&conn, "onboarding_done").unwrap().as_deref(), Some("0"));
+        assert_eq!(remove_setting(&conn, "onboarding_done").unwrap(), 1);
+        assert!(get_setting(&conn, "onboarding_done").unwrap().is_none());
+
+        // Skipped answers are recorded too (skipped=1 is a signal).
+        record_onboarding_answer(&conn, "q1", "我妈", false).unwrap();
+        record_onboarding_answer(&conn, "q4", "", true).unwrap();
+        let answers = onboarding_answers(&conn).unwrap();
+        assert_eq!(answers.len(), 2);
+        assert_eq!(answers[0], ("q1".into(), "我妈".into(), false));
+        assert_eq!(answers[1], ("q4".into(), "".into(), true));
+
+        // Nuclear forget clears the onboarding state: the honest reading of
+        // "forget everything" includes "re-introduce yourself".
+        set_setting(&conn, "age_group", "adult").unwrap();
+        forget_all(&conn).unwrap();
+        assert!(get_setting(&conn, "age_group").unwrap().is_none());
+        assert!(onboarding_answers(&conn).unwrap().is_empty());
     }
 
     #[test]

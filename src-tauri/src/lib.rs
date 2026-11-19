@@ -17,6 +17,7 @@ pub mod generation;
 pub mod llm;
 pub mod memory;
 pub mod morph;
+pub mod onboarding;
 pub mod perception;
 pub mod persona;
 pub mod predict;
@@ -146,6 +147,11 @@ pub fn run() {
             predict::prediction_stats,
             morph::growth_status,
             morph::growth_ack,
+            onboarding::onboarding_status,
+            onboarding::onboarding_submit,
+            onboarding::onboarding_reset,
+            onboarding::boundary_list,
+            onboarding::boundary_delete,
             dialogue::dialogue_chat,
             dialogue::dialogue_chat_stream,
             dialogue::dialogue_proactive_now,

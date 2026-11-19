@@ -40,6 +40,9 @@ pub struct Report {
     pub merged: usize,
     pub contradicted: usize,
     pub promoted: usize,
+    /// q4 interception (plan-onboarding.md §3.2): user events whose content
+    /// matches a "不准记录：" boundary — counted, never extracted.
+    pub blocked: usize,
     pub deleted: usize,
     pub consumed: usize,
 }
@@ -69,9 +72,23 @@ fn run_in_tx(
 ) -> rusqlite::Result<Report> {
     // Window events (unconsumed only — the second idempotency leg).
     let events = db::unconsumed_events(conn, opts.window_start, opts.window_end)?;
+
+    // q4 interception (plan-onboarding.md §3.2): content matching a
+    // "不准记录：" boundary stops at the extraction door. The raw event
+    // row stays (it is ground truth, and the forget path needs it) — it
+    // just never becomes a fact, preference, or boundary.
+    let no_record = crate::onboarding::no_record_items(conn)?;
+    let mut blocked = 0usize;
     let user_events: Vec<db::EventRow> = events
         .iter()
         .filter(|e| e.role.as_deref() != Some("assistant"))
+        .filter(|e| {
+            let hit = no_record.iter().any(|item| e.content.contains(item));
+            if hit {
+                blocked += 1;
+            }
+            !hit
+        })
         .cloned()
         .collect();
 
@@ -84,6 +101,7 @@ fn run_in_tx(
         merged: 0,
         contradicted: 0,
         promoted: 0,
+        blocked,
         deleted: 0,
         consumed: 0,
     };
@@ -360,6 +378,42 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM facts WHERE invalid_at IS NULL", [], |r| r.get(0))
             .unwrap();
         assert_eq!(active, 0);
+    }
+
+    #[test]
+    fn q4_no_record_items_stop_at_the_extraction_door() {
+        use crate::onboarding::{apply_answers, SubmitAnswer};
+
+        let _guard = clock::pinned("2026-11-18T12:00:00Z");
+        let mut conn = mem();
+        apply_answers(
+            &conn,
+            &[SubmitAnswer {
+                question: "q4".into(),
+                answer: "体检报告".into(),
+                skipped: false,
+            }],
+        )
+        .unwrap();
+
+        say(&conn, "我喜欢雨天");
+        say(&conn, "今天体检报告显示一切正常");
+        let report = run_with_rules(
+            &mut conn,
+            &Options { trigger: "manual", window_start: START, window_end: END },
+        )
+        .unwrap();
+        assert_eq!(report.blocked, 1, "the health-report event is counted, not extracted");
+        assert_eq!(report.extracted, 1, "only the rainy-day event becomes a candidate");
+        let facts: i64 = conn
+            .query_row("SELECT COUNT(*) FROM facts WHERE content LIKE '%体检%'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(facts, 0, "no-record content must never become a fact");
+        // The raw event stays (ground truth + forget path need it).
+        let raw: i64 = conn
+            .query_row("SELECT COUNT(*) FROM events WHERE content LIKE '%体检%'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(raw, 1);
     }
 
     #[test]

@@ -227,9 +227,68 @@
           <p class="status-line"><span class="dot" id="perc-dot"></span><span id="perception-line">感知层未开启</span></p>
         </section>
 
+        <section class="card" id="boundaries-card">
+          <div class="card-head">
+            <div class="card-titles">
+              <p class="card-title">边界清单</p>
+              <p class="card-sub">它不许自己碰的线 · 点 × 删除</p>
+            </div>
+          </div>
+          <div class="subs" id="boundary-list"></div>
+          <p class="status-line" id="boundary-empty">还没有任何边界记录</p>
+        </section>
+
         <section class="result" id="tool-result" hidden></section>
       </section>
     </main>
+
+    <!-- ── onboarding（P1-3 边界问答）：模态覆盖层，走完才能进主界面。
+         年龄屏是硬门槛（未成年 → 终态页），其余全部可跳过。
+         问题文案由 Rust 的 onboarding_status 下发，这里只放骨架。 ── -->
+    <section class="onboarding" id="onboarding" hidden aria-label="初次引导">
+      <header class="ob-head">
+        <p class="ob-name">阿盆</p>
+        <p class="ob-sub">先说清楚几件事，我们再开始。</p>
+      </header>
+
+      <div class="ob-step" data-step="age" hidden>
+        <p class="ob-title">开始之前，确认一件事</p>
+        <p class="ob-text">你成年了吗？按《人工智能拟人化互动服务管理暂行办法》，未成年人暂时用不了这个应用。</p>
+        <div class="ob-actions">
+          <button class="ob-btn" data-age="adult">我成年了</button>
+          <button class="ob-btn" data-age="minor">我未成年</button>
+        </div>
+      </div>
+
+      <div class="ob-step" data-step="minor" hidden>
+        <p class="ob-title">未成年人暂不可用</p>
+        <p class="ob-text">这一步没有开关。把它关掉就好，盆栽不会怪你。</p>
+        <div class="ob-actions"><button class="ob-btn" id="ob-exit">知道了</button></div>
+      </div>
+
+      <div class="ob-step" data-step="crisis" hidden>
+        <p class="ob-title">一件事，必须先说</p>
+        <p class="ob-text crisis-card">我不是心理医生，也接不住所有的话。如果你哪天说到伤害自己的念头，我会立刻收起玩笑，把这两个号码递给你：<br /><strong>北京心理危机研究与干预中心 010-82951332（24 小时）</strong><br /><strong>全国心理援助热线 12356</strong></p>
+        <div class="ob-actions"><button class="ob-btn" id="ob-crisis-ack">我记住了</button></div>
+      </div>
+
+      <div class="ob-step" data-step="question" hidden>
+        <p class="ob-title" id="ob-q-title"></p>
+        <p class="ob-text ob-hint" id="ob-q-hint"></p>
+        <div id="ob-q-input"></div>
+        <div class="ob-actions">
+          <button class="ob-btn ob-quiet" id="ob-skip">跳过</button>
+          <button class="ob-btn" id="ob-next">下一条</button>
+        </div>
+      </div>
+
+      <div class="ob-step" data-step="done" hidden>
+        <p class="ob-title">行，都记下了。</p>
+        <p class="ob-text" id="ob-done-text"></p>
+        <p class="ob-text ob-hint">底线随时可以在「工具 · 边界清单」里增删。</p>
+        <div class="ob-actions"><button class="ob-btn" id="ob-finish">开始吧</button></div>
+      </div>
+    </section>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
