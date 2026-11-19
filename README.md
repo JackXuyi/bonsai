@@ -63,7 +63,7 @@ in app data once packaged. Two manual one-time steps:
 
 ```sh
 pnpm llm:sidecar          # fetch the Ollama runtime (CLI + llama-server) into src-tauri/binaries/
-pnpm llm:pull             # pull qwen3:4b into .llm/models (default tag)
+pnpm llm:pull             # pull qwen3.5:2b into .llm/models (default tag)
 ```
 
 Until then nothing breaks: a placeholder sidecar is generated at build

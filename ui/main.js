@@ -7,7 +7,7 @@
 // Tabs: 对话 (dialogue_chat + proactive:message) · 表情 (frame preview)
 //       · 工具 (daily report, consolidate, manual proactive, perception).
 
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, Channel } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 const FACE_STATES = ["calm", "focused", "sleepy", "greeted", "displeased", "thinking"];
@@ -153,6 +153,15 @@ function noteFor(outcome) {
   return notes.join(" · ");
 }
 
+function appendNote(bubble, note) {
+  if (!note) return;
+  const badge = document.createElement("span");
+  badge.className = "badge";
+  badge.textContent = note;
+  bubble.appendChild(document.createElement("br"));
+  bubble.appendChild(badge);
+}
+
 async function sendMessage(text) {
   if (!text.trim()) return;
   addBubble(text, "user");
@@ -164,14 +173,36 @@ async function sendMessage(text) {
   chatting = true;
   sendBtn.disabled = true;
   const typing = addTyping();
+  // Streaming: deltas arrive while the model is still generating; the
+  // typing placeholder is swapped for a real bubble on the first chunk.
+  let bubble = null;
+  const onDelta = new Channel();
+  onDelta.onmessage = (msg) => {
+    if (!msg?.delta) return;
+    if (!bubble) {
+      typing.remove();
+      bubble = addBubble("", "bot");
+    }
+    bubble.textContent += msg.delta;
+    messages.scrollTop = messages.scrollHeight;
+  };
   try {
-    const outcome = await invoke("dialogue_chat", { userText: text, sessionId: SESSION_ID });
-    typing.remove();
-    addBubble(outcome.reply, "bot", { note: noteFor(outcome) });
+    const outcome = await invoke("dialogue_chat_stream", {
+      userText: text,
+      sessionId: SESSION_ID,
+      onDelta,
+    });
+    if (!bubble) {
+      // No deltas at all (fallback line / dead model) — render whole reply.
+      bubble = addBubble("", "bot");
+    }
+    bubble.textContent = outcome.reply;
+    appendNote(bubble, noteFor(outcome));
     // Speaking counts as "being talked to": flash the greeted face.
     invoke("face_preview", { state: "greeted" }).catch(() => {});
   } catch (err) {
-    typing.remove();
+    if (typing.isConnected) typing.remove();
+    if (bubble?.isConnected) bubble.remove();
     addBubble(`（出错了：${err}）`, "bot");
   } finally {
     chatting = false;

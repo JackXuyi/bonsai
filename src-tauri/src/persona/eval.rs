@@ -60,6 +60,25 @@ pub struct Turn {
 
 pub trait DialogueBackend: Send {
     fn reply(&mut self, system: &str, history: &[Turn], user: &str, temperature: f64) -> String;
+
+    /// Streaming variant: `on_delta` gets every incremental chunk as it is
+    /// produced; the return value is still the full reply. Default falls back
+    /// to one-shot — the whole reply arrives as a single delta — so scripted
+    /// backends need no special casing.
+    fn reply_streaming(
+        &mut self,
+        system: &str,
+        history: &[Turn],
+        user: &str,
+        temperature: f64,
+        on_delta: &mut dyn FnMut(&str),
+    ) -> String {
+        let full = self.reply(system, history, user, temperature);
+        if !full.is_empty() {
+            on_delta(&full);
+        }
+        full
+    }
 }
 
 /// CI backend: maps scripted user turns to scripted replies; everything
@@ -107,17 +126,39 @@ impl Default for LocalBackend {
     }
 }
 
+fn build_msgs(system: &str, history: &[Turn], user: &str) -> Vec<crate::llm::Msg> {
+    let mut msgs = Vec::with_capacity(history.len() * 2 + 2);
+    msgs.push(crate::llm::Msg::system(system));
+    for t in history {
+        msgs.push(crate::llm::Msg::user(t.user.clone()));
+        msgs.push(crate::llm::Msg::assistant(t.assistant.clone()));
+    }
+    msgs.push(crate::llm::Msg::user(user));
+    msgs
+}
+
 impl DialogueBackend for LocalBackend {
     fn reply(&mut self, system: &str, history: &[Turn], user: &str, temperature: f64) -> String {
-        let mut msgs = Vec::with_capacity(history.len() * 2 + 2);
-        msgs.push(crate::llm::Msg::system(system));
-        for t in history {
-            msgs.push(crate::llm::Msg::user(t.user.clone()));
-            msgs.push(crate::llm::Msg::assistant(t.assistant.clone()));
-        }
-        msgs.push(crate::llm::Msg::user(user));
         self.client
-            .chat(&msgs, temperature, crate::llm::CHAT_TIMEOUT_SECS)
+            .chat(&build_msgs(system, history, user), temperature, crate::llm::CHAT_TIMEOUT_SECS)
+            .unwrap_or_default()
+    }
+
+    fn reply_streaming(
+        &mut self,
+        system: &str,
+        history: &[Turn],
+        user: &str,
+        temperature: f64,
+        on_delta: &mut dyn FnMut(&str),
+    ) -> String {
+        self.client
+            .chat_stream(
+                &build_msgs(system, history, user),
+                temperature,
+                crate::llm::CHAT_TIMEOUT_SECS,
+                |delta| on_delta(delta),
+            )
             .unwrap_or_default()
     }
 }

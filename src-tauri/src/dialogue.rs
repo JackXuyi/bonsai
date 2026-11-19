@@ -103,9 +103,40 @@ pub fn chat_turn(
     hour: u32,
     raining: bool,
 ) -> rusqlite::Result<DialogueOutcome> {
+    chat_turn_inner(conn, backend, card, session_id, user_text, hour, raining, None)
+}
+
+/// Same turn with incremental delivery: every model chunk goes to `on_delta`
+/// while it is still being generated (the frontend renders it live).
+pub fn chat_turn_streaming(
+    conn: &Connection,
+    backend: &mut dyn DialogueBackend,
+    card: &Persona,
+    session_id: &str,
+    user_text: &str,
+    hour: u32,
+    raining: bool,
+    on_delta: &mut dyn FnMut(&str),
+) -> rusqlite::Result<DialogueOutcome> {
+    chat_turn_inner(conn, backend, card, session_id, user_text, hour, raining, Some(on_delta))
+}
+
+fn chat_turn_inner(
+    conn: &Connection,
+    backend: &mut dyn DialogueBackend,
+    card: &Persona,
+    session_id: &str,
+    user_text: &str,
+    hour: u32,
+    raining: bool,
+    mut on_delta: Option<&mut dyn FnMut(&str)>,
+) -> rusqlite::Result<DialogueOutcome> {
     let system = system_prompt(conn, card, hour, raining)?;
     let history = db::dialogue_history(conn, session_id, MAX_HISTORY_TURNS)?;
-    let raw = backend.reply(&system, &history, user_text, CHAT_TEMPERATURE);
+    let raw = match on_delta.as_deref_mut() {
+        Some(cb) => backend.reply_streaming(&system, &history, user_text, CHAT_TEMPERATURE, cb),
+        None => backend.reply(&system, &history, user_text, CHAT_TEMPERATURE),
+    };
     let model_used = !raw.trim().is_empty();
     let reply = if model_used {
         raw
@@ -256,6 +287,39 @@ pub fn dialogue_chat(
     .map_err(|e| e.to_string())
 }
 
+/// Streaming chat command: deltas go to the frontend via the IPC channel
+/// while the model is still generating; the final outcome (filter report,
+/// fallback flag) returns once the reply is complete. The full reply is ALSO
+/// in the outcome, so a client that ignores the channel still works.
+#[tauri::command]
+pub fn dialogue_chat_stream(
+    store: tauri::State<'_, MemoryStore>,
+    card: tauri::State<'_, Persona>,
+    user_text: String,
+    session_id: Option<String>,
+    raining: Option<bool>,
+    on_delta: tauri::ipc::Channel<serde_json::Value>,
+) -> Result<DialogueOutcome, String> {
+    let session = session_id.unwrap_or_else(|| "default".to_string());
+    let hour = chrono::Local::now().hour() as u32;
+    let mut backend = crate::persona::backend().map_err(|e| e.to_string())?;
+    let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+    let mut emit = |delta: &str| {
+        let _ = on_delta.send(serde_json::json!({ "delta": delta }));
+    };
+    chat_turn_streaming(
+        &conn,
+        backend.as_mut(),
+        &card,
+        &session,
+        &user_text,
+        hour,
+        raining.unwrap_or(false),
+        &mut emit,
+    )
+    .map_err(|e| e.to_string())
+}
+
 /// Manual proactive trigger (frontend button / testing). Bypasses the daily
 /// quota on purpose: an explicit user request is not proactivity.
 #[tauri::command]
@@ -357,6 +421,32 @@ mod tests {
         dead.client = crate::llm::OllamaClient::new("http://127.0.0.1:1", "test");
         let text = proactive_text(&conn, &mut dead, &c, 10, false).unwrap();
         assert!(text.is_none(), "dead model → silence, not a canned line");
+    }
+
+    #[test]
+    fn chat_turn_streaming_deltas_and_records_match_chat_turn() {
+        let conn = mem();
+        let c = card();
+        let mut backend = MockBackend::new("分块也不会丢");
+        let mut deltas = Vec::new();
+        let out = chat_turn_streaming(
+            &conn,
+            &mut backend,
+            &c,
+            "s1",
+            "在吗",
+            10,
+            false,
+            &mut |d| deltas.push(d.to_string()),
+        )
+        .unwrap();
+        // Default trait impl → one-shot: the whole reply arrives as one delta.
+        assert_eq!(deltas, vec!["分块也不会丢".to_string()]);
+        assert_eq!(out.reply, "分块也不会丢");
+        assert!(out.model_used);
+        let history = db::dialogue_history(&conn, "s1", 6).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].assistant, "分块也不会丢");
     }
 
     #[test]

@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
 # Pull the default model into the project-local model store (.llm/models).
-#   pnpm llm:pull            # qwen3:4b (default)
+#   pnpm llm:pull            # qwen3.5:2b (default)
 #   pnpm llm:pull <model>    # any other tag
 #
 # Uses the sidecar binary itself as CLI/server — no system Ollama required.
 # Starts a temporary server on the app's port, pulls, then stops it.
 #
 # China-friendly fallback: if `ollama pull` fails (registry.ollama.ai has no
-# official mainland-China mirror), qwen3:4b is re-fetched as an official GGUF
-# from ModelScope (Aliyun domestic CDN) and imported via `ollama create`.
-# Env overrides: BONSAI_GGUF_URL, BONSAI_LLM_PORT.
+# official mainland-China mirror), known models are re-fetched as official GGUF
+# from ModelScope (Aliyun domestic CDN) or a locally available GGUF copy, and
+# imported via `ollama create`.
+# Env overrides: BONSAI_GGUF_URL, BONSAI_LOCAL_GGUF, BONSAI_LLM_PORT.
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-MODEL="${1:-qwen3:4b}"
+MODEL="${1:-qwen3.5:2b}"
 PORT="${BONSAI_LLM_PORT:-11435}"
 
 ARCH="$(uname -m)"
@@ -48,6 +49,37 @@ for i in $(seq 1 30); do
 done
 [ "$up" -eq 1 ] || { echo "error: temporary ollama server failed to start (see output above)" >&2; exit 1; }
 
+# Already in the store? Nothing to do.
+if "$BIN" show "$MODEL" >/dev/null 2>&1; then
+  echo "model already present: $MODEL"
+  exit 0
+fi
+
+# Fast path — reuse a GGUF already sitting on this machine. The default
+# location is the model cache of us.followup.dev (another local app that
+# ships the same Qwen3.5-2B Q4_K_M GGUF); override with BONSAI_LOCAL_GGUF.
+LOCAL_GGUF="${BONSAI_LOCAL_GGUF:-}"
+case "$MODEL" in
+  qwen3.5:2b)
+    LOCAL_GGUF="${LOCAL_GGUF:-$HOME/Library/Application Support/us.followup.dev/models/summary/Qwen3.5-2B-Q4_K_M.gguf}"
+    ;;
+esac
+
+GGUF_DIR="$MODELS_DIR/gguf"
+mkdir -p "$GGUF_DIR"
+
+if [ -n "$LOCAL_GGUF" ] && [ -f "$LOCAL_GGUF" ]; then
+  echo "importing $MODEL from local GGUF: $LOCAL_GGUF"
+  GGUF="$GGUF_DIR/$(basename "$LOCAL_GGUF")"
+  if [ ! -f "$GGUF" ]; then
+    cp "$LOCAL_GGUF" "$GGUF.part" && mv "$GGUF.part" "$GGUF"
+  fi
+  printf 'FROM %s\n' "$GGUF" > "$GGUF_DIR/Modelfile"
+  "$BIN" create "$MODEL" -f "$GGUF_DIR/Modelfile"
+  echo "done (imported from local GGUF)."
+  exit 0
+fi
+
 echo "pulling $MODEL into $MODELS_DIR ..."
 if "$BIN" pull "$MODEL"; then
   echo "done."
@@ -60,8 +92,13 @@ fi
 GGUF_URL="${BONSAI_GGUF_URL:-}"
 case "$MODEL" in
   qwen3:4b)
+    # Legacy default; ModelScope still mirrors its GGUF.
     GGUF_URL="${GGUF_URL:-https://modelscope.cn/models/Qwen/Qwen3-4B-GGUF/resolve/master/Qwen3-4B-Q4_K_M.gguf}"
     GGUF_NAME="Qwen3-4B-Q4_K_M.gguf"
+    ;;
+  *)
+    # No known China GGUF mirror for other tags (e.g. qwen3.5:2b) — the
+    # registry path above is the only source. Set BONSAI_GGUF_URL to inject one.
     ;;
 esac
 
@@ -73,9 +110,7 @@ fi
 
 GGUF_NAME="${GGUF_NAME:-$(basename "${GGUF_URL%%\?*}")}"
 
-echo "pull failed (registry.ollama.ai unreachable?) — falling back to ModelScope GGUF"
-GGUF_DIR="$MODELS_DIR/gguf"
-mkdir -p "$GGUF_DIR"
+echo "pull failed (registry.ollama.ai unreachable?) — falling back to downloaded GGUF"
 GGUF="$GGUF_DIR/$GGUF_NAME"
 
 if [ ! -f "$GGUF" ]; then

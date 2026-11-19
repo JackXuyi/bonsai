@@ -132,6 +132,7 @@ pub fn run() {
             perception::perception_status,
             decision::evaluate,
             dialogue::dialogue_chat,
+            dialogue::dialogue_chat_stream,
             dialogue::dialogue_proactive_now,
             report::daily_report,
         ])

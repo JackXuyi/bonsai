@@ -95,8 +95,10 @@ SRC="$RES/ollama"
 install -m 0755 "$SRC" "$DEST"
 echo "sidecar installed: $DEST"
 
-# Runner + shared libraries. Skipped on purpose: mlx_metal_* (MLX-only models,
-# ~500 MB), libggml-cpu-*.so (Linux CPU variants) and the GUI/licence assets.
+# Runner + shared libraries. MLX runtime dirs (mlx_metal_*) are copied too
+# when present (qwen3.5-class models ship as MLX weights on Ollama's default
+# tag), but they are optional — GGUF imports via `ollama create` do not need
+# them. Skipped on purpose: libggml-cpu-*.so (Linux CPU variants) and GUI assets.
 echo "staging runtime into $RUNTIME_DIR ..."
 rm -rf "$RUNTIME_DIR"
 mkdir -p "$RUNTIME_DIR"
@@ -104,6 +106,16 @@ install -m 0755 "$RES/llama-server" "$RUNTIME_DIR/llama-server"
 for f in "$RES"/libllama*.dylib "$RES"/libggml*.dylib "$RES"/libmtmd*.dylib; do
   [ -e "$f" ] && cp -a "$f" "$RUNTIME_DIR/"
 done
-echo "runtime installed: $(ls "$RUNTIME_DIR" | wc -l | tr -d ' ') files, $(du -sh "$RUNTIME_DIR" | cut -f1)"
+for mlx in "$RES"/mlx_metal_v3 "$RES"/mlx_metal_v4; do
+  [ -d "$mlx" ] && cp -a "$mlx" "$RUNTIME_DIR/"
+done
+echo "runtime installed: $(ls "$RUNTIME_DIR" | wc -l | tr -d ' ') entries, $(du -sh "$RUNTIME_DIR" | cut -f1)"
+
+# The CLI looks for the runner next to itself. tauri-build / build.rs arrange
+# that inside the app and target/debug, but scripts that run this binary
+# directly (pull_model.sh) need it here too — relative symlinks, zero copy.
+for entry in "$RUNTIME_DIR"/*; do
+  ln -sfn "ollama-runtime/$(basename "$entry")" "$BIN_DIR/$(basename "$entry")"
+done
 
 "$DEST" --version

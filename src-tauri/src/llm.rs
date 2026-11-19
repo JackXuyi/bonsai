@@ -15,14 +15,14 @@
 //!
 //! Config via env (so the binary needs no UI settings yet):
 //! - `OLLAMA_HOST` — base URL, default `http://127.0.0.1:11435`
-//! - `BONSAI_LLM_MODEL` — model tag, default `qwen3:4b`
+//! - `BONSAI_LLM_MODEL` — model tag, default `qwen3.5:2b`
 
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_BASE_URL: &str = "http://127.0.0.1:11435";
-pub const DEFAULT_MODEL: &str = "qwen3:4b";
+pub const DEFAULT_MODEL: &str = "qwen3.5:2b";
 /// One dialogue turn. Long enough for a cold-loaded 7B model on Apple Silicon.
 pub const CHAT_TIMEOUT_SECS: u64 = 120;
 /// One extraction pass over a day's utterances (plan §5.2: on timeout the
@@ -58,14 +58,14 @@ struct ChatRequest<'a> {
     /// qwen3:4b: `content` came back empty, `done_reason: length`). Both legs
     /// want direct output — dialogue for latency, extraction for clean JSON.
     think: bool,
-    options: Options<'a>,
+    options: Options,
 }
 
 #[derive(Debug, Serialize)]
-struct Options<'a> {
+struct Options {
     temperature: f64,
     #[serde(skip_serializing_if = "is_zero")]
-    num_ctx: &'a usize,
+    num_ctx: usize,
 }
 
 fn is_zero(v: &usize) -> bool {
@@ -132,13 +132,7 @@ impl OllamaClient {
     /// One chat completion. `messages` must already carry the system prompt
     /// (persona card for dialogue, extraction instructions for memory).
     pub fn chat(&self, messages: &[Msg], temperature: f64, timeout: u64) -> Result<String, LlmError> {
-        let req = ChatRequest {
-            model: &self.model,
-            messages,
-            stream: false,
-            think: false,
-            options: Options { temperature, num_ctx: &0 },
-        };
+        let req = self.request(messages, temperature, false);
         let resp = ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(timeout))
             .build()
@@ -153,6 +147,74 @@ impl OllamaClient {
             .map_err(|e| LlmError::Decode(e.to_string()))?;
         Ok(body.message.content)
     }
+
+    fn request<'a>(&'a self, messages: &'a [Msg], temperature: f64, stream: bool) -> ChatRequest<'a> {
+        ChatRequest {
+            model: &self.model,
+            messages,
+            stream,
+            think: false,
+            options: Options { temperature, num_ctx: 0 },
+        }
+    }
+
+    /// Streaming chat: same request with `stream: true`, feeding every
+    /// content chunk to `on_delta` as it arrives, returning the full reply.
+    /// The transport is NDJSON (one JSON object per line).
+    pub fn chat_stream(
+        &self,
+        messages: &[Msg],
+        temperature: f64,
+        timeout: u64,
+        mut on_delta: impl FnMut(&str),
+    ) -> Result<String, LlmError> {
+        let req = self.request(messages, temperature, true);
+        let resp = ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(timeout))
+            .build()
+            .post(&format!("{}/api/chat", self.base_url))
+            .send_json(&req)
+            .map_err(|e| match e {
+                ureq::Error::Status(code, _) => LlmError::Status(code),
+                other => LlmError::Transport(other.to_string()),
+            })?;
+        let reader = std::io::BufReader::new(resp.into_reader());
+        use std::io::BufRead;
+        let mut full = String::new();
+        for line in reader.lines() {
+            let line = line.map_err(|e| LlmError::Transport(e.to_string()))?;
+            match parse_stream_line(&line) {
+                Ok(Some(delta)) => {
+                    full.push_str(&delta);
+                    on_delta(&delta);
+                }
+                Ok(None) => {}
+                Err(reason) => return Err(LlmError::Decode(reason)),
+            }
+        }
+        Ok(full)
+    }
+}
+
+/// Parse one NDJSON line of the streaming chat API into the content delta.
+/// `Ok(None)` = keepalive / final bookkeeping line with no content.
+/// Pure function so the protocol handling has unit tests.
+fn parse_stream_line(line: &str) -> Result<Option<String>, String> {
+    if line.trim().is_empty() {
+        return Ok(None); // keepalive / blank line
+    }
+    #[derive(Deserialize)]
+    struct StreamLine {
+        #[serde(default)]
+        message: Option<RespMessage>,
+        #[serde(default)]
+        error: Option<String>,
+    }
+    let parsed: StreamLine =
+        serde_json::from_str(line).map_err(|e| format!("bad stream line: {e}"))?;    if let Some(reason) = parsed.error {
+        return Err(reason);
+    }
+    Ok(parsed.message.map(|m| m.content).filter(|c| !c.is_empty()))
 }
 
 #[cfg(test)]
@@ -182,14 +244,37 @@ mod tests {
     fn chat_request_disables_thinking() {
         let msgs = vec![Msg::user("hi")];
         let req = ChatRequest {
-            model: "qwen3:4b",
+            model: "qwen3.5:2b",
             messages: &msgs,
             stream: false,
             think: false,
-            options: Options { temperature: 0.7, num_ctx: &0 },
+            options: Options { temperature: 0.7, num_ctx: 0 },
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["think"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn stream_line_parses_content_deltas() {
+        let line = r#"{"message":{"role":"assistant","content":"你好"},"done":false}"#;
+        assert_eq!(parse_stream_line(line).unwrap(), Some("你好".to_string()));
+    }
+
+    #[test]
+    fn stream_line_ignores_empty_and_final_lines() {
+        assert_eq!(parse_stream_line(r#"{"message":{"role":"assistant","content":""},"done":false}"#).unwrap(), None);
+        let final_line = r#"{"message":{"role":"assistant","content":""},"done":true,"done_reason":"stop"}"#;
+        assert_eq!(parse_stream_line(final_line).unwrap(), None);
+        assert_eq!(parse_stream_line("").unwrap(), None); // keepalive
+    }
+
+    #[test]
+    fn stream_line_surfaces_server_errors() {
+        let line = r#"{"error":"model not found"}"#;
+        assert_eq!(
+            parse_stream_line(line).unwrap_err(),
+            "model not found".to_string()
+        );
     }
 
     #[test]

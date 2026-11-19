@@ -51,11 +51,35 @@ fn stage_sidecar_runtime() {
                 let _ = std::fs::remove_file(&to);
                 let _ = std::os::unix::fs::symlink(target, &to);
             }
-        } else if file_type.is_file() && std::fs::copy(&from, &to).is_ok() {
+        } else if file_type.is_dir() {
+            // MLX runtime lives in mlx_metal_v3/ / mlx_metal_v4/ subdirs.
+            copy_dir_contents(&from, &to);
+        } else if std::fs::copy(&from, &to).is_ok() {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
                 let _ = std::fs::set_permissions(&to, std::fs::Permissions::from_mode(0o755));
+            }
+        }
+    }
+}
+
+fn copy_dir_contents(from: &std::path::Path, to: &std::path::Path) {
+    if std::fs::create_dir_all(to).is_err() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(from) else { return };
+    for entry in entries.flatten() {
+        let src_path = entry.path();
+        let dst_path = to.join(entry.file_name());
+        let Ok(file_type) = entry.file_type() else { continue };
+        if file_type.is_dir() {
+            copy_dir_contents(&src_path, &dst_path);
+        } else if std::fs::copy(&src_path, &dst_path).is_ok() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&dst_path, std::fs::Permissions::from_mode(0o755));
             }
         }
     }
