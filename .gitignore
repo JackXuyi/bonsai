@@ -11,6 +11,13 @@ src-tauri/gen/
 # Node / pnpm
 node_modules/
 dist/
+.pnpm-store/
+
+# Next.js (frontend/)
+frontend/.next/
+frontend/out/
+frontend/next-env.d.ts
+*.tsbuildinfo
 
 # Local LLM sidecar + models (build assets, downloaded by `pnpm llm:sidecar`)
 src-tauri/binaries/
@@ -21,3 +28,4 @@ src-tauri/binaries/
 
 # Playwright CLI scratch output (snapshots, screenshots)
 .playwright-cli/
+s1.yaml

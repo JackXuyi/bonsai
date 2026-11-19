@@ -1,0 +1,696 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>bonsai 设置面板 · 交互设计稿</title>
+<style>
+:root {
+  --bg: #f4f1e9; --bg-sunk: #e7e1d1; --card: #fffdf8;
+  --pot: #8b5a2b; --pot-rim: #a66f38; --trunk: #5c3a20;
+  --leaf: #4c8c2b; --leaf-dark: #3a6e21; --leaf-light: #6aa846;
+  --ink: #322f20; --muted: #8a8468; --faint: #a9a28a;
+  --accent: #4c8c2b; --accent-ink: #3f7024; --accent-wash: rgba(76,140,43,.1);
+  --line: #e3ddcb; --line-soft: rgba(60,50,30,.07);
+  --shadow: 0 2px 8px rgba(60,50,30,.07);
+  --warn: #b45309; --warn-wash: rgba(180,83,9,.08);
+  --danger: #a13d2d;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  font-family: -apple-system, "PingFang SC", "Helvetica Neue", sans-serif;
+  font-size: 13px; color: var(--ink); user-select: none;
+  background: #d9d3c1; min-height: 100vh;
+  display: flex; flex-direction: column; align-items: center; padding: 28px 0 40px;
+  -webkit-font-smoothing: antialiased;
+}
+.stage-note {
+  font-size: 12px; color: #6d674e; margin-bottom: 14px; letter-spacing: .5px;
+}
+.stage-note b { color: var(--accent-ink); }
+.window {
+  width: 520px; height: 560px; background: var(--bg);
+  border-radius: 12px; box-shadow: 0 18px 50px rgba(40,34,18,.28), 0 0 0 1px rgba(60,50,30,.12);
+  display: grid; grid-template-columns: 92px 1fr; overflow: hidden;
+}
+/* ── sidebar ── */
+.sidebar {
+  background: var(--bg-sunk); border-right: 1px solid var(--line);
+  display: flex; flex-direction: column; align-items: center; padding: 12px 0 10px; gap: 2px;
+}
+.brand-face { width: 52px; height: 52px; border-radius: 50%; cursor: pointer; position: relative; transition: transform .18s ease; }
+.brand-face:hover { transform: scale(1.06); }
+.brand-face:active { transform: scale(.94); }
+.brand-name { font-weight: 600; font-size: 13px; margin-top: 4px; }
+.brand-mood { display: flex; align-items: center; gap: 4px; font-size: 10px; color: var(--muted); margin: 2px 0 10px; }
+.mood-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--leaf); }
+.nav { display: flex; flex-direction: column; gap: 2px; width: 100%; padding: 0 8px; }
+.nav button {
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  border: 0; background: transparent; border-radius: 8px; padding: 7px 0 6px;
+  font-size: 11px; color: var(--muted); cursor: pointer; font-family: inherit; width: 100%;
+  transition: background .15s ease, color .15s ease;
+}
+.nav button svg { width: 17px; height: 17px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.nav button:hover { background: rgba(60,50,30,.05); color: var(--ink); }
+.nav button.active { background: var(--card); color: var(--accent-ink); box-shadow: var(--shadow); font-weight: 600; }
+.side-foot { margin-top: auto; font-size: 9px; color: var(--faint); }
+/* ── content ── */
+.content { display: flex; flex-direction: column; overflow: hidden; }
+.page-head {
+  flex: none; display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 16px 9px; border-bottom: 1px solid var(--line-soft);
+}
+.page-title { font-size: 15px; font-weight: 700; letter-spacing: 1px; }
+.page-status { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); }
+.page-status .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--leaf); }
+.page-status .dot.off { background: var(--faint); }
+.tab-body { flex: 1; overflow-y: auto; padding: 12px 16px 16px; display: none; }
+.tab-body.active { display: block; }
+.tab-body.chat-flow { display: none; flex-direction: column; padding: 0; overflow: hidden; }
+.tab-body.chat-flow.active { display: flex; }
+/* generic card */
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 13px; margin-bottom: 12px; box-shadow: var(--shadow); }
+.card-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 8px; }
+.card-title { font-size: 13px; font-weight: 700; }
+.card-sub { font-size: 11px; color: var(--muted); }
+.hint { font-size: 11px; color: var(--muted); line-height: 1.5; }
+/* buttons */
+.btn {
+  font-family: inherit; font-size: 12px; border: 1px solid var(--line); background: var(--card);
+  color: var(--ink); border-radius: 7px; padding: 5px 12px; cursor: pointer; transition: all .15s ease;
+}
+.btn:hover { border-color: var(--accent); color: var(--accent-ink); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+.btn.primary:hover { background: var(--leaf-dark); }
+.btn.danger-ghost { color: var(--danger); border-color: rgba(161,61,45,.35); }
+.btn:disabled { opacity: .45; cursor: not-allowed; }
+/* ── chat ── */
+.chat-scroll { flex: 1; overflow-y: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+.msg { max-width: 78%; padding: 8px 11px; border-radius: 12px; line-height: 1.55; font-size: 12.5px; }
+.msg.user { align-self: flex-end; background: var(--accent-wash); border: 1px solid rgba(76,140,43,.18); border-bottom-right-radius: 4px; }
+.msg.bot { align-self: flex-start; background: var(--card); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
+.msg-tag { font-size: 10px; color: var(--faint); margin-top: 4px; display: flex; align-items: center; gap: 3px; }
+.composer { flex: none; display: flex; gap: 8px; padding: 10px 16px 14px; border-top: 1px solid var(--line-soft); }
+.composer textarea {
+  flex: 1; resize: none; border: 1px solid var(--line); border-radius: 10px; padding: 8px 11px;
+  font-family: inherit; font-size: 12.5px; background: var(--card); color: var(--ink); height: 40px;
+}
+.composer .send { width: 40px; border-radius: 10px; border: 0; background: var(--accent); color: #fff; cursor: pointer; font-size: 15px; }
+/* ── faces ── */
+.big-face-wrap { display: flex; justify-content: center; padding: 6px 0 2px; }
+.big-face-wrap svg { width: 150px; height: 150px; }
+.seg-row { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 4px; }
+.seg-row button { font-family: inherit; font-size: 11.5px; border: 1px solid var(--line); background: var(--card); color: var(--muted); border-radius: 999px; padding: 4px 11px; cursor: pointer; }
+.seg-row button.on { background: var(--accent-wash); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+/* ── tools ── */
+.tool-row { display: flex; align-items: center; gap: 10px; padding: 9px 4px; border-bottom: 1px solid var(--line-soft); }
+.tool-row:last-child { border-bottom: 0; }
+.tool-ico { width: 30px; height: 30px; flex: none; border-radius: 8px; background: var(--accent-wash); display: flex; align-items: center; justify-content: center; font-size: 14px; }
+.tool-name { font-size: 12.5px; font-weight: 600; }
+.tool-sub { font-size: 11px; color: var(--muted); }
+.tool-row .btn { margin-left: auto; }
+.kv-row { display: flex; align-items: center; justify-content: space-between; padding: 6px 2px; font-size: 12px; }
+.kv-row .k { color: var(--muted); }
+.toggle { width: 32px; height: 18px; border-radius: 999px; background: var(--bg-sunk); border: 1px solid var(--line); position: relative; cursor: pointer; flex: none; }
+.toggle .knob { position: absolute; top: 1px; left: 1px; width: 14px; height: 14px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.15); transition: left .18s ease; }
+.toggle.on { background: var(--accent); border-color: var(--accent); }
+.toggle.on .knob { left: 15px; }
+/* ── memory ── */
+.badges { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.badge { font-size: 11px; background: var(--bg-sunk); border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; color: var(--muted); }
+.badge b { color: var(--ink); font-weight: 600; }
+.mem-row { display: flex; gap: 8px; padding: 7px 2px; border-bottom: 1px solid var(--line-soft); font-size: 12px; align-items: baseline; }
+.mem-row:last-child { border-bottom: 0; }
+.mem-kind { flex: none; width: 86px; font-size: 10.5px; color: var(--faint); font-family: ui-monospace, Menlo, monospace; }
+.mem-derive { color: #b0aa92; font-style: italic; }
+/* ── settings: provider tabs ── */
+.ptabs { display: flex; gap: 4px; background: var(--bg-sunk); border-radius: 9px; padding: 3px; }
+.ptabs button {
+  flex: 1; font-family: inherit; font-size: 12px; border: 0; background: transparent; color: var(--muted);
+  border-radius: 7px; padding: 6px 0; cursor: pointer; transition: all .15s ease;
+}
+.ptabs button.on { background: var(--card); color: var(--ink); font-weight: 600; box-shadow: var(--shadow); }
+.ptabs button.disabled { opacity: .4; cursor: not-allowed; }
+.pane { display: none; }
+.pane.on { display: block; }
+/* model cards */
+.mgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.mcard {
+  border: 1px solid var(--line); background: var(--card); border-radius: 9px; padding: 9px 11px;
+  cursor: pointer; transition: all .15s ease; position: relative;
+}
+.mcard:hover { border-color: var(--accent); }
+.mcard.on { border-color: var(--accent); background: var(--accent-wash); box-shadow: 0 0 0 1px var(--accent) inset; }
+.mcard .m-name { font-weight: 700; font-size: 12.5px; display: flex; align-items: center; gap: 5px; }
+.mcard .m-meta { font-size: 10.5px; color: var(--muted); margin-top: 3px; line-height: 1.5; }
+.mcard .check { position: absolute; top: 8px; right: 9px; width: 15px; height: 15px; border-radius: 50%; background: var(--accent); color: #fff; font-size: 9px; display: none; align-items: center; justify-content: center; }
+.mcard.on .check { display: flex; }
+.tag { font-size: 9.5px; border-radius: 4px; padding: 1px 5px; font-weight: 600; }
+.tag.ok { background: rgba(76,140,43,.12); color: var(--accent-ink); }
+.tag.warn { background: var(--warn-wash); color: var(--warn); }
+.tag.ram { background: var(--bg-sunk); color: var(--muted); font-weight: 500; }
+.mcard.testing::after {
+  content: ""; position: absolute; inset: 0; border-radius: 9px;
+  background: rgba(255,253,248,.7) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='18' height='18' viewBox='0 0 24 24'%3E%3Ccircle cx='12' cy='12' r='9' fill='none' stroke='%234c8c2b' stroke-width='2.5' stroke-dasharray='42' stroke-linecap='round'%3E%3CanimateTransform attributeName='transform' type='rotate' from='0 12 12' to='360 12 12' dur='.8s' repeatCount='indefinite'/%3E%3C/circle%3E%3C/svg%3E") center/18px no-repeat;
+}
+/* download rows */
+.dl-row { display: flex; align-items: center; gap: 8px; padding: 8px 2px; border-bottom: 1px solid var(--line-soft); }
+.dl-row:last-child { border-bottom: 0; }
+.dl-info { flex: 1; min-width: 0; }
+.dl-name { font-size: 12px; font-weight: 600; display: flex; gap: 5px; align-items: center; }
+.dl-meta { font-size: 10.5px; color: var(--muted); margin-top: 2px; }
+.dl-bar { height: 4px; border-radius: 99px; background: var(--bg-sunk); margin-top: 6px; overflow: hidden; display: none; }
+.dl-bar i { display: block; height: 100%; background: var(--accent); border-radius: 99px; width: 0%; transition: width .3s ease; }
+.dl-row.downloading .dl-bar { display: block; }
+.status-chip { font-size: 10.5px; color: var(--muted); display: flex; align-items: center; gap: 5px; margin-top: 8px; }
+.status-chip .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--leaf); }
+.endpoint { font-family: ui-monospace, Menlo, monospace; font-size: 10.5px; background: var(--bg-sunk); border-radius: 4px; padding: 1px 6px; }
+/* forms */
+.field { margin-bottom: 9px; }
+.field label { font-size: 11px; color: var(--muted); display: block; margin-bottom: 3px; }
+.field input {
+  width: 100%; font-family: inherit; font-size: 12.5px; border: 1px solid var(--line);
+  border-radius: 8px; padding: 7px 10px; background: #fff; color: var(--ink); outline: none;
+}
+.field input:focus { border-color: var(--accent); }
+.field .fix { display: flex; gap: 8px; }
+.field .fix input { flex: 1; }
+.test-line { display: flex; align-items: center; gap: 8px; margin-top: 4px; font-size: 11.5px; min-height: 18px; }
+.test-line.ok { color: var(--accent-ink); }
+.test-line.err { color: var(--danger); }
+/* warn banner */
+.warnbox { background: var(--warn-wash); border: 1px solid rgba(180,83,9,.25); border-radius: 8px; padding: 8px 11px; font-size: 11px; color: var(--warn); line-height: 1.55; margin-bottom: 10px; }
+/* log */
+.log-tabs { display: flex; gap: 4px; margin-bottom: 8px; }
+.log-tabs button { font-family: inherit; font-size: 11px; border: 1px solid var(--line); background: var(--card); color: var(--muted); border-radius: 6px; padding: 3px 10px; cursor: pointer; }
+.log-tabs button.on { background: var(--bg-sunk); color: var(--ink); font-weight: 600; }
+.logbox {
+  background: #2b2820; color: #cfc9b4; font-family: ui-monospace, Menlo, monospace; font-size: 10.5px;
+  border-radius: 8px; padding: 10px 12px; line-height: 1.7; max-height: 128px; overflow-y: auto;
+}
+.logbox .lv-warn { color: #e0a34e; }
+.logbox .lv-info { color: #8fbf6a; }
+/* modal */
+.overlay { position: absolute; inset: 0; background: rgba(40,34,18,.4); display: none; align-items: center; justify-content: center; z-index: 20; }
+.overlay.show { display: flex; }
+.modal { width: 330px; background: var(--card); border-radius: 12px; padding: 18px 20px 16px; box-shadow: 0 20px 60px rgba(0,0,0,.3); }
+.modal .m-title { font-size: 14px; font-weight: 700; margin-bottom: 10px; }
+.modal .m-body { font-size: 12px; line-height: 1.65; color: var(--ink); }
+.modal .m-body ul { margin: 8px 0 0 16px; }
+.modal .m-body li { margin-bottom: 3px; color: var(--muted); }
+.modal .m-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+/* toast */
+.toast {
+  position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%) translateY(8px);
+  background: var(--ink); color: #f4f1e9; font-size: 12px; border-radius: 999px; padding: 7px 16px;
+  opacity: 0; pointer-events: none; transition: all .25s ease; z-index: 30; white-space: nowrap;
+}
+.toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+/* chat mock face svg */
+.face-svg .pot { fill: var(--pot); } .face-svg .pot-rim { fill: var(--pot-rim); }
+.face-svg .trunk { stroke: var(--trunk); fill: none; stroke-width: 5; stroke-linecap: round; }
+.face-svg .leaf { fill: var(--leaf); } .face-svg .leaf-b { fill: var(--leaf-dark); } .face-svg .leaf-c { fill: var(--leaf-light); }
+.face-svg .flower { fill: #d98ea6; } .face-svg .moss { fill: #7a9e56; }
+.face-svg .eye { fill: var(--trunk); } .face-svg .mouth { stroke: var(--trunk); fill: none; stroke-width: 2.4; stroke-linecap: round; }
+.actions-inline { display: flex; gap: 8px; margin-top: 8px; }
+.spin { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: rot .7s linear infinite; vertical-align: -2px; }
+@keyframes rot { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<p class="stage-note">bonsai · 交互设计稿（<b>520 × 560</b> · 左侧 tab 导航 + 右侧内容）— 设置页可完整操作：本地/云端双 tab、点模型卡切换、模拟下载、云端配置清单（添加/编辑/删除弹窗）、opt-in 模态、忘记全部两段式确认</p>
+
+<div class="window" id="win">
+  <!-- ── 左侧栏 ── -->
+  <aside class="sidebar">
+    <svg class="brand-face face-svg" id="mini-face" viewBox="0 0 200 200">
+      <path class="pot" d="M70 150 h60 l-8 34 h-44 z"/>
+      <rect class="pot-rim" x="64" y="142" width="72" height="12" rx="4"/>
+      <path class="trunk" d="M96 142 C 96 120 94 108 90 96"/>
+      <circle class="leaf" cx="100" cy="66" r="34"/>
+      <circle class="leaf-b" cx="66" cy="76" r="20"/>
+      <circle class="leaf-c" cx="134" cy="76" r="20"/>
+      <ellipse class="eye" cx="84" cy="62" rx="6" ry="8"/>
+      <ellipse class="eye" cx="116" cy="62" rx="6" ry="8"/>
+      <path class="mouth" d="M92 82 Q 100 88 108 82"/>
+    </svg>
+    <div class="brand-name">阿盆</div>
+    <div class="brand-mood"><span class="mood-dot"></span>平静</div>
+    <nav class="nav" id="nav">
+      <button data-tab="chat" class="active"><svg viewBox="0 0 24 24"><path d="M21 11.5a8.5 8.5 0 0 1-8.5 8.5 8.4 8.4 0 0 1-3.8-.9L3 21l1.9-5.7a8.4 8.4 0 0 1-.9-3.8 8.5 8.5 0 0 1 8.5-8.5 8.5 8.5 0 0 1 8.5 8.5z"/></svg>对话</button>
+      <button data-tab="face"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M8.5 10.5h.01M15.5 10.5h.01M8.5 14.5c1 .9 2.3 1.4 3.5 1.4s2.5-.5 3.5-1.4"/></svg>表情</button>
+      <button data-tab="tools"><svg viewBox="0 0 24 24"><path d="M14.7 6.3a4.5 4.5 0 0 0-6 5.6L3 17.6V21h3.4l5.7-5.7a4.5 4.5 0 0 0 5.6-6l-2.8 2.8-2.9-2.9 2.7-2.9z"/></svg>工具</button>
+      <button data-tab="memory"><svg viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v6c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></svg>记忆</button>
+      <button data-tab="settings"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3h.1a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9v.1a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>设置</button>
+    </nav>
+    <div class="side-foot">bonsai · 设计稿</div>
+  </aside>
+
+  <!-- ── 右侧内容 ── -->
+  <main class="content">
+    <div class="page-head">
+      <span class="page-title" id="page-title">对话</span>
+      <span class="page-status" id="page-status"><span class="dot"></span><span id="status-text">本地 · qwen3.5:2b</span></span>
+    </div>
+
+    <!-- 对话 -->
+    <section class="tab-body chat-flow active" data-page="chat">
+      <div class="chat-scroll">
+        <div class="msg user">帮我看看今天有什么会</div>
+        <div class="msg bot">下午 3 点有个评审会，还有 20 分钟，我提前提醒过你啦。
+          <div class="msg-tag">📅 日历 · 直接查的日历</div>
+        </div>
+        <div class="msg user">我最近是不是老在忙这个项目？</div>
+        <div class="msg bot">按我的记录，这周有 4 天都提到「评审」。要看整体节奏的话，日报里有。
+          <div class="msg-tag">事件 128 · 事实 34</div>
+        </div>
+        <div class="msg user">行，忙完了</div>
+        <div class="msg bot">辛苦。盆栽在窗台上给你留了个位置。
+          <div class="msg-tag">流式 · qwen3.5:2b · 0.9s</div>
+        </div>
+      </div>
+      <form class="composer">
+        <textarea placeholder="说点什么…"></textarea>
+        <button type="button" class="send" onclick="toast('设计稿：发送为示意')">↑</button>
+      </form>
+    </section>
+
+    <!-- 表情 -->
+    <section class="tab-body" data-page="face">
+      <div class="big-face-wrap">
+        <svg class="face-svg" viewBox="0 0 200 200">
+          <path class="pot" d="M70 150 h60 l-8 34 h-44 z"/>
+          <rect class="pot-rim" x="64" y="142" width="72" height="12" rx="4"/>
+          <path class="trunk" d="M96 142 C 96 120 94 108 90 96 M90 104 C 78 100 72 94 68 86"/>
+          <circle class="leaf" cx="100" cy="66" r="34"/>
+          <circle class="leaf-b" cx="66" cy="76" r="20"/>
+          <circle class="leaf-c" cx="134" cy="76" r="20"/>
+          <circle class="leaf" cx="100" cy="94" r="22"/>
+          <circle class="flower" cx="82" cy="52" r="4.5"/><circle class="flower" cx="118" cy="58" r="4"/>
+          <ellipse class="moss" cx="80" cy="152" rx="9" ry="3"/><ellipse class="moss" cx="106" cy="156" rx="7" ry="2.5"/>
+          <g id="big-eyes"><ellipse class="eye" cx="84" cy="62" rx="6" ry="8"/><ellipse class="eye" cx="116" cy="62" rx="6" ry="8"/></g>
+          <path class="mouth" id="big-mouth" d="M92 82 Q 100 88 108 82"/>
+        </svg>
+      </div>
+      <p class="hint" style="text-align:center;margin-bottom:4px">瞬态表情（演示 · 不改真实状态）</p>
+      <div class="seg-row" id="state-row" style="justify-content:center">
+        <button class="on">平静</button><button>专注</button><button>困</button><button>被搭话</button><button>不高兴</button><button>思考</button><button>得意</button>
+      </div>
+      <p class="hint" style="text-align:center;margin-top:8px">形态演示</p>
+      <div class="seg-row" style="justify-content:center">
+        <button>破土</button><button>抽枝</button><button class="on">成形</button><button>成景</button><button>休眠</button>
+      </div>
+      <p class="hint" style="text-align:center;margin-top:10px">☝ 点左上角小脸 = 打招呼</p>
+    </section>
+
+    <!-- 工具 -->
+    <section class="tab-body" data-page="tools">
+      <div class="card">
+        <div class="card-head"><span class="card-title">动作</span><span class="card-sub">手动触发</span></div>
+        <div class="tool-row"><div class="tool-ico">📄</div><div><div class="tool-name">今日日报</div><div class="tool-sub">今天聊了什么</div></div><button class="btn" onclick="toast('设计稿：运行为示意')">运行</button></div>
+        <div class="tool-row"><div class="tool-ico">🗂</div><div><div class="tool-name">整理记忆</div><div class="tool-sub">抽取 · 合并 · 消解</div></div><button class="btn" onclick="toast('设计稿：运行为示意')">运行</button></div>
+        <div class="tool-row"><div class="tool-ico">💬</div><div><div class="tool-name">主动说一句</div><div class="tool-sub">看它想说什么</div></div><button class="btn" onclick="toast('设计稿：运行为示意')">运行</button></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><span class="card-title">人格</span><span class="card-sub">只读 · 换模型不换本体</span></div>
+        <div class="kv-row"><span class="k">宪法要点</span><span>先干活 · 不谄媚 · 底线硬</span></div>
+        <div class="kv-row"><span class="k">当前语气档</span><span><b>熟络</b>（R1 · 第 12 天）</span></div>
+        <div class="kv-row"><span class="k">当前表情 / 形态</span><span>平静 · 成形（S2）</span></div>
+        <div class="kv-row"><span class="k">表达规范</span><span style="font-size:11px">简短 · 不用 emoji · 会顶嘴</span></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><span class="card-title">日历</span><span class="card-sub">只读 · 日程不进记忆</span></div>
+        <div class="kv-row"><span class="k">已授权 · 会前提醒</span><span class="toggle on" onclick="this.classList.toggle('on')"><span class="knob"></span></span></div>
+        <div class="kv-row"><span class="k">今日提醒</span><span>2 / 3 条</span></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><span class="card-title">它对你的理解</span><span class="card-sub">还在互相观察</span></div>
+        <div class="kv-row"><span class="k">关系线</span><span>熟络 · 退避率 4%</span></div>
+      </div>
+    </section>
+
+    <!-- 记忆 -->
+    <section class="tab-body" data-page="memory">
+      <div class="badges">
+        <span class="badge">事件 <b>128</b></span><span class="badge">事实 <b>34</b></span>
+        <span class="badge">偏好 <b>12</b></span><span class="badge">边界 <b>5</b></span>
+        <span class="badge">预测 <b>7/12</b></span><span class="badge">工具调用 <b>41</b></span><span class="badge">日历缓存 <b>9</b></span>
+      </div>
+      <div class="card">
+        <div class="card-head"><span class="card-title">最近事件</span><span class="card-sub">按 kind 分组 · 可折叠</span></div>
+        <div class="mem-row"><span class="mem-kind">dialogue</span><span>今天 14:02 ·「帮我看看今天的会」</span></div>
+        <div class="mem-row"><span class="mem-kind">calendar_query</span><span>今天 14:02 · 命中日程查询</span></div>
+        <div class="mem-row"><span class="mem-kind">disagreement</span><span>昨天 19:40 · 没顺着你说（顶嘴）</span></div>
+        <div class="mem-row"><span class="mem-kind mem-derive">face_state</span><span>今天 15:49 · focused（派生事件）</span></div>
+        <div class="mem-row"><span class="mem-kind">perception</span><span>今天 11:30 · 前台应用 VS Code</span></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><span class="card-title">事实 / 偏好</span><span class="card-sub">由夜间整理抽取</span></div>
+        <div class="mem-row"><span class="mem-kind">fact</span><span>周末通常 10 点后开始干活（置信 0.8）</span></div>
+        <div class="mem-row"><span class="mem-kind">preference</span><span>habit · 不喜欢会前被打断</span></div>
+        <div class="mem-row"><span class="mem-kind">boundary</span><span>不准记录：工资具体数额</span></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><span class="card-title">最近一次预测</span><span class="card-sub">48h 反馈窗</span></div>
+        <div class="mem-row"><span class="mem-kind">prediction</span><span>「周四下午你一般会去开评审会」· 待反馈</span></div>
+      </div>
+      <div class="actions-inline">
+        <button class="btn" onclick="toast('设计稿：整理记忆已触发')">整理记忆</button>
+        <button class="btn danger-ghost" id="forget-btn" onclick="forgetConfirm(this)">忘记全部…</button>
+      </div>
+    </section>
+
+    <!-- 设置 -->
+    <section class="tab-body" data-page="settings">
+      <div class="card">
+        <div class="card-head"><span class="card-title">模型</span><span class="card-sub">点卡片即选中 · 即时生效</span></div>
+        <div class="ptabs" id="ptabs">
+          <button class="on" data-provider="local">本地</button>
+          <button data-provider="cloud">云端</button>
+        </div>
+
+        <!-- 本地 pane -->
+        <div class="pane on" data-pane="local">
+          <p class="hint" style="margin:10px 0 8px">已装模型</p>
+          <div class="mgrid" id="installed-grid">
+            <div class="mcard on" data-model="qwen3.5:2b" onclick="pickModel(this)">
+              <span class="check">✓</span>
+              <div class="m-name">qwen3.5:2b</div>
+              <div class="m-meta">0.8GB · 3 天前<br><span class="tag ok">默认</span> <span class="tag ok">思维链可关</span></div>
+            </div>
+            <div class="mcard" data-model="qwen3:4b" onclick="pickModel(this)">
+              <span class="check">✓</span>
+              <div class="m-name">qwen3:4b</div>
+              <div class="m-meta">2.4GB · 4 天前<br><span class="tag ram">16GB+</span></div>
+            </div>
+          </div>
+          <div class="status-chip"><span class="dot"></span>sidecar 就绪 · <span class="endpoint">127.0.0.1:11435</span></div>
+          <p class="hint" style="margin:12px 0 6px">可下载的推荐模型（并发 1 · 磁盘不足会预警）</p>
+          <div id="dl-list">
+            <div class="dl-row" data-tag="gemma3:4b" data-size="3.3GB">
+              <div class="dl-info"><div class="dl-name">gemma3:4b <span class="tag ok">思维链无</span> <span class="tag ram">16GB+</span></div><div class="dl-meta">3.3GB · Google · 中英均可</div><div class="dl-bar"><i></i></div></div>
+              <button class="btn" onclick="startDownload(this)">下载</button>
+            </div>
+            <div class="dl-row" data-tag="llama3.2:3b" data-size="2.0GB">
+              <div class="dl-info"><div class="dl-name">llama3.2:3b <span class="tag ok">思维链无</span></div><div class="dl-meta">2.0GB · Meta · 中英混合稍弱</div><div class="dl-bar"><i></i></div></div>
+              <button class="btn" onclick="startDownload(this)">下载</button>
+            </div>
+            <div class="dl-row" data-tag="qwen3.5:4b" data-size="2.4GB">
+              <div class="dl-info"><div class="dl-name">qwen3.5:4b <span class="tag ok">思维链可关</span> <span class="tag ram">16GB+</span></div><div class="dl-meta">2.4GB · 阿盆同族 · 质量更好</div><div class="dl-bar"><i></i></div></div>
+              <button class="btn" onclick="startDownload(this)">下载</button>
+            </div>
+            <div class="dl-row" data-tag="deepseek-r1:1.5b" data-size="1.1GB">
+              <div class="dl-info"><div class="dl-name">deepseek-r1:1.5b <span class="tag warn">⚠ 思维链不可关</span></div><div class="dl-meta">1.1GB · 不推荐做对话腿（污染正文）</div><div class="dl-bar"><i></i></div></div>
+              <button class="btn" onclick="startDownload(this)">下载</button>
+            </div>
+          </div>
+          <p class="hint" style="margin-top:8px">下载走 Ollama registry；ModelScope 镜像（中国境内推荐）为后续增强项。模型删除：右键卡片（当前激活不可删）。</p>
+        </div>
+
+        <!-- 云端 pane：已配置模型清单 -->
+        <div class="pane" data-pane="cloud">
+          <p class="hint" style="margin:10px 0 8px">已配置的云端模型（点卡片选中生效 · × 删除）</p>
+          <div id="cloud-list"></div>
+          <button class="btn primary" style="width:100%;margin-top:8px" onclick="openCloudForm()">＋ 添加模型</button>
+          <p class="hint" style="margin-top:8px">类型支持：自定义 OpenAI 兼容（DeepSeek / Moonshot / GLM / Qwen 兼容模式 / OpenRouter）/ OpenAI 官方；Claude 即将支持。首次选中任一云端条目会弹出授权警示。</p>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><span class="card-title">日志</span><button class="btn" style="font-size:11px;padding:3px 9px" onclick="toast('设计稿：打开日志目录')">打开目录</button></div>
+        <div class="log-tabs" id="log-tabs">
+          <button class="on" data-log="app">应用日志</button><button data-log="sidecar">sidecar 日志</button>
+        </div>
+        <div class="logbox" id="logbox">
+          <div>15:28:02 <span class="lv-info">INFO</span> llm sidecar ready on :11435 (model qwen3.5:2b)</div>
+          <div>15:28:10 <span class="lv-info">INFO</span> consolidate: 3 events consumed, 1 fact promoted</div>
+          <div>15:31:44 <span class="lv-info">INFO</span> calendar: cache refreshed, 9 events, next reminder 14:40</div>
+          <div>15:44:10 <span class="lv-warn">WARN</span> relationship backoff_rate=0.04 within limit</div>
+          <div>15:49:23 <span class="lv-info">INFO</span> dialogue: stream done 41 tok · filter pass</div>
+        </div>
+        <p class="hint" style="margin-top:6px">尾部 200 行 · 页面可见时每 10s 轮询</p>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><span class="card-title">数据</span></div>
+        <div class="kv-row"><span class="k">忘记全部（含边界、成长、关系）</span><button class="btn danger-ghost" onclick="forgetConfirm(this)">忘记全部…</button></div>
+      </div>
+    </section>
+  </main>
+
+  <!-- 云端 opt-in 模态 -->
+  <div class="overlay" id="cloud-modal">
+    <div class="modal">
+      <div class="m-title">切换到云端模型？</div>
+      <div class="m-body">之后每一轮对话和记忆抽取的文本都会发送到该服务商，不再只留在本机。
+        <ul>
+          <li>人格卡与记忆库不出机器</li>
+          <li>危机拦截、年龄门禁照常生效</li>
+          <li>API Key 明文存在本机数据库</li>
+        </ul>
+      </div>
+      <div class="m-actions">
+        <button class="btn" onclick="closeCloudModal(false)">还是本地</button>
+        <button class="btn primary" onclick="closeCloudModal(true)">我知道了，切</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 添加 / 编辑云端模型模态 -->
+  <div class="overlay" id="cloud-form">
+    <div class="modal">
+      <div class="m-title" id="cf-title">添加云端模型</div>
+      <div class="field"><label>名称</label><input id="cf-name" placeholder="例：阿盆的 DeepSeek" /></div>
+      <div class="field"><label>类型</label>
+        <select id="cf-kind" style="width:100%;font-family:inherit;font-size:12.5px;border:1px solid var(--line);border-radius:8px;padding:7px 10px;background:#fff;color:var(--ink)">
+          <option value="custom">自定义 OpenAI 兼容</option>
+          <option value="openai">OpenAI 官方</option>
+          <option value="claude" disabled>Claude（即将支持）</option>
+        </select>
+      </div>
+      <div class="field" id="cf-url-field"><label>接口地址（/v1）</label><input id="cf-url" placeholder="https://api.deepseek.com/v1" /></div>
+      <div class="field"><label>API Key</label><input id="cf-key" type="password" placeholder="sk-…" /></div>
+      <div class="field"><label>模型名</label><input id="cf-model" placeholder="deepseek-chat" /></div>
+      <div class="test-line" id="cf-test"></div>
+      <div class="m-actions">
+        <button class="btn" onclick="closeCloudForm()">取消</button>
+        <button class="btn" onclick="cfTest()">测试连接</button>
+        <button class="btn primary" onclick="cfSave()">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+</div>
+
+<script>
+// ── tab 切换 ──
+const titles = { chat:'对话', face:'表情', tools:'工具', memory:'记忆', settings:'设置' };
+document.querySelectorAll('#nav button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('#nav button').forEach(x => x.classList.remove('active'));
+  document.querySelectorAll('.tab-body').forEach(x => x.classList.remove('active'));
+  b.classList.add('active');
+  document.querySelector(`.tab-body[data-page="${b.dataset.tab}"]`).classList.add('active');
+  document.getElementById('page-title').textContent = titles[b.dataset.tab];
+});
+document.getElementById('mini-face').onclick = () => toast('阿盆晃了晃叶子：哟。');
+
+// ── 顶部选择器：本地 / 云端 ──
+let provider = 'local';
+document.querySelectorAll('#ptabs button').forEach(b => b.onclick = () => {
+  provider = b.dataset.provider;
+  document.querySelectorAll('#ptabs button').forEach(x => x.classList.toggle('on', x === b));
+  document.querySelectorAll('.pane').forEach(x => x.classList.toggle('on', x.dataset.pane === provider));
+  if (provider === 'local') setStatus(true, '本地 · ' + activeModel);
+  else renderCloudStatus();
+});
+function setStatus(on, text) {
+  document.querySelector('#page-status .dot').classList.toggle('off', !on);
+  document.getElementById('status-text').textContent = text;
+}
+
+// ── 本地模型：点卡片即切换（模拟测试过程）──
+let activeModel = 'qwen3.5:2b';
+function pickModel(card) {
+  if (card.classList.contains('on')) return;
+  const name = card.dataset.model;
+  card.classList.add('testing');
+  document.querySelectorAll('#installed-grid .mcard').forEach(x => x.classList.remove('on'));
+  setTimeout(() => {
+    card.classList.remove('testing'); card.classList.add('on');
+    activeModel = name;
+    if (provider === 'local') setStatus(true, '本地 · ' + name);
+    toast('已切换到 ' + name + '（即时生效，无需重启）');
+  }, 700);
+}
+
+// ── 下载模拟 ──
+function startDownload(btn) {
+  const row = btn.closest('.dl-row'); const bar = row.querySelector('.dl-bar i');
+  if (row.classList.contains('downloading')) { // 取消
+    clearInterval(row._t); row.classList.remove('downloading');
+    bar.style.width = '0%'; btn.textContent = '下载'; toast('已取消下载'); return;
+  }
+  row.classList.add('downloading'); btn.textContent = '取消';
+  let p = 0;
+  row._t = setInterval(() => {
+    p = Math.min(100, p + 4 + Math.random() * 6);
+    bar.style.width = p + '%';
+    const size = parseFloat(row.dataset.size);
+    if (p >= 100) {
+      clearInterval(row._t); row.classList.remove('downloading'); row.style.opacity = .55;
+      btn.textContent = '已装'; btn.disabled = true;
+      toast(row.dataset.tag + ' 下载完成，已出现在已装列表');
+      addToInstalled(row.dataset.tag, row.dataset.size);
+    }
+  }, 220);
+}
+function addToInstalled(tag, size) {
+  const grid = document.getElementById('installed-grid');
+  if (grid.querySelector(`[data-model="${tag}"]`)) return;
+  const d = document.createElement('div');
+  d.className = 'mcard'; d.dataset.model = tag; d.onclick = () => pickModel(d);
+  d.innerHTML = `<span class="check">✓</span><div class="m-name">${tag}</div><div class="m-meta">${size} · 刚刚<br><span class="tag ok">新装</span></div>`;
+  grid.appendChild(d);
+}
+
+// ── 云端：配置清单（多实例）+ 添加/编辑弹窗 + opt-in ──
+const KIND_LABEL = { custom: '自定义', openai: 'OpenAI', claude: 'Claude' };
+let cloudEntries = [
+  { id: 'c1', name: 'DeepSeek', kind: 'custom', url: 'api.deepseek.com', model: 'deepseek-chat', key: 'sk-abcd1234ef5678904f2a', tested: true },
+  { id: 'c2', name: 'OpenAI', kind: 'openai', url: 'api.openai.com', model: 'gpt-4o-mini', key: 'sk-xyz987654321abcd00e1', tested: false },
+];
+let activeCloudId = null;
+let cloudAgreed = false;   // opt-in 每会话一次
+let pendingCloudId = null; // 待 opt-in 确认的条目
+let editingId = null;      // null = 新增
+
+function maskKey(k) { return k.length <= 4 ? '••••' : '••••' + k.slice(-4); }
+function host(u) { return u.replace(/^https?:\/\//, '').replace(/\/v1\/?$/, ''); }
+
+function renderCloudList() {
+  const wrap = document.getElementById('cloud-list');
+  wrap.innerHTML = '';
+  if (!cloudEntries.length) { wrap.innerHTML = '<p class="hint" style="text-align:center;padding:10px 0">还没有配置，点下面「＋ 添加模型」</p>'; return; }
+  cloudEntries.forEach(e => {
+    const d = document.createElement('div');
+    d.className = 'mcard' + (e.id === activeCloudId ? ' on' : '');
+    d.style.marginBottom = '8px';
+    d.innerHTML = `<span class="check">✓</span>
+      <div style="display:flex;justify-content:space-between;align-items:flex-start">
+        <div class="m-name">${e.name} <span class="tag ram">${KIND_LABEL[e.kind]}</span>${e.tested ? ' <span class="tag ok">测试 ✓</span>' : ''}</div>
+        <button class="btn" style="font-size:10px;padding:2px 7px" title="删除">×</button>
+      </div>
+      <div class="m-meta">${e.model} · ${host(e.url)}<br>key ${maskKey(e.key)}</div>`;
+    d.onclick = ev => { if (ev.target.tagName !== 'BUTTON') pickCloudEntry(e.id); };
+    d.querySelector('button').onclick = ev => { ev.stopPropagation(); removeCloud(e.id); };
+    wrap.appendChild(d);
+  });
+}
+function renderCloudStatus() {
+  const e = cloudEntries.find(x => x.id === activeCloudId);
+  setStatus(false, e ? '云端 · ' + e.name : '云端 · 未选择');
+}
+function pickCloudEntry(id) {
+  if (id === activeCloudId) return;
+  if (!cloudAgreed) { pendingCloudId = id; document.getElementById('cloud-modal').classList.add('show'); return; }
+  activateCloud(id);
+}
+function activateCloud(id) {
+  activeCloudId = id; renderCloudList(); renderCloudStatus();
+  toast('已切换到云端「' + cloudEntries.find(x => x.id === id).name + '」');
+}
+function closeCloudModal(ok) {
+  document.getElementById('cloud-modal').classList.remove('show');
+  if (ok && pendingCloudId) { cloudAgreed = true; activateCloud(pendingCloudId); }
+  pendingCloudId = null;
+}
+function removeCloud(id) {
+  const e = cloudEntries.find(x => x.id === id);
+  if (id === activeCloudId) { toast('先切换到其他模型再删除'); return; }
+  if (!confirm('删除「' + e.name + '」的配置？（只删配置，不动其他数据）')) return;
+  cloudEntries = cloudEntries.filter(x => x.id !== id);
+  renderCloudList();
+}
+function openCloudForm(entry) {
+  editingId = entry ? entry.id : null;
+  document.getElementById('cf-title').textContent = entry ? '编辑云端模型' : '添加云端模型';
+  document.getElementById('cf-name').value = entry ? entry.name : '';
+  document.getElementById('cf-kind').value = entry ? entry.kind : 'custom';
+  document.getElementById('cf-url').value = entry ? (entry.kind === 'openai' ? 'https://api.openai.com/v1' : 'https://' + entry.url) : '';
+  document.getElementById('cf-key').value = '';
+  document.getElementById('cf-model').value = entry ? entry.model : '';
+  const t = document.getElementById('cf-test'); t.className = 'test-line'; t.textContent = '';
+  onKindChange();
+  document.getElementById('cloud-form').classList.add('show');
+}
+function closeCloudForm() { document.getElementById('cloud-form').classList.remove('show'); }
+function onKindChange() {
+  const kind = document.getElementById('cf-kind').value;
+  const f = document.getElementById('cf-url-field');
+  if (kind === 'openai') { document.getElementById('cf-url').value = 'https://api.openai.com/v1'; f.style.display = 'none'; }
+  else f.style.display = '';
+}
+document.getElementById('cf-kind').onchange = onKindChange;
+function cfTest() {
+  const t = document.getElementById('cf-test');
+  const model = document.getElementById('cf-model').value.trim();
+  const key = document.getElementById('cf-key').value.trim();
+  const url = document.getElementById('cf-url').value.trim();
+  t.className = 'test-line';
+  if (!url || !key || !model) { t.className = 'test-line err'; t.textContent = '✗ 接口地址、API Key、模型名都要填'; return; }
+  t.innerHTML = '<span class="spin"></span> 正在发一条测试消息…';
+  setTimeout(() => { t.className = 'test-line ok'; t.textContent = '✓ 测试通过 · 1 token · 0.4s'; }, 1000);
+}
+function cfSave() {
+  const name = document.getElementById('cf-name').value.trim() || '未命名';
+  const kind = document.getElementById('cf-kind').value;
+  const url = document.getElementById('cf-url').value.trim();
+  const key = document.getElementById('cf-key').value.trim();
+  const model = document.getElementById('cf-model').value.trim();
+  const t = document.getElementById('cf-test');
+  if (!url || !key || !model) { t.className = 'test-line err'; t.textContent = '✗ 保存前请先填写完整（并建议测试连接）'; return; }
+  if (editingId) {
+    const e = cloudEntries.find(x => x.id === editingId);
+    Object.assign(e, { name, kind, url, key, model });
+    toast('已更新「' + name + '」');
+  } else {
+    const id = 'c' + Date.now();
+    cloudEntries.push({ id, name, kind, url, key, model, tested: t.className.includes('ok') });
+    toast('已添加「' + name + '」，点卡片即可选中');
+  }
+  closeCloudForm(); renderCloudList();
+}
+
+// ── 日志 tab ──
+document.querySelectorAll('#log-tabs button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('#log-tabs button').forEach(x => x.classList.remove('on'));
+  b.classList.add('on');
+  const box = document.getElementById('logbox');
+  box.innerHTML = b.dataset.log === 'sidecar'
+    ? '<div>15:27:58 INFO ollama server 0.40.16 listening on 127.0.0.1:11435</div><div>15:28:01 INFO llama-runner: model loaded qwen3.5:2b (ctx 8192)</div><div>15:49:20 INFO prompt eval 218 tok · eval 41 tok · 0.9s</div>'
+    : '<div>15:28:02 <span class="lv-info">INFO</span> llm sidecar ready on :11435</div><div>15:28:10 <span class="lv-info">INFO</span> consolidate: 3 events consumed</div><div>15:49:23 <span class="lv-info">INFO</span> dialogue: stream done 41 tok</div>';
+});
+
+// ── 忘记全部：两段式确认 ──
+function forgetConfirm(btn) {
+  if (btn.dataset.armed) { btn.textContent = '忘记全部…'; delete btn.dataset.armed; toast('已忘记一切（设计稿示意 · 库已清空）'); return; }
+  btn.dataset.armed = '1'; btn.textContent = '确认忘掉一切？'; toast('再点一次确认 · 不可恢复');
+  setTimeout(() => { if (btn.dataset.armed) { btn.textContent = '忘记全部…'; delete btn.dataset.armed; } }, 4000);
+}
+
+// ── toast ──
+let toastT;
+function toast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), 2200);
+}
+
+// 初始化云端清单
+renderCloudList();
+</script>
+</body>
+</html>

@@ -1,0 +1,162 @@
+/* 脸与形态线（旧 styles.css hero/face/stage 段平移；M0b 起 hero 取消，
+   脸由侧栏 52px / 表情页 150px 两处使用，尺寸走 .face-sm/.face-lg） */
+
+.face {
+  position: relative;
+  flex: none;
+  width: 84px;
+  height: 84px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  border-radius: 50%;
+  cursor: pointer;
+  transition: width 0.26s ease, height 0.26s ease,
+    transform 0.22s cubic-bezier(0.34, 1.4, 0.64, 1);
+  -webkit-tap-highlight-color: transparent;
+}
+
+.face-sm {
+  width: 52px;
+  height: 52px;
+}
+
+.face-lg {
+  width: 150px;
+  height: 150px;
+}
+
+.face::before {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 50% 42%, rgba(76, 140, 43, 0.13), transparent 68%);
+}
+
+.face:hover {
+  transform: translateY(-2px);
+}
+
+.face:active {
+  transform: scale(0.95);
+}
+
+.face svg {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: block;
+  overflow: visible;
+  transition: transform 0.35s ease;
+  transform-origin: 100px 90px;
+}
+
+.face[data-state="greeted"] svg {
+  transition: transform 0.18s ease-out;
+}
+
+.face .ripple {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  pointer-events: none;
+  opacity: 0;
+  background: radial-gradient(circle, rgba(76, 140, 43, 0.3), transparent 68%);
+}
+
+.face.poked .ripple {
+  animation: ripple 0.55s ease-out;
+}
+
+@keyframes ripple {
+  0% {
+    opacity: 0.9;
+    transform: scale(0.6);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.35);
+  }
+}
+
+.pot {
+  fill: var(--pot);
+}
+.pot-rim {
+  fill: var(--pot-rim);
+}
+.trunk {
+  fill: none;
+  stroke: var(--trunk);
+  stroke-width: 9;
+  stroke-linecap: round;
+}
+.leaf-a {
+  fill: var(--leaf);
+}
+.leaf-b,
+.leaf-d {
+  fill: var(--leaf-dark);
+}
+.leaf-c {
+  fill: var(--leaf-light);
+}
+
+/* ── form-line growth (plan-morph.md §3.6) ─────────────────────── */
+/* Stage groups: discrete forms, cross-fading on unlock. */
+.stage-g {
+  opacity: 0;
+  transform: scale(0.72);
+  transform-origin: 100px 140px;
+  transition: opacity 0.6s ease, transform 0.6s cubic-bezier(0.34, 1.4, 0.64, 1);
+  pointer-events: none;
+}
+.stage-g.on {
+  opacity: 1;
+  transform: none;
+}
+/* S3 flowers + moss sit ON TOP of the S2 form. */
+.stage-g.on.stage-overlay {
+  opacity: 1;
+  transform: none;
+}
+.flower {
+  fill: #d98cb3;
+  transition: fill 0.6s ease;
+}
+.flower.f-2 {
+  fill: #c977a4;
+}
+.flower.f-3 {
+  fill: #e5a3c4;
+}
+.moss {
+  fill: #7a9a5a;
+  opacity: 0.85;
+}
+.micro-leaf {
+  fill: var(--leaf-light);
+}
+
+/* Dormancy (plan §3.4): the complexion fades, nothing is lost. */
+svg[data-dormant="true"] {
+  --leaf: #9aa85e;
+  --leaf-dark: #87945a;
+  --leaf-light: #b3ad6d;
+}
+svg[data-dormant="true"] .flower {
+  fill: #b9a98f;
+}
+.face-features {
+  transition: transform 0.6s ease;
+}
+.eyes {
+  fill: #2b2818;
+}
+.mouth {
+  fill: none;
+  stroke: #2b2818;
+  stroke-width: 3;
+  stroke-linecap: round;
+}

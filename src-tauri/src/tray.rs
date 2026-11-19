@@ -81,7 +81,7 @@ pub fn show_main_window(app: &AppHandle) {
     } else {
         let _ = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
             .title("bonsai")
-            .inner_size(360.0, 460.0)
+            .inner_size(520.0, 560.0)
             .resizable(false)
             .build();
     }

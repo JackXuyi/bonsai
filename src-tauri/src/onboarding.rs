@@ -238,9 +238,12 @@ pub fn onboarding_status(store: tauri::State<'_, MemoryStore>) -> Result<Onboard
 #[derive(Debug, Deserialize)]
 pub struct SubmitPayload {
     /// "adult" | "minor" (plan §3.3: binary, minimal collection).
+    /// Frontend sends camelCase (ageGroup) — Tauri does no case conversion,
+    /// so the rename must live here.
+    #[serde(rename = "ageGroup")]
     pub age_group: String,
     /// crisis card seen/acked (skipped reading is recorded as skipped=true).
-    #[serde(default)]
+    #[serde(default, rename = "crisisAck")]
     pub crisis_ack: bool,
     pub answers: Vec<SubmitAnswer>,
 }
@@ -346,6 +349,23 @@ mod tests {
 
     fn ans(question: &str, answer: &str, skipped: bool) -> SubmitAnswer {
         SubmitAnswer { question: question.into(), answer: answer.into(), skipped }
+    }
+
+    /// The frontend sends camelCase inside `payload` (main.js obFinish).
+    /// Tauri only converts top-level command args, not struct fields —
+    /// without the serde renames this fails with `missing field age_group`.
+    #[test]
+    fn payload_accepts_camel_case_from_frontend() {
+        let raw = r#"{
+            "ageGroup": "adult",
+            "crisisAck": true,
+            "answers": [{ "question": "q1", "answer": "别翻我相册", "skipped": false }]
+        }"#;
+        let p: SubmitPayload = serde_json::from_str(raw).unwrap();
+        assert_eq!(p.age_group, "adult");
+        assert!(p.crisis_ack);
+        assert_eq!(p.answers.len(), 1);
+        assert_eq!(p.answers[0].question, "q1");
     }
 
     #[test]

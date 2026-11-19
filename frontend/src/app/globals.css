@@ -1,0 +1,13 @@
+/* 引入顺序：移植的语义 CSS 在前（tailwind preflight 已关闭，避免 reset 覆盖），
+   @tailwind utilities 在后——M1+ 新面板（记忆/设置页）的 tailwind 工具类可以
+   覆盖本文件。色板见 tailwind.config.ts（:root 变量映射）。 */
+@import "./styles/base.css";
+@import "./styles/sidebar.css";
+@import "./styles/face.css";
+@import "./styles/chat.css";
+@import "./styles/tools.css";
+@import "./styles/onboarding.css";
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;

@@ -1,0 +1,312 @@
+/* 基础：变量 / 重置 / 布局壳 / tabs / toast / dialog（旧 styles.css 平移，原值保留） */
+:root {
+  --bg: #f4f1e9;
+  --bg-sunk: #e7e1d1;
+  --card: #fffdf8;
+  --pot: #8b5a2b;
+  --pot-rim: #a66f38;
+  --trunk: #5c3a20;
+  --leaf: #4c8c2b;
+  --leaf-dark: #3a6e21;
+  --leaf-light: #6aa846;
+  --ink: #322f20;
+  --muted: #8a8468;
+  --faint: #a9a28a;
+  --accent: #4c8c2b;
+  --accent-ink: #3f7024;
+  --accent-wash: rgba(76, 140, 43, 0.1);
+  --line: #e3ddcb;
+  --line-soft: rgba(60, 50, 30, 0.07);
+  --shadow: 0 2px 8px rgba(60, 50, 30, 0.07);
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  font-family: -apple-system, "PingFang SC", "Helvetica Neue", sans-serif;
+  font-size: 13px;
+  background: var(--bg);
+  color: var(--ink);
+  user-select: none;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.app {
+  display: grid;
+  grid-template-columns: 92px 1fr;
+  height: 100vh;
+}
+
+.content {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  min-height: 0;
+  padding: 10px 12px 10px 10px;
+}
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+  min-height: 0;
+}
+
+/* 页体滚动容器（对话页除外：消息流内部滚） */
+.tab-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+.tab-body::-webkit-scrollbar {
+  display: none;
+}
+
+/* ── tabs ──────────────────────────────────────────────────── */
+
+.tabs {
+  display: flex;
+  gap: 2px;
+  flex: none;
+  padding: 3px;
+  background: var(--bg-sunk);
+  border-radius: 10px;
+}
+
+.tabs button {
+  flex: 1;
+  height: 25px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.18s, color 0.18s, box-shadow 0.18s;
+}
+
+.tabs button:hover:not(.active) {
+  color: var(--ink);
+}
+
+.tabs button.active {
+  background: var(--card);
+  color: var(--ink);
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(60, 50, 30, 0.1);
+}
+
+.tab {
+  display: none;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tab.active {
+  display: flex;
+  animation: fade-in 0.18s ease-out;
+}
+
+.tab.scroll {
+  overflow-y: auto;
+  padding-bottom: 2px;
+  scrollbar-width: none;
+}
+.tab.scroll::-webkit-scrollbar {
+  display: none;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* ── toast ─────────────────────────────────────────────────── */
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 14px;
+  transform: translate(-50%, 8px);
+  max-width: 80%;
+  padding: 6px 13px;
+  border-radius: 999px;
+  background: rgba(50, 47, 32, 0.92);
+  color: #fdfaf1;
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s, transform 0.2s;
+  z-index: 50;
+}
+
+.toast.show {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+/* ── report dialog ─────────────────────────────────────────── */
+
+dialog {
+  width: 316px;
+  max-height: 372px;
+  margin: auto;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 15px;
+  background: var(--bg);
+  color: var(--ink);
+  box-shadow: 0 16px 48px rgba(40, 36, 24, 0.22);
+  overflow: hidden;
+}
+
+dialog::backdrop {
+  background: rgba(40, 36, 24, 0.24);
+  backdrop-filter: blur(1.5px);
+}
+
+.dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12.5px;
+  font-weight: 600;
+  background: var(--card);
+}
+
+.dialog-head button {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: 0.15s;
+}
+
+.dialog-head button:hover {
+  background: rgba(60, 50, 30, 0.07);
+  color: var(--ink);
+}
+
+.dialog-head button:focus-visible {
+  outline: none;
+  color: var(--ink);
+  box-shadow: 0 0 0 3px var(--accent-wash);
+}
+
+dialog:focus {
+  outline: none;
+}
+
+.dialog-head svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.report-body {
+  padding: 12px 14px 16px;
+  max-height: 310px;
+  overflow-y: auto;
+  font-size: 12px;
+  line-height: 1.65;
+  user-select: text;
+}
+
+.report-body::-webkit-scrollbar {
+  width: 6px;
+}
+.report-body::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 3px;
+}
+
+.report-body h1 {
+  font-size: 13.5px;
+  margin-bottom: 8px;
+}
+
+.report-body h2 {
+  font-size: 11px;
+  letter-spacing: 0.4px;
+  margin: 14px 0 5px;
+  color: var(--accent-ink);
+}
+
+.report-body h2:first-child {
+  margin-top: 0;
+}
+
+.report-body p {
+  margin-bottom: 4px;
+}
+
+.report-body p + p {
+  margin-top: 4px;
+}
+
+.report-body ul {
+  padding-left: 16px;
+  margin: 2px 0 6px;
+}
+
+.report-body li {
+  margin: 2px 0;
+}
+
+.report-body blockquote {
+  margin: 6px 0;
+  padding: 4px 0 4px 9px;
+  border-left: 2px solid rgba(76, 140, 43, 0.4);
+  color: var(--muted);
+}
+
+.report-body strong {
+  font-weight: 600;
+}
