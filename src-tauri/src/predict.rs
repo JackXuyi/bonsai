@@ -369,8 +369,16 @@ pub fn spawn(app: tauri::AppHandle) {
                         .clone()
                 });
             match signals {
-                Some(s) => crate::perception::decision_input(&s, 0).is_typing
-                    || crate::perception::decision_input(&s, 0).is_fullscreen,
+                Some(s) => {
+                    // Same view as L4: a meeting in progress is "busy" for the
+                    // guess channel too (plan-calendar.md §3.7).
+                    let input = crate::perception::decision_input(
+                        &s,
+                        0,
+                        crate::calendar::in_meeting_now(&conn, chrono::Local::now()),
+                    );
+                    input.is_typing || input.is_fullscreen || input.in_meeting
+                }
                 None => true, // unknown → don't interrupt
             }
         };

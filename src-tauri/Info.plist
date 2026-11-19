@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- TCC usage descriptions (plan-calendar.md §3.3). Without these keys the
+       consent dialog never appears and EventKit just returns "denied". -->
+  <key>NSCalendarsFullAccessUsageDescription</key>
+  <string>阿盆读你的日程，只为了在你开会前提醒一句、开会时不打扰你。日程不会离开这台电脑。</string>
+  <key>NSCalendarsUsageDescription</key>
+  <string>阿盆读你的日程，只为了在你开会前提醒一句、开会时不打扰你。</string>
+  <key>NSCalendarsWriteOnlyAccessUsageDescription</key>
+  <string>阿盆不会创建或修改日程。</string>
+</dict>
+</plist>

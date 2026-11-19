@@ -1,6 +1,6 @@
 # 方案：日历 / 邮件工具调用（MVP P2 第 2 项）
 
-> **状态**：待评审
+> **状态**：T0–T4 已实施（2026-11-19，162 单测全过）；T5 邮件按 §7 建议不做；真机 TCC 授权验收待人工完成
 > **日期**：2026-11-19
 > **依赖**：决策层 `should_speak`（decision.rs，已落地，含 `in_meeting` 静默）、感知层轮询与逐项授权模式（perception.rs，已落地）、settings KV 与 events 审计链（memory/db.rs，已落地）、日报生成器（report.rs，已落地）、本地 LLM（llm.rs，已落地，可降级）
 > **对应调研**：docs/zh/research-report.md §3.3 macOS TCC 四条约束、§6.4 打断成本与「会议中绝不开口」、§8.2 分层架构、§8.3 P2 第 2 项
@@ -414,3 +414,31 @@ T0–T1 不依赖真模型、也不依赖系统授权，可以立即开工。
 - `src-tauri/Info.plist` 是新增文件，Tauri 2 会自动合并；改完必须重新 `tauri build` 才生效（`tauri dev` 不重新生成 bundle）。
 - T0 若证伪（`objc2-event-kit` 在当前 macOS 版本上 `requestFullAccessToEvents` 拿不到 `fullAccess`），降级方案：只读「剪贴板里的日程文本」或直接跳过本项做 P2-4 屏幕感知——不要硬啃 FFI。
 - T4 完成后，`perception.rs` 的 `// P1: calendar leg` 注释与 `perception::decision_input` 的签名要一并更新，避免留下第二个 TODO。
+
+---
+
+## 11. 实施记录（2026-11-19）
+
+**已落地**
+
+- 依赖（仅 macOS target）：`objc2 0.6` / `objc2-foundation 0.3` / `objc2-event-kit 0.3`（features：EKObject / EKTypes / EKEventStore / EKEvent / EKCalendarItem / EKCalendar / EKParticipant / block2）/ `block2 0.6`。已确认 `auth` API 与 `EKAuthorizationStatus` 五态可用。
+- `src-tauri/Info.plist`：三条 usage description（FullAccess / legacy / WriteOnly）。
+- schema v7：`calendar_cache`（含 `reminded_at` 幂等、`UNIQUE(external_id, start_at)` 处理重复日程实例）+ `tool_calls`（只有动作/结果/耗时）；`forget_all` 级联；`tool_calls_recent` / `last_tool_call_ts` 供限流与工具页使用。
+- `calendar.rs`：`CalendarAccess` 五态 + `CalendarError`（`code()` 给前端稳定字符串）、`CalendarSource` trait（**无写方法**）、`EkCalendarSource`（主线程 + 60s 超时 + 只认 `FullAccess`）、`MockCalendar`、5 分钟 TTL 缓存、`pick_reminder` 纯函数、`tick`、60s 轮询、6 个命令。
+- `tools.rs`：`route()` 规则路由（长短语优先 + 时间词与日程名词双命中 + 排除词）+ 确定性模板 + `permission_message()`；`maybe_answer()` 接在对话管线的危机拦截之后、模型调用之前。
+- L4 接线：`perception::decision_input(..., in_meeting)`，`in_meeting` 由 `calendar::in_meeting_now` 读缓存给出；`predict.rs` 的 busy 判断也并入（开会时不猜）。
+- 日报：`render_with_calendar` + 明日节（三种状态：无日历 / 未授权有提示 / 有安排），摘要 prompt 带上明天。
+- 前端：工具页日历卡（总开关 / 会前提醒 / 授权状态与深链按钮 / 清缓存 / 「今天读 N 次 · 提醒 N 次」）、`calendar:remind` 气泡带「今天别再提醒」、`noteFor` 对工具回答标注「日程 · 直接查的日历」不再误报模型离线。
+
+**与方案的偏差（两条，均为主动收窄）**
+
+1. **模型润色未启用**：方案 §3.5 的第二层「模型改写」只留了接口位置，实际全部走确定性模板。原因：一个 2B 模型在「只改措辞不改事实」上的稳定性不足以承担日程；润色错了比语气干更糟。等真机验证有稳定措辞样本再开。
+2. **`in_meeting` 只读缓存、不主动拉取**：判定每 15 秒跑一次，若每次都打 EventKit 会拖住感知线程；由 60s 轮询负责刷新。代价是首启/刚开开关的 60 秒内 `in_meeting` 恒为 false。
+
+**待人工验收（无法在 CI 里做）**
+
+1. `tauri build` 出的 `.app` 里拨开日历开关 → 系统弹窗出现（`tauri dev` 的裸二进制 TCC 身份不同，测不出真结论）。
+2. 点「不允许」→ 工具页显示「权限被拒」+ 深链按钮可用；再问「今天有什么安排」→ 回「权限没给」，不是「今天没安排」。
+3. 系统设置里只给「添加日程」→ 工具页显示「只给了添加日程权限」，且不返回空日程冒充成功。
+4. 固定签名身份后重启 App → 权限仍在（ad-hoc 签名每次构建都会丢）。
+5. 真实日历里造一个 10 分钟后的会 → 气泡出现一次，再开窗口不重复；连点「今天别再提醒」后当天不再提醒。

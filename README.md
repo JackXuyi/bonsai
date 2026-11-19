@@ -92,7 +92,7 @@ The Rust core implements: L1 perception (per-source switches, default off), L2 m
   - [Plan: predict-verify loop](./docs/zh/plan-predict.md) — implementation plan for MVP P1 item 1 (G1–G4 implemented)
   - [Plan: form-line growth](./docs/zh/plan-morph.md) — implementation plan for MVP P1 item 2 (G1–G4 implemented)
   - [Plan: relationship-line growth](./docs/zh/plan-relationship.md) — implementation plan for MVP P2 item 1 (Q1–Q4 implemented)
-  - [Plan: calendar / mail tool calls](./docs/zh/plan-calendar.md) — implementation plan for MVP P2 item 2 (read-only first; pending review)
+  - [Plan: calendar / mail tool calls](./docs/zh/plan-calendar.md) — implementation plan for MVP P2 item 2 (T0–T4 implemented; mail T5 not done)
 
 ## Status
 
@@ -124,7 +124,7 @@ MVP P2 progress:
 | P2 item | Status |
 | --- | --- |
 | Relationship-line growth (day 8–30, driven by understanding accuracy) | 🔨 Implemented: three stages (拘谨 → 熟络 at day ≥ 9 with ≥ 12 evidence points → 会顶嘴 at day ≥ 22 with ≥ 30); both conditions required — days only open the window, they never carry progress. Evidence is recomputed daily from predictions + events (presence / hits / un-waved push-backs +1 each, a wrong guess −1 and never compounding); the score never leaves the process and has no UI. "Shut up" never subtracts points, it only pauses promotion (back-off > 10%). Seven silent days → rusty tone without rewinding the stage. The prompt gets one of four relationship modes; at R2 the banned hedge openers become a hard rule. Anti-sycophancy hits are finally persisted as disagreement / disagreement_hedged events. A once-ever "first time it didn't go along with you" moment inside the 7-day window after R2. Tools page shows one line + a relationship-only reset. Four metrics are permanent CI tests (see docs/zh/plan-relationship.md) |
-| Calendar / mail tool calls | ⬜ not started |
+| Calendar / mail tool calls | 🔨 Implemented for calendar only (mail not done): schema v7 `calendar_cache` (5-minute TTL, titles live here and nowhere else, `reminded_at` idempotency) + `tool_calls` audit (actions and counts, never content); EventKit is called inside this process (TCC attributes permission to the responsible process — a helper would own a second identity), the prompt is dispatched to the main thread with a 60s timeout, and **only `fullAccess` counts** (`writeOnly` cannot read); denials return `calendar_denied` and friends, never an empty list pretending "no meetings today"; rule-based intent routing (time word AND schedule noun, 20 positive / 15 negative CI cases) sits after the crisis intercept and before the model, answered by deterministic templates that work with the model down; pre-meeting reminders are a second L4 lane (−10±2 min window, ≤3/day, ≥10 min apart, silent 22:00–08:00 and during meetings, skips all-day/declined/canceled, "don't remind me today" mutes the rest of the day); `in_meeting` now feeds `should_speak` (two or more humans required, so a solo focus block never silences it); the daily report gains a "tomorrow" section with three distinct states (no calendar / not authorised / actual plans); tools page card shows "read N times today"; mail (AppleScript) is deferred to T5 (see docs/zh/plan-calendar.md §3.9/§11) |
 | Voice (occasional utterances) | ⬜ not started |
 | Screen perception | ⬜ not started |
 | Cross-device / data portability | ⬜ not started |

@@ -1,8 +1,8 @@
-//! SQLite schema (v6) and primitives for the memory layer.
+//! SQLite schema (v7) and primitives for the memory layer.
 //!
 //! Plans: docs/zh/plan-memory.md §3–§4, docs/zh/plan-predict.md §3.4,
 //! docs/zh/plan-morph.md §3.2, docs/zh/plan-onboarding.md §3.1,
-//! docs/zh/plan-relationship.md §3.3.
+//! docs/zh/plan-relationship.md §3.3, docs/zh/plan-calendar.md §3.2.
 //! Three layers: events (ground truth) → facts (traced assertions) →
 //! preferences/boundaries (high-confidence user model).
 //!
@@ -17,7 +17,15 @@ use rusqlite::{params, Connection};
 
 use super::clock;
 
-pub(crate) const SCHEMA_VERSION: i64 = 6;
+pub(crate) const SCHEMA_VERSION: i64 = 7;
+
+/// Test-only: materialise the full schema on a bare in-memory connection.
+/// Other modules' tests build their own `Connection::open_in_memory()` and
+/// need the schema without going through `open()` (which wants a path).
+#[cfg(test)]
+pub fn init_schema_for_test(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(SCHEMA)
+}
 
 pub fn open(path: &std::path::Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
@@ -186,6 +194,40 @@ CREATE TABLE IF NOT EXISTS relationship_log (
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_events_unconsumed ON events(consumed, ts);
 CREATE INDEX IF NOT EXISTS idx_facts_active ON facts(ts) WHERE invalid_at IS NULL;
+
+-- Calendar read cache (plan-calendar.md §3.2). PURE CACHE: whole table is
+-- disposable — TTL 5 min, cleared on switch-off / permission loss / forget.
+-- Titles live here and ONLY here: they never reach events or facts.
+CREATE TABLE IF NOT EXISTS calendar_cache (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    external_id    TEXT NOT NULL,                -- EKEvent.eventIdentifier
+    start_at       TEXT NOT NULL,                -- RFC3339 UTC (same clock as events.ts)
+    end_at         TEXT NOT NULL,
+    title          TEXT NOT NULL,
+    calendar_name  TEXT,
+    all_day        INTEGER NOT NULL DEFAULT 0,
+    attendee_count INTEGER NOT NULL DEFAULT 0,
+    declined       INTEGER NOT NULL DEFAULT 0,   -- the current user declined it
+    canceled       INTEGER NOT NULL DEFAULT 0,
+    availability   TEXT,                         -- 'busy' | 'free' | 'tentative' | 'unavailable'
+    reminded_at    TEXT,                         -- one reminder per occurrence
+    fetched_at     TEXT NOT NULL,
+    -- Recurring instances share an eventIdentifier, so the start time is part
+    -- of the identity — without it every occurrence overwrites the last one.
+    UNIQUE(external_id, start_at)
+);
+
+-- "What did it do" audit (plan-calendar.md §3.2): action + outcome + timing
+-- only. No titles, no bodies — this table is safe to show the user.
+CREATE TABLE IF NOT EXISTS tool_calls (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          TEXT NOT NULL,
+    tool        TEXT NOT NULL,     -- 'calendar' | 'mail'
+    action      TEXT NOT NULL,     -- 'agenda' | 'next' | 'search' | 'remind' | 'digest'
+    outcome     TEXT NOT NULL,     -- 'ok' | 'denied' | 'unavailable' | 'error'
+    detail      TEXT,              -- counts / latency, never content
+    duration_ms INTEGER
+);
 
 -- TODO(vector): vector index for hybrid retrieval (embeddings + time decay).
 -- No embedding column yet — schema migration waits for the sqlite-vec vs
@@ -433,7 +475,7 @@ pub fn forget_session(conn: &Connection, session_id: &str) -> rusqlite::Result<u
 /// the honest interpretation of "forget everything").
 pub fn forget_all(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
-        "DELETE FROM relationship_log; DELETE FROM relationship_progress; DELETE FROM relationship; DELETE FROM onboarding_answers; DELETE FROM settings; DELETE FROM growth_log; DELETE FROM growth; DELETE FROM predictions; DELETE FROM boundaries; DELETE FROM preferences; DELETE FROM facts; DELETE FROM events;",
+        "DELETE FROM tool_calls; DELETE FROM calendar_cache; DELETE FROM relationship_log; DELETE FROM relationship_progress; DELETE FROM relationship; DELETE FROM onboarding_answers; DELETE FROM settings; DELETE FROM growth_log; DELETE FROM growth; DELETE FROM predictions; DELETE FROM boundaries; DELETE FROM preferences; DELETE FROM facts; DELETE FROM events;",
     )?;
     Ok(())
 }
@@ -1128,6 +1170,217 @@ pub fn mark_relationship_notified(conn: &Connection, id: i64) -> rusqlite::Resul
     Ok(n > 0)
 }
 
+// ------------------------------------------------- calendar cache + tools audit
+// (plan-calendar.md §3.2 — a disposable read cache and a content-free audit)
+
+/// One cached calendar occurrence.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CalendarRow {
+    pub external_id: String,
+    pub start_at: String,
+    pub end_at: String,
+    pub title: String,
+    pub calendar_name: Option<String>,
+    pub all_day: bool,
+    pub attendee_count: i64,
+    pub declined: bool,
+    pub canceled: bool,
+    pub availability: Option<String>,
+    pub reminded_at: Option<String>,
+    pub fetched_at: String,
+}
+
+const CAL_COLS: &str = "external_id, start_at, end_at, title, calendar_name, all_day, \
+                        attendee_count, declined, canceled, availability, reminded_at, fetched_at";
+
+fn calendar_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CalendarRow> {
+    Ok(CalendarRow {
+        external_id: row.get(0)?,
+        start_at: row.get(1)?,
+        end_at: row.get(2)?,
+        title: row.get(3)?,
+        calendar_name: row.get(4)?,
+        all_day: row.get::<_, i64>(5)? != 0,
+        attendee_count: row.get(6)?,
+        declined: row.get::<_, i64>(7)? != 0,
+        canceled: row.get::<_, i64>(8)? != 0,
+        availability: row.get(9)?,
+        reminded_at: row.get(10)?,
+        fetched_at: row.get(11)?,
+    })
+}
+
+/// Replace the cache with one fetch's worth of occurrences.
+///
+/// Upsert on `(external_id, start_at)` rather than delete-all: `reminded_at`
+/// must survive a refresh, or the same meeting gets announced every 5 minutes.
+/// Rows not present in this fetch are dropped by the `fetched_at` sweep — a
+/// cancellation upstream must disappear here too.
+pub fn calendar_replace(
+    conn: &mut Connection,
+    rows: &[CalendarRow],
+    fetched_at: &str,
+) -> rusqlite::Result<()> {
+    let tx = conn.transaction()?;
+    for r in rows {
+        tx.execute(
+            "INSERT INTO calendar_cache
+               (external_id, start_at, end_at, title, calendar_name, all_day,
+                attendee_count, declined, canceled, availability, fetched_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
+             ON CONFLICT(external_id, start_at) DO UPDATE SET
+                end_at = excluded.end_at,
+                title = excluded.title,
+                calendar_name = excluded.calendar_name,
+                all_day = excluded.all_day,
+                attendee_count = excluded.attendee_count,
+                declined = excluded.declined,
+                canceled = excluded.canceled,
+                availability = excluded.availability,
+                fetched_at = excluded.fetched_at",
+            params![
+                r.external_id,
+                r.start_at,
+                r.end_at,
+                r.title,
+                r.calendar_name,
+                r.all_day as i64,
+                r.attendee_count,
+                r.declined as i64,
+                r.canceled as i64,
+                r.availability,
+                fetched_at
+            ],
+        )?;
+    }
+    tx.execute("DELETE FROM calendar_cache WHERE fetched_at < ?1", params![fetched_at])?;
+    tx.commit()
+}
+
+/// Cached occurrences overlapping `[start, end)`, oldest start first.
+pub fn calendar_between(
+    conn: &Connection,
+    start_iso: &str,
+    end_iso: &str,
+) -> rusqlite::Result<Vec<CalendarRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {CAL_COLS} FROM calendar_cache
+         WHERE end_at > ?1 AND start_at < ?2 ORDER BY start_at ASC"
+    ))?;
+    let rows = stmt.query_map(params![start_iso, end_iso], calendar_row)?;
+    rows.collect()
+}
+
+/// The next occurrence starting at or after `after_iso`.
+pub fn calendar_next_after(
+    conn: &Connection,
+    after_iso: &str,
+) -> rusqlite::Result<Option<CalendarRow>> {
+    conn.query_row(
+        &format!(
+            "SELECT {CAL_COLS} FROM calendar_cache
+             WHERE start_at >= ?1 ORDER BY start_at ASC LIMIT 1"
+        ),
+        params![after_iso],
+        calendar_row,
+    )
+    .map(Some)
+    .or_else(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => Ok(None),
+        other => Err(other),
+    })
+}
+
+/// When the cache was last refreshed (`None` = never).
+pub fn calendar_last_fetch(conn: &Connection) -> rusqlite::Result<Option<String>> {
+    conn.query_row("SELECT MAX(fetched_at) FROM calendar_cache", [], |r| {
+        r.get::<_, Option<String>>(0)
+    })
+}
+
+/// Mark one occurrence as reminded. Returns false when it already was —
+/// the idempotency leg of the reminder lane.
+pub fn mark_calendar_reminded(
+    conn: &Connection,
+    external_id: &str,
+    start_at: &str,
+) -> rusqlite::Result<bool> {
+    let n = conn.execute(
+        "UPDATE calendar_cache SET reminded_at = ?1
+         WHERE external_id = ?2 AND start_at = ?3 AND reminded_at IS NULL",
+        params![clock::now_iso(), external_id, start_at],
+    )?;
+    Ok(n > 0)
+}
+
+/// Drop the whole cache (switch off, permission loss, user request).
+pub fn clear_calendar_cache(conn: &Connection) -> rusqlite::Result<usize> {
+    conn.execute("DELETE FROM calendar_cache", [])
+}
+
+/// Append one audit row. `detail` carries counts/latency only.
+pub fn log_tool_call(
+    conn: &Connection,
+    tool: &str,
+    action: &str,
+    outcome: &str,
+    detail: Option<&str>,
+    duration_ms: Option<i64>,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO tool_calls (ts, tool, action, outcome, detail, duration_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![clock::now_iso(), tool, action, outcome, detail, duration_ms],
+    )?;
+    Ok(())
+}
+
+/// `(ok_count, total_count)` for one tool on a local day window.
+pub fn tool_calls_summary(
+    conn: &Connection,
+    tool: &str,
+    start_iso: &str,
+    end_iso: &str,
+) -> rusqlite::Result<(i64, i64)> {
+    conn.query_row(
+        "SELECT
+            COALESCE(SUM(CASE WHEN outcome = 'ok' THEN 1 ELSE 0 END), 0),
+            COUNT(*)
+         FROM tool_calls WHERE tool = ?1 AND ts >= ?2 AND ts < ?3",
+        params![tool, start_iso, end_iso],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+}
+
+/// Most recent audit row timestamp for one (tool, action) — the reminder
+/// lane's "at least 10 minutes apart" gate reads this, not the cache.
+pub fn last_tool_call_ts(
+    conn: &Connection,
+    tool: &str,
+    action: &str,
+) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT MAX(ts) FROM tool_calls WHERE tool = ?1 AND action = ?2 AND outcome = 'ok'",
+        params![tool, action],
+        |r| r.get::<_, Option<String>>(0),
+    )
+}
+
+/// Most recent audit rows for the tools page: `(ts, tool, action, outcome, detail)`.
+pub fn tool_calls_recent(
+    conn: &Connection,
+    limit: usize,
+) -> rusqlite::Result<Vec<(String, String, String, String, Option<String>)>> {
+    let mut stmt = conn.prepare(
+        "SELECT ts, tool, action, outcome, detail FROM tool_calls
+         ORDER BY id DESC LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(params![limit as i64], |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+    })?;
+    rows.collect()
+}
+
 // ------------------------------------------------------- reads for consolidate
 
 /// Unconsumed events inside `[window_start, window_end)`, oldest first.
@@ -1708,5 +1961,78 @@ mod tests {
         let rows = all_events(&conn);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].ts, "2026-11-18T00:00:00Z");
+    }
+
+    fn cal_row(external_id: &str, start: &str, title: &str) -> CalendarRow {
+        CalendarRow {
+            external_id: external_id.into(),
+            start_at: start.into(),
+            end_at: start.into(),
+            title: title.into(),
+            calendar_name: Some("工作".into()),
+            all_day: false,
+            attendee_count: 3,
+            declined: false,
+            canceled: false,
+            availability: Some("busy".into()),
+            reminded_at: None,
+            fetched_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn calendar_replace_preserves_reminded_at_and_sweeps_cancelled() {
+        let mut conn = mem();
+        let t0 = "2026-11-19T06:00:00+00:00";
+        calendar_replace(&mut conn, &[cal_row("a", t0, "评审"), cal_row("b", t0, "一对一")], "2026-11-19T05:00:00+00:00").unwrap();
+        assert_eq!(calendar_between(&conn, "2026-11-19T00:00:00+00:00", "2026-11-20T00:00:00+00:00").unwrap().len(), 2);
+
+        // Reminder fired, then a refresh arrives: the flag must survive,
+        // otherwise the same meeting is announced again 5 minutes later.
+        assert!(mark_calendar_reminded(&conn, "a", t0).unwrap());
+        assert!(!mark_calendar_reminded(&conn, "a", t0).unwrap()); // idempotent
+        // "b" was cancelled upstream: absent from the next fetch.
+        calendar_replace(&mut conn, &[cal_row("a", t0, "评审")], "2026-11-19T05:05:00+00:00").unwrap();
+        let rows = calendar_between(&conn, "2026-11-19T00:00:00+00:00", "2026-11-20T00:00:00+00:00").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].external_id, "a");
+        assert!(rows[0].reminded_at.is_some());
+        assert_eq!(calendar_last_fetch(&conn).unwrap().as_deref(), Some("2026-11-19T05:05:00+00:00"));
+    }
+
+    #[test]
+    fn calendar_next_after_picks_the_earliest_upcoming() {
+        let mut conn = mem();
+        calendar_replace(
+            &mut conn,
+            &[
+                cal_row("late", "2026-11-19T09:00:00+00:00", "下午"),
+                cal_row("early", "2026-11-19T06:00:00+00:00", "上午"),
+            ],
+            "2026-11-19T05:00:00+00:00",
+        )
+        .unwrap();
+        let next = calendar_next_after(&conn, "2026-11-19T05:00:00+00:00").unwrap().unwrap();
+        assert_eq!(next.external_id, "early");
+        assert!(calendar_next_after(&conn, "2026-11-19T10:00:00+00:00").unwrap().is_none());
+    }
+
+    #[test]
+    fn tool_audit_counts_and_cascades_on_forget() {
+        let conn = mem();
+        log_tool_call(&conn, "calendar", "agenda", "ok", Some("2 events, 40ms"), Some(40)).unwrap();
+        log_tool_call(&conn, "calendar", "next", "denied", None, None).unwrap();
+        let (ok, total) = tool_calls_summary(
+            &conn,
+            "calendar",
+            "1970-01-01T00:00:00Z",
+            "2999-01-01T00:00:00Z",
+        )
+        .unwrap();
+        assert_eq!((ok, total), (1, 2));
+        assert_eq!(tool_calls_recent(&conn, 5).unwrap().len(), 2);
+        forget_all(&conn).unwrap();
+        assert!(tool_calls_recent(&conn, 5).unwrap().is_empty());
+        assert!(calendar_last_fetch(&conn).unwrap().is_none());
     }
 }

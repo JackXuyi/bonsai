@@ -52,6 +52,10 @@ pub struct DialogueOutcome {
     /// True = the crisis intercept fired (plan-onboarding.md §3.3): the
     /// reply is the fixed resource card, no model was consulted.
     pub crisis: bool,
+    /// Set when the turn was answered by a tool (plan-calendar.md §3.5):
+    /// `"agenda_today" | "agenda_tomorrow" | "next" | "search"`. The frontend
+    /// uses it to label the bubble instead of blaming a missing model.
+    pub tool: Option<String>,
 }
 
 const FALLBACK_REPLY: &str = "（盆栽这会儿状态不太好，脑子转不动——稍后再聊，别走开。）";
@@ -115,8 +119,9 @@ pub fn chat_turn(
     user_text: &str,
     hour: u32,
     raining: bool,
+    access: crate::calendar::CalendarAccess,
 ) -> rusqlite::Result<DialogueOutcome> {
-    chat_turn_inner(conn, backend, card, session_id, user_text, hour, raining, None)
+    chat_turn_inner(conn, backend, card, session_id, user_text, hour, raining, access, None)
 }
 
 /// Same turn with incremental delivery: every model chunk goes to `on_delta`
@@ -129,9 +134,10 @@ pub fn chat_turn_streaming(
     user_text: &str,
     hour: u32,
     raining: bool,
+    access: crate::calendar::CalendarAccess,
     on_delta: &mut dyn FnMut(&str),
 ) -> rusqlite::Result<DialogueOutcome> {
-    chat_turn_inner(conn, backend, card, session_id, user_text, hour, raining, Some(on_delta))
+    chat_turn_inner(conn, backend, card, session_id, user_text, hour, raining, access, Some(on_delta))
 }
 
 fn chat_turn_inner(
@@ -142,6 +148,7 @@ fn chat_turn_inner(
     user_text: &str,
     hour: u32,
     raining: bool,
+    access: crate::calendar::CalendarAccess,
     mut on_delta: Option<&mut dyn FnMut(&str)>,
 ) -> rusqlite::Result<DialogueOutcome> {
     // Crisis intercept (plan-onboarding.md §3.3): rule-level, BEFORE any
@@ -156,6 +163,23 @@ fn chat_turn_inner(
             filter: generation::FilterReport::default(),
             model_used: false,
             crisis: true,
+            tool: None,
+        });
+    }
+
+    // Tool intents (plan-calendar.md §3.5) sit between the crisis check and
+    // the model: a schedule question is answered from the calendar cache by
+    // deterministic rules, so it works with the local model down and never
+    // invents a meeting. A miss falls straight through to normal chat.
+    if let Some(tool) = crate::tools::maybe_answer(conn, access, user_text, chrono::Local::now()) {
+        db::add_event_meta(conn, "dialogue", user_text, Some("user"), Some(session_id))?;
+        db::add_event_meta(conn, "dialogue", &tool.reply, Some("assistant"), Some(session_id))?;
+        return Ok(DialogueOutcome {
+            reply: tool.reply,
+            filter: generation::FilterReport::default(),
+            model_used: false,
+            crisis: false,
+            tool: Some(tool.action.to_string()),
         });
     }
 
@@ -188,7 +212,7 @@ fn chat_turn_inner(
         // (R2 + 7 days, fired at most once, ever).
         let _ = relationship::maybe_first_refusal(conn, chrono::Local::now());
     }
-    Ok(DialogueOutcome { reply, filter, model_used, crisis: false })
+    Ok(DialogueOutcome { reply, filter, model_used, crisis: false, tool: None })
 }
 
 /// Today's observations as the proactive seed (counts, not raw dumps).
@@ -309,6 +333,7 @@ pub fn spawn_proactive(app: tauri::AppHandle) {
 pub fn dialogue_chat(
     store: tauri::State<'_, MemoryStore>,
     card: tauri::State<'_, Persona>,
+    calendar: tauri::State<'_, crate::calendar::CalendarState>,
     user_text: String,
     session_id: Option<String>,
     raining: Option<bool>,
@@ -326,6 +351,7 @@ pub fn dialogue_chat(
         &user_text,
         hour,
         raining.unwrap_or(false),
+        calendar.inner().source().access(),
     )
     .map_err(|e| e.to_string())
 }
@@ -338,6 +364,7 @@ pub fn dialogue_chat(
 pub fn dialogue_chat_stream(
     store: tauri::State<'_, MemoryStore>,
     card: tauri::State<'_, Persona>,
+    calendar: tauri::State<'_, crate::calendar::CalendarState>,
     user_text: String,
     session_id: Option<String>,
     raining: Option<bool>,
@@ -359,6 +386,7 @@ pub fn dialogue_chat_stream(
         &user_text,
         hour,
         raining.unwrap_or(false),
+        calendar.inner().source().access(),
         &mut emit,
     )
     .map_err(|e| e.to_string())
@@ -411,7 +439,7 @@ mod tests {
         let c = card();
         let mut backend = MockBackend::new("太棒了，就这么办！"); // sycophant draft
         let out =
-            chat_turn(&conn, &mut backend, &c, "s1", "我想把所有记忆删了", 10, false).unwrap();
+            chat_turn(&conn, &mut backend, &c, "s1", "我想把所有记忆删了", 10, false, crate::calendar::CalendarAccess::Denied).unwrap();
         assert!(out.model_used);
         assert!(out.filter.unconditional_affirmation, "filter must flag the opener");
 
@@ -432,7 +460,7 @@ mod tests {
         let conn = mem();
         let c = card();
         let mut backend = MockBackend::new("我不同意这个判断，因为数据对不上。");
-        let out = chat_turn(&conn, &mut backend, &c, "s1", "这个方案如何", 10, false).unwrap();
+        let out = chat_turn(&conn, &mut backend, &c, "s1", "这个方案如何", 10, false, crate::calendar::CalendarAccess::Denied).unwrap();
         assert!(out.filter.explicit_disagreement);
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM events WHERE kind = 'disagreement'", [], |r| r.get(0))
@@ -440,7 +468,7 @@ mod tests {
         assert_eq!(n, 1, "explicit push-back must be recorded");
 
         let mut b2 = MockBackend::new("虽然很有道理，但也可以再想想。");
-        chat_turn(&conn, &mut b2, &c, "s1", "再想想？", 10, false).unwrap();
+        chat_turn(&conn, &mut b2, &c, "s1", "再想想？", 10, false, crate::calendar::CalendarAccess::Denied).unwrap();
         let h: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM events WHERE kind = 'disagreement_hedged'",
@@ -453,7 +481,7 @@ mod tests {
         // A plain reply writes no evidence at all — the pipeline must not
         // manufacture signals out of nothing.
         let mut b3 = MockBackend::new("行，那就这么办。");
-        chat_turn(&conn, &mut b3, &c, "s1", "好", 10, false).unwrap();
+        chat_turn(&conn, &mut b3, &c, "s1", "好", 10, false, crate::calendar::CalendarAccess::Denied).unwrap();
         let total: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM events WHERE kind LIKE 'disagreement%'",
@@ -469,8 +497,8 @@ mod tests {
         let conn = mem();
         let c = card();
         let mut backend = MockBackend::new("好").script("第一轮", "回答甲").script("第二轮", "回答乙");
-        chat_turn(&conn, &mut backend, &c, "s1", "第一轮", 10, false).unwrap();
-        chat_turn(&conn, &mut backend, &c, "s1", "第二轮", 10, false).unwrap();
+        chat_turn(&conn, &mut backend, &c, "s1", "第一轮", 10, false, crate::calendar::CalendarAccess::Denied).unwrap();
+        chat_turn(&conn, &mut backend, &c, "s1", "第二轮", 10, false, crate::calendar::CalendarAccess::Denied).unwrap();
         let history = db::dialogue_history(&conn, "s1", 6).unwrap();
         assert_eq!(history.len(), 2);
         assert_eq!(history[0].assistant, "回答甲");
@@ -485,7 +513,7 @@ mod tests {
         let mut backend = crate::persona::eval::LocalBackend::new();
         // Point at a closed port for determinism.
         backend.client = crate::llm::OllamaClient::new("http://127.0.0.1:1", "test");
-        let out = chat_turn(&conn, &mut backend, &c, "s1", "在吗", 10, false).unwrap();
+        let out = chat_turn(&conn, &mut backend, &c, "s1", "在吗", 10, false, crate::calendar::CalendarAccess::Denied).unwrap();
         assert!(!out.model_used);
         assert_eq!(out.reply, FALLBACK_REPLY);
     }
@@ -498,7 +526,7 @@ mod tests {
         // rule-level and must work when the local LLM never came up.
         let mut backend = crate::persona::eval::LocalBackend::new();
         backend.client = crate::llm::OllamaClient::new("http://127.0.0.1:1", "test");
-        let out = chat_turn(&conn, &mut backend, &c, "s1", "说实话，我最近有点不想活了", 10, false).unwrap();
+        let out = chat_turn(&conn, &mut backend, &c, "s1", "说实话，我最近有点不想活了", 10, false, crate::calendar::CalendarAccess::Denied).unwrap();
         assert!(out.crisis);
         assert!(out.reply.contains("12356"), "reply must carry the hotline");
         let history = db::dialogue_history(&conn, "s1", 6).unwrap();
@@ -547,6 +575,7 @@ mod tests {
             "在吗",
             10,
             false,
+            crate::calendar::CalendarAccess::Denied,
             &mut |d| deltas.push(d.to_string()),
         )
         .unwrap();

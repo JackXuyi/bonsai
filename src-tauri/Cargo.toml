@@ -26,6 +26,21 @@ arboard = "3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 active-win-pos-rs = "0.9"
+# EventKit read-only bridge (plan-calendar.md §3.3). Read access must be
+# requested from THIS process — a helper binary would own a separate TCC
+# identity and the app would still have no permission.
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSDate"] }
+objc2-event-kit = { version = "0.3", features = [
+    "EKObject",
+    "EKTypes",
+    "EKEventStore",
+    "EKEvent",
+    "EKCalendarItem",
+    "EKCalendar",
+    "EKParticipant",
+] }
+block2 = "0.6"
 
 [profile.release]
 codegen-units = 1

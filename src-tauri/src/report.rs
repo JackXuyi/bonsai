@@ -68,8 +68,25 @@ pub fn collect(conn: &Connection, day: NaiveDate) -> DayDigest {
     digest
 }
 
+/// Tomorrow's calendar, as the report needs it (plan-calendar.md §3.8).
+/// `note` carries the honest "cannot see it" line — an empty list and a
+/// missing permission must not look the same in a daily report.
+pub struct TomorrowAgenda {
+    pub items: Vec<crate::calendar::EventItem>,
+    pub note: Option<String>,
+}
+
 /// Render the markdown page. Deterministic: same data → same bytes.
 pub fn render(day: NaiveDate, d: &DayDigest, summary: Option<&str>) -> String {
+    render_with_calendar(day, d, summary, None)
+}
+
+pub fn render_with_calendar(
+    day: NaiveDate,
+    d: &DayDigest,
+    summary: Option<&str>,
+    tomorrow: Option<&TomorrowAgenda>,
+) -> String {
     let mut out = String::new();
     out.push_str(&format!("# 盆栽日报 · {day}\n\n"));
 
@@ -108,6 +125,30 @@ pub fn render(day: NaiveDate, d: &DayDigest, summary: Option<&str>) -> String {
         }
     }
 
+    // Tomorrow beats today at 22:00: "what's coming" is the actionable half.
+    if let Some(t) = tomorrow {
+        out.push_str("\n## 明天\n\n");
+        if let Some(note) = &t.note {
+            out.push_str(&format!("- {note}\n"));
+        } else if t.items.is_empty() {
+            out.push_str("- 明天没有安排。\n");
+        } else {
+            for item in t.items.iter().take(5) {
+                let when = if item.all_day {
+                    "全天".to_string()
+                } else {
+                    chrono::DateTime::parse_from_rfc3339(&item.start_at)
+                        .map(|t| t.with_timezone(&Local).format("%H:%M").to_string())
+                        .unwrap_or_else(|_| "--:--".into())
+                };
+                out.push_str(&format!("- {when} {}\n", item.title));
+            }
+            if t.items.len() > 5 {
+                out.push_str(&format!("- 等共 {} 个\n", t.items.len()));
+            }
+        }
+    }
+
     out.push_str("\n## 一句话总结\n\n");
     match summary {
         Some(s) if !s.trim().is_empty() => out.push_str(&format!("> {}\n", s.trim())),
@@ -140,7 +181,12 @@ fn fallback_summary(d: &DayDigest) -> String {
 
 /// Ask the local model for the summary. Any failure → None (caller falls
 /// back to the rule-based line). One call, low temperature, short timeout.
-pub fn llm_summary(client: &OllamaClient, day: NaiveDate, d: &DayDigest) -> Option<String> {
+pub fn llm_summary(
+    client: &OllamaClient,
+    day: NaiveDate,
+    d: &DayDigest,
+    tomorrow: Option<&TomorrowAgenda>,
+) -> Option<String> {
     if !client.is_up() {
         return None;
     }
@@ -156,6 +202,16 @@ pub fn llm_summary(client: &OllamaClient, day: NaiveDate, d: &DayDigest) -> Opti
     }
     for f in d.facts.iter().take(10) {
         digest.push_str(&format!("- 新记忆: {f}\n"));
+    }
+    if let Some(t) = tomorrow {
+        if let Some(note) = &t.note {
+            digest.push_str(&format!("- 明天: {note}\n"));
+        } else if t.items.is_empty() {
+            digest.push_str("- 明天: 没有安排\n");
+        } else {
+            let titles: Vec<&str> = t.items.iter().take(5).map(|i| i.title.as_str()).collect();
+            digest.push_str(&format!("- 明天: {} 个安排（{}）\n", t.items.len(), titles.join("、")));
+        }
     }
     if digest.is_empty() {
         digest.push_str("- （没有记录到任何活动）\n");
@@ -177,17 +233,53 @@ pub fn llm_summary(client: &OllamaClient, day: NaiveDate, d: &DayDigest) -> Opti
 /// Full pipeline: collect → (optional) summarize → render → persist.
 /// Returns the markdown page.
 pub fn build(conn: &Connection, client: Option<&OllamaClient>, day: NaiveDate) -> String {
+    build_with_calendar(conn, client, day, None)
+}
+
+pub fn build_with_calendar(
+    conn: &Connection,
+    client: Option<&OllamaClient>,
+    day: NaiveDate,
+    tomorrow: Option<&TomorrowAgenda>,
+) -> String {
     let digest = collect(conn, day);
-    let summary = client.and_then(|c| llm_summary(c, day, &digest));
-    render(day, &digest, summary.as_deref())
+    let summary = client.and_then(|c| llm_summary(c, day, &digest, tomorrow));
+    render_with_calendar(day, &digest, summary.as_deref(), tomorrow)
 }
 
 // ---------------------------------------------------------------- command
+
+/// Tomorrow's agenda for the report. Three outcomes, deliberately distinct:
+/// section absent (calendar off), section with a note (on but unreadable),
+/// section with items.
+fn tomorrow_agenda(
+    conn: &Connection,
+    source: &dyn crate::calendar::CalendarSource,
+    day: NaiveDate,
+) -> Option<TomorrowAgenda> {
+    if !crate::calendar::is_enabled(conn) {
+        return None;
+    }
+    if !source.access().can_read() {
+        return Some(TomorrowAgenda {
+            items: Vec::new(),
+            note: Some("（日历未授权，看不到明天安排）".into()),
+        });
+    }
+    match crate::calendar::agenda_for_day(conn, day + chrono::Duration::days(1)) {
+        Ok(items) => Some(TomorrowAgenda { items, note: None }),
+        Err(_) => Some(TomorrowAgenda {
+            items: Vec::new(),
+            note: Some("（日历这会儿读不到）".into()),
+        }),
+    }
+}
 
 #[tauri::command]
 pub fn daily_report(
     app: tauri::AppHandle,
     store: tauri::State<'_, crate::memory::MemoryStore>,
+    calendar: tauri::State<'_, crate::calendar::CalendarState>,
     date: Option<String>,
 ) -> Result<String, String> {
     use tauri::Manager;
@@ -200,7 +292,8 @@ pub fn daily_report(
 
     let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
     let client = OllamaClient::from_env();
-    let markdown = build(&conn, Some(&client), day);
+    let tomorrow = tomorrow_agenda(&conn, calendar.inner().source(), day);
+    let markdown = build_with_calendar(&conn, Some(&client), day, tomorrow.as_ref());
 
     // Persist next to the memory db, so past reports are browsable offline.
     let dir = app
@@ -319,6 +412,53 @@ mod tests {
         );
         assert!(md.contains("模型写的一句话"));
         assert!(!md.contains("盆栽新记住了"));
+    }
+
+    #[test]
+    fn tomorrow_section_distinguishes_absent_denied_and_populated() {
+        let day = NaiveDate::from_ymd_opt(2026, 11, 19).unwrap();
+        let d = DayDigest {
+            clipboards: Vec::new(),
+            downloads: Vec::new(),
+            apps: Vec::new(),
+            facts: Vec::new(),
+            total_events: 1,
+        };
+        // Calendar off → no section at all (never opted in).
+        assert!(!render_with_calendar(day, &d, None, None).contains("## 明天"));
+
+        // On but unreadable → a note, NOT "no plans" (that would be a lie).
+        let denied = TomorrowAgenda {
+            items: Vec::new(),
+            note: Some("（日历未授权，看不到明天安排）".into()),
+        };
+        let md = render_with_calendar(day, &d, None, Some(&denied));
+        assert!(md.contains("## 明天"));
+        assert!(md.contains("日历未授权"));
+        assert!(!md.contains("明天没有安排"));
+
+        // Readable → one line per item, all-day labelled, cap at five.
+        let item = crate::calendar::EventItem {
+            external_id: "e1".into(),
+            start_at: "2026-11-20T01:30:00+00:00".into(),
+            end_at: "2026-11-20T02:30:00+00:00".into(),
+            title: "产品评审".into(),
+            calendar_name: None,
+            all_day: false,
+            attendee_count: 3,
+            declined: false,
+            canceled: false,
+            availability: Some("busy".into()),
+            reminded: false,
+        };
+        let md2 = render_with_calendar(
+            day,
+            &d,
+            None,
+            Some(&TomorrowAgenda { items: vec![item], note: None }),
+        );
+        assert!(md2.contains("产品评审"));
+        assert!(!md2.contains("日历未授权"));
     }
 
     #[test]

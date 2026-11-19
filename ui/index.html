@@ -227,6 +227,40 @@
           <p class="status-line"><span class="dot" id="perc-dot"></span><span id="perception-line">感知层未开启</span></p>
         </section>
 
+        <!-- 日历（plan-calendar.md §3.10）：只读、默认关。开关拨开才触发
+             系统授权弹窗——首次启动就弹会被拒，而 macOS 的拒绝是粘性的。 -->
+        <section class="card" id="calendar-card">
+          <div class="card-head">
+            <div class="card-titles">
+              <p class="card-title">日历</p>
+              <p class="card-sub">只读 · 日程不进记忆</p>
+            </div>
+            <label class="tgl tgl-master" title="总开关">
+              <span class="master-label">总开关</span>
+              <input type="checkbox" id="cal-enabled" />
+              <span class="track"><span class="knob"></span></span>
+              <span class="sr-only">开启日历</span>
+            </label>
+          </div>
+
+          <div class="subs off" id="cal-subs">
+            <label class="row">
+              <span class="row-label">会前提醒</span>
+              <span class="tgl">
+                <input type="checkbox" id="cal-remind" />
+                <span class="track"><span class="knob"></span></span>
+              </span>
+            </label>
+            <div class="row">
+              <span class="row-label" id="calendar-access">还没授权</span>
+              <button class="ob-btn cal-btn" id="btn-cal-access" hidden>去授权</button>
+              <button class="ob-btn cal-btn" id="btn-cal-clear" hidden>清缓存</button>
+            </div>
+          </div>
+
+          <p class="status-line" id="calendar-line">日历未开启</p>
+        </section>
+
         <section class="card" id="boundaries-card">
           <div class="card-head">
             <div class="card-titles">

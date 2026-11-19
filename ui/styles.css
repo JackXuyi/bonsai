@@ -1324,3 +1324,24 @@ dialog:focus {
   padding: 4px 10px;
   white-space: nowrap;
 }
+
+/* ── 工具页 · 日历（plan-calendar.md §3.10）────────────────────── */
+.cal-btn {
+  flex: none;
+  font-size: 12px;
+  padding: 4px 10px;
+  white-space: nowrap;
+}
+
+.cal-mute {
+  display: inline-block;
+  margin-top: 6px;
+  font-size: 12px;
+  padding: 3px 10px;
+}
+
+/* `display: flex` above beats the UA `[hidden]` rule — the empty-state hint
+   stayed visible next to a populated list without this. */
+.status-line[hidden] {
+  display: none;
+}

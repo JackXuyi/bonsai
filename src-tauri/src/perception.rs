@@ -313,12 +313,19 @@ impl Collector {
 /// - value rises with the number of signals collected today (something to
 ///   talk about) — 0 signals is still 0.3, a companion may just say hi;
 /// - interruption cost is low: the companion lives in the menu bar.
-pub fn decision_input(signals: &LatestSignals, signals_today: usize) -> DecisionInput {
+/// - `in_meeting` comes from the calendar cache (plan-calendar.md §3.7):
+///   two or more humans on the invite, currently running. No permission →
+///   `false`, because a wrong silence is worse than a wrong word.
+pub fn decision_input(
+    signals: &LatestSignals,
+    signals_today: usize,
+    in_meeting: bool,
+) -> DecisionInput {
     DecisionInput {
         idle_minutes: (signals.idle_secs / 60.0) as u32,
         is_typing: signals.idle_secs < 3.0,
         is_fullscreen: false, // P0: not cheaply detectable; stays permissive
-        in_meeting: false,    // P1: calendar leg
+        in_meeting,           // P2: calendar leg (plan-calendar.md §3.7)
         value: (0.3 + 0.1 * signals_today.min(6) as f32).min(0.9),
         interruption_cost: 0.2,
     }
@@ -510,13 +517,13 @@ mod tests {
     fn decision_input_maps_idle_and_value() {
         let mut s = LatestSignals::default();
         s.idle_secs = 2.0; // typing (input in the last 3s)
-        let input = decision_input(&s, 0);
+        let input = decision_input(&s, 0, false);
         assert!(input.is_typing);
         assert_eq!(input.idle_minutes, 0);
         assert!((input.value - 0.3).abs() < 1e-6);
 
         s.idle_secs = 400.0; // > 5 min idle
-        let input = decision_input(&s, 5);
+        let input = decision_input(&s, 5, false);
         assert!(!input.is_typing);
         assert_eq!(input.idle_minutes, 6);
         assert!((input.value - 0.8).abs() < 1e-6);

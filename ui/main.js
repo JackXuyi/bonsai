@@ -125,6 +125,13 @@ const boundaryEmpty = $("boundary-empty");
 const relationshipSub = $("relationship-sub");
 const relationshipLine = $("relationship-line");
 const relResetBtn = $("btn-rel-reset");
+const calEnabled = $("cal-enabled");
+const calRemind = $("cal-remind");
+const calSubs = $("cal-subs");
+const calAccess = $("calendar-access");
+const calLine = $("calendar-line");
+const calAccessBtn = $("btn-cal-access");
+const calClearBtn = $("btn-cal-clear");
 
 const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -363,6 +370,7 @@ function selectTab(name) {
   }
   if (name === "tools") {
     refreshPerceptionStatus();
+    refreshCalendar();
     loadBoundaries();
     drainRelationshipAnnouncements().catch(() => {});
   }
@@ -513,6 +521,9 @@ function appendNote(bubble, note) {
 
 function noteFor(outcome) {
   if (outcome.crisis) return "危机资源 · 常规回复已拦截";
+  // Tool answers come from the calendar cache, not the model — labelling them
+  // "model unavailable" would be a lie.
+  if (outcome.tool) return "日程 · 直接查的日历";
   const notes = [];
   if (!outcome.model_used) notes.push("本地模型未就绪");
   if (outcome.filter?.unconditional_affirmation) notes.push("反谄媚过滤：拦截了无条件肯定");
@@ -1096,6 +1107,147 @@ async function loadBoundaries() {
   }
 }
 
+// ---------------------------------------------------------------- calendar
+// plan-calendar.md §3.10: same shape as the perception card — master switch
+// first, and the system permission dialog is only ever triggered by the user
+// flipping it (a first-run prompt gets denied, and macOS denials are sticky).
+// Nothing here displays a meeting title; the card only reports counts.
+
+const CAL_ACCESS_TEXT = {
+  full: "已授权",
+  denied: "权限被拒（只能去系统设置里改）",
+  restricted: "被系统限制",
+  write_only: "只给了「添加日程」权限，读不了",
+  not_determined: "还没授权",
+};
+
+function renderCalendar(st) {
+  if (!st) return;
+  calEnabled.checked = !!st.enabled;
+  calRemind.checked = !!st.remind;
+  calSubs.classList.toggle("off", !st.enabled);
+  calAccess.textContent = CAL_ACCESS_TEXT[st.access] || st.access;
+  // "去授权" is useful only while the calendar is on and not yet readable.
+  const needGrant = st.enabled && !st.can_read;
+  calAccessBtn.hidden = !needGrant;
+  calAccessBtn.textContent = st.access === "denied" || st.access === "write_only"
+    ? "打开系统设置"
+    : "去授权";
+  calClearBtn.hidden = !st.cache_count;
+
+  if (!st.enabled) {
+    calLine.textContent = "日历未开启（默认关闭）";
+    return;
+  }
+  if (!st.can_read) {
+    calLine.textContent = "看不到日程，先授权";
+    return;
+  }
+  const bits = [];
+  if (st.next) {
+    const t = new Date(st.next.start_at);
+    bits.push(
+      `下一个 ${t.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })} ${st.next.title}`
+    );
+  } else {
+    bits.push("接下来没安排");
+  }
+  bits.push(`今天读 ${st.today_reads} 次 · 提醒 ${st.today_reminds} 次`);
+  calLine.textContent = bits.join(" · ");
+}
+
+async function refreshCalendar() {
+  if (!inTauri) {
+    calLine.textContent = "浏览器预览模式：后端未连接";
+    return;
+  }
+  try {
+    renderCalendar(await invoke("calendar_status"));
+  } catch {
+    calLine.textContent = "日历状态读取失败";
+  }
+}
+
+// macOS only: deep link into the calendar privacy pane. Apple gives no
+// programmatic way to grant this — the user must flip it themselves.
+function openCalendarSettings() {
+  if (!inTauri) return;
+  invoke("calendar_open_settings").catch(() =>
+    toast("请到「系统设置 · 隐私与安全性 · 日历」里打开")
+  );
+}
+
+calEnabled?.addEventListener("change", async () => {
+  if (!inTauri) return;
+  const on = calEnabled.checked;
+  try {
+    const st = await invoke("calendar_set_config", { enabled: on });
+    renderCalendar(st);
+    // Turning it on is the ONLY moment we ask: user-initiated prompts are
+    // the ones people actually accept.
+    if (on && !st.can_read) {
+      renderCalendar(await invoke("calendar_request_access"));
+    }
+  } catch {
+    toast("日历设置失败");
+  }
+});
+
+calRemind?.addEventListener("change", async () => {
+  if (!inTauri) return;
+  try {
+    renderCalendar(await invoke("calendar_set_config", { remind: calRemind.checked }));
+  } catch {
+    toast("提醒设置失败");
+  }
+});
+
+calAccessBtn?.addEventListener("click", async () => {
+  if (!inTauri) return;
+  const st = await invoke("calendar_request_access").catch(() => null);
+  if (!st) {
+    openCalendarSettings();
+    return;
+  }
+  renderCalendar(st);
+  if (!st.can_read) openCalendarSettings();
+});
+
+calClearBtn?.addEventListener("click", async () => {
+  if (!inTauri) return;
+  try {
+    renderCalendar(await invoke("calendar_clear_cache"));
+    toast("日历缓存已清空");
+  } catch {
+    toast("清空失败");
+  }
+});
+
+// A reminder arrives already de-duplicated and rate-limited on the Rust side.
+// Hidden window → say nothing (it is not a notification centre).
+function showReminder(p) {
+  if (!p || document.visibilityState === "hidden") return;
+  const bubble = addAnnouncement(
+    `${p.title}，${p.minutes_left} 分钟后开始。`,
+    "会前提醒"
+  );
+  const mute = document.createElement("button");
+  mute.className = "ob-btn cal-mute";
+  mute.textContent = "今天别再提醒";
+  mute.addEventListener("click", async () => {
+    try {
+      await invoke("calendar_mute_today");
+      toast("今天安静了");
+    } catch {
+      toast("操作失败");
+    }
+    mute.remove();
+  });
+  bubble.appendChild(mute);
+  selectTab("chat");
+  stick();
+}
+
 // ---------------------------------------------------------------- boot
 
 setInterval(() => {
@@ -1139,9 +1291,13 @@ if (inTauri) {
   listen("relationship:stage", () => {
     drainRelationshipAnnouncements().catch(() => {});
   }).catch(() => {});
+  // Calendar reminders (P2 item 2): already de-duplicated, rate-limited and
+  // quiet-hour-checked on the Rust side. A hidden window stays silent.
+  listen("calendar:remind", (event) => showReminder(event.payload)).catch(() => {});
   listen("window:shown", () => {
     drainGrowthAnnouncements().catch(() => {});
     drainRelationshipAnnouncements().catch(() => {});
+    refreshCalendar();
     checkOnboarding(); // tray "重新做一次引导" re-opens the flow here
   }).catch(() => {});
   drainGrowthAnnouncements().catch(() => {});

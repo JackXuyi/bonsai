@@ -83,7 +83,7 @@ Rust 核心已实现：L1 感知层（逐项授权、默认关闭）、L2 记忆
   - [方案：预测-验证循环](./docs/zh/plan-predict.md) — MVP P1 第 1 项的实施计划（G1–G4 已实施）
   - [方案：形态线成长](./docs/zh/plan-morph.md) — MVP P1 第 2 项的实施计划（G1–G4 已实施）
   - [方案：关系线成长](./docs/zh/plan-relationship.md) — MVP P2 第 1 项的实施计划（Q1–Q4 已实施）
-  - [方案：日历 / 邮件工具调用](./docs/zh/plan-calendar.md) — MVP P2 第 2 项的实施计划（只读优先，待评审）
+  - [方案：日历 / 邮件工具调用](./docs/zh/plan-calendar.md) — MVP P2 第 2 项的实施计划（T0–T4 已实施，邮件 T5 未做）
 - English
   - [Research report](./docs/en/research-report.md) — founding research: market, feasibility, memory, personality, growth, compliance, MVP, risks
 
@@ -117,7 +117,7 @@ MVP P2 进度：
 | P2 项 | 状态 |
 | --- | --- |
 | 关系线成长（8–30 天，靠理解准确度） | 🔨 已实现：三阶段（拘谨 → 熟络 day≥9 且证据≥12 → 会顶嘴 day≥22 且证据≥30，双条件、天数只给窗口不给进度）；证据每日从 predictions + events 重算（在场/猜中/顶嘴没被拒 各 +1 上限，猜错 −1 不累积），分数永不出进程、不上 UI；「别烦我」不扣分只暂停推进（退避率 >10%）；7 天无互动 → 生疏（语气收回，阶段不退）；prompt 注入四档关系模式，R2 把缓冲句禁令写成硬约束；反谄媚命中首次落库为 disagreement / disagreement_hedged 事件；R2 后 7 天内「第一次没顺着你」彩蛋（只播一次）；工具页一行 + 重置（只清关系线）；四指标为常驻 CI 测试（见 docs/zh/plan-relationship.md） |
-| 日历 / 邮件工具调用 | ⬜ 未开始 |
+| 日历 / 邮件工具调用 | 🔨 已实现（日历只读；邮件未做）：schema v7 `calendar_cache`（TTL 5 分钟、标题只活在这里、`reminded_at` 幂等）+ `tool_calls` 审计（只有动作与计数，无内容）；EventKit 在本进程内调用（TCC 归属「责任进程」，helper 会分裂成两个身份），主线程发授权请求 + 60s 超时，**只认 `fullAccess`**（`writeOnly` 不等于能读）；拒绝/未授权一律返回 `calendar_denied` 等错误码，绝不拿空列表冒充「今天没会」；规则意图路由（时间词 + 日程名词双命中，20 正 / 15 负样本 CI）接在危机拦截之后、模型调用之前，模板作答不依赖模型；会前提醒是 L4 的第二条 lane（−10±2 分钟窗口、日 ≤3、间隔 ≥10 分钟、22–08 静默、会中不提、全天/已拒/已取消不提、点「今天别再提醒」当天全静）；`in_meeting` 接进 `should_speak`（参会人 ≥2 才算会，单人专注块不闭嘴）；日报加「明天」节（无日历 / 未授权 / 有安排三态区分）；工具页日历卡 +「它今天读了 N 次」；邮件（AppleScript）拆为 T5 未做（见 docs/zh/plan-calendar.md §3.9/§11） |
 | 语音（偶发语音） | ⬜ 未开始 |
 | 屏幕感知 | ⬜ 未开始 |
 | 跨设备 / 数据可携带 | ⬜ 未开始 |

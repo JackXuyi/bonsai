@@ -10,6 +10,7 @@
 //! - L5 Generation:  local-LLM dialogue + anti-sycophancy filter (scaffold)
 //! - L6 Presentation: frontend in ../ui
 
+pub mod calendar;
 pub mod decision;
 pub mod dialogue;
 pub mod face;
@@ -23,6 +24,7 @@ pub mod persona;
 pub mod predict;
 pub mod relationship;
 pub mod report;
+pub mod tools;
 pub mod tray;
 
 use memory::MemoryStore;
@@ -118,6 +120,20 @@ pub fn run() {
             // 拘谨 → 熟络 → 会顶嘴, driven by understanding accuracy only.
             relationship::spawn(app.handle().clone());
 
+            // Calendar bridge (P2 item 2, docs/zh/plan-calendar.md): read-only,
+            // default off, and the permission prompt is only ever triggered by
+            // the user flipping the switch (a first-run prompt gets denied and
+            // macOS denials are sticky). The source lives in this process on
+            // purpose — TCC attributes permission to the responsible process.
+            #[cfg(target_os = "macos")]
+            let calendar_source: Box<dyn calendar::CalendarSource> =
+                Box::new(calendar::EkCalendarSource { app: app.handle().clone() });
+            #[cfg(not(target_os = "macos"))]
+            let calendar_source: Box<dyn calendar::CalendarSource> =
+                Box::new(calendar::MockCalendar::new(calendar::CalendarAccess::NotDetermined));
+            app.manage(calendar::CalendarState { source: calendar_source });
+            calendar::spawn(app.handle().clone());
+
             // L0: tray icon + menu. The main window is created lazily on click,
             // keeping "boot to tray ready" fast.
             tray::setup(app)?;
@@ -155,6 +171,12 @@ pub fn run() {
             relationship::relationship_status,
             relationship::relationship_ack,
             relationship::relationship_reset,
+            calendar::calendar_status,
+            calendar::calendar_request_access,
+            calendar::calendar_set_config,
+            calendar::calendar_clear_cache,
+            calendar::calendar_mute_today,
+            calendar::calendar_open_settings,
             onboarding::onboarding_status,
             onboarding::onboarding_submit,
             onboarding::onboarding_reset,

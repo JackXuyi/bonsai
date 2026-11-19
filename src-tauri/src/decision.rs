@@ -101,7 +101,11 @@ pub fn evaluate_live(
         })
         .map(|events| events.iter().filter(|e| e.kind == "perception").count())
         .unwrap_or(0);
-    let input = crate::perception::decision_input(signals, signals_today);
+    let input = crate::perception::decision_input(
+        signals,
+        signals_today,
+        crate::calendar::in_meeting_now(conn, chrono::Local::now()),
+    );
     should_speak(&input, proactivity, DEFAULT_DAILY_LIMIT)
 }
 
