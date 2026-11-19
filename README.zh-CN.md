@@ -83,6 +83,7 @@ Rust 核心已实现：L1 感知层（逐项授权、默认关闭）、L2 记忆
   - [方案：预测-验证循环](./docs/zh/plan-predict.md) — MVP P1 第 1 项的实施计划（G1–G4 已实施）
   - [方案：形态线成长](./docs/zh/plan-morph.md) — MVP P1 第 2 项的实施计划（G1–G4 已实施）
   - [方案：关系线成长](./docs/zh/plan-relationship.md) — MVP P2 第 1 项的实施计划（Q1–Q4 已实施）
+  - [方案：日历 / 邮件工具调用](./docs/zh/plan-calendar.md) — MVP P2 第 2 项的实施计划（只读优先，待评审）
 - English
   - [Research report](./docs/en/research-report.md) — founding research: market, feasibility, memory, personality, growth, compliance, MVP, risks
 

@@ -92,6 +92,7 @@ The Rust core implements: L1 perception (per-source switches, default off), L2 m
   - [Plan: predict-verify loop](./docs/zh/plan-predict.md) — implementation plan for MVP P1 item 1 (G1–G4 implemented)
   - [Plan: form-line growth](./docs/zh/plan-morph.md) — implementation plan for MVP P1 item 2 (G1–G4 implemented)
   - [Plan: relationship-line growth](./docs/zh/plan-relationship.md) — implementation plan for MVP P2 item 1 (Q1–Q4 implemented)
+  - [Plan: calendar / mail tool calls](./docs/zh/plan-calendar.md) — implementation plan for MVP P2 item 2 (read-only first; pending review)
 
 ## Status
 
