@@ -81,6 +81,7 @@ Rust 核心已实现：L1 感知层（逐项授权、默认关闭）、L2 记忆
   - [方案：三层记忆 + 夜间整理](./docs/zh/plan-memory.md) — MVP P0 第 3 项的实施计划（M1–M4 已实施）
   - [方案：人格卡 v1 + 一致性测试集](./docs/zh/plan-persona.md) — MVP P0 第 4 项的实施计划（PM1–PM3 已实施）
   - [方案：预测-验证循环](./docs/zh/plan-predict.md) — MVP P1 第 1 项的实施计划（G1–G4 已实施）
+  - [方案：形态线成长](./docs/zh/plan-morph.md) — MVP P1 第 2 项的实施计划（G1–G4 已实施）
 - English
   - [Research report](./docs/en/research-report.md) — founding research: market, feasibility, memory, personality, growth, compliance, MVP, risks
 
@@ -106,5 +107,5 @@ MVP P1 进度：
 | P1 项 | 状态 |
 | --- | --- |
 | 预测-验证循环 | 🔨 已实现：每天最多 1 次证据可溯源的猜测（habit 直推 / 14 天节律外推 / 连续性猜），三档反馈（对/错/别烦我）回写偏好置信度，「别烦我」退避 3 天；与主动搭话互斥、busy 不打断；指标门槛（命中率 ≥50%、退避率 <10%）为常驻 CI 测试（见 docs/zh/plan-predict.md） |
-| 形态线成长（7 天可见变化） | ⬜ 未开始 |
+| 形态线成长（7 天可见变化） | 🔨 已实现：四阶段 7 天节奏（破土 day0–1 / 抽枝 day2 / 成形 day4 / 成景 day6），靠时间推进、无签到无数值；schema v4 growth 表（出生锚点从最早事件回填、阶段单调不减、daily tick 幂等）；日微变化（叶色渐深 + 按日确定性加小叶 + 阶段自述）；休眠而非死亡（7 天无互动 → 落叶待机，回来即恢复）；升阶播报只在开窗断点播一次（`notified_at` 幂等，不占打扰额度）；S3 解锁「得意」表情与 poke 文案分级；三指标（升阶准时率 / 播报幂等率 / 休眠正确率）为常驻 CI 测试（见 docs/zh/plan-morph.md） |
 | 边界 onboarding 问答 | ⬜ 未开始 |

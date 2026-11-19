@@ -61,6 +61,7 @@ fn mood_str(state: FaceState) -> &'static str {
         FaceState::Greeted => "被搭话",
         FaceState::Displeased => "不高兴",
         FaceState::Thinking => "思考",
+        FaceState::Proud => "得意",
     }
 }
 

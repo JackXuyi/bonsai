@@ -63,6 +63,10 @@ pub fn show_main_window(app: &AppHandle) {
         let _ = win.unminimize();
         let _ = win.show();
         let _ = win.set_focus();
+        // The window-open breakpoint (plan-morph.md §3.5): the frontend
+        // drains the pending growth announcements here, never proactively.
+        use tauri::Emitter;
+        let _ = app.emit("window:shown", ());
     } else {
         let _ = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
             .title("bonsai")

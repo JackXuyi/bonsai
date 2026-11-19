@@ -10,7 +10,7 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
-const FACE_STATES = ["calm", "focused", "sleepy", "greeted", "displeased", "thinking"];
+const FACE_STATES = ["calm", "focused", "sleepy", "greeted", "displeased", "thinking", "proud"];
 
 const CAPTIONS = {
   calm: "平静地在窗台上待着",
@@ -19,6 +19,7 @@ const CAPTIONS = {
   greeted: "嘿，你来啦",
   displeased: "刚才那句，我有意见",
   thinking: "让我想想…",
+  proud: "哼，我就说吧",
 };
 
 const MOODS = {
@@ -28,7 +29,32 @@ const MOODS = {
   greeted: "回应中",
   displeased: "有意见",
   thinking: "思考",
+  proud: "得意",
 };
+
+// Stage captions (plan-morph.md §3.3): the self-narration sharpens as the
+// tree grows. Pool picked by (day + hour-bucket) so it changes across days.
+const STAGE_CAPTIONS = {
+  0: ["刚破土，别催我", "今天也还是小小的", "芽的事，急不来"],
+  1: ["抽枝了，正在长", "枝头有点想法了", "长得还行，谢谢关心"],
+  2: ["树形齐了，待着呢", "成形了，看你的了", "安静待着，有事叫我"],
+  3: ["开花了，偶尔得意", "成景了，随便看", "盆景也要上班的"],
+};
+
+const STAGE_NAMES = ["破土", "抽枝", "成形", "成景"];
+
+// Face-feature vertical placement per stage (the canopy moves up as the
+// tree grows; features follow).
+const STAGE_LAYOUT = {
+  0: { shift: 40 },
+  1: { shift: 22 },
+  2: { shift: 0 },
+  3: { shift: 0 },
+};
+
+const MICRO_SLOTS = [[150, 70], [48, 92], [142, 110], [62, 56], [128, 52], [52, 120]];
+
+const POKE_LINES = ["阿盆抖了抖叶子", "阿盆摇了摇新枝", "阿盆把树冠晃了晃", "阿盆把花朝你转了转"];
 
 // Each state has exactly 2 frames: [eyeL rx,ry, eyeR rx,ry], mouth path, transform.
 const POSES = {
@@ -56,6 +82,10 @@ const POSES = {
     { eyes: [6, 8, 6, 3], mouth: "M93 85 L107 85", transform: "rotate(0deg)" },
     { eyes: [6, 8, 6, 3], mouth: "M93 85 L107 85", transform: "rotate(4deg)" },
   ],
+  proud: [
+    { eyes: [7, 7, 7, 7], mouth: "M88 80 Q100 92 112 80", transform: "translateY(-4px)" },
+    { eyes: [7, 6, 7, 6], mouth: "M88 80 Q100 92 112 80", transform: "translateY(0px)" },
+  ],
 };
 
 const FRAME_INTERVAL_MS = 600;
@@ -69,6 +99,9 @@ const svg = face.querySelector("svg");
 const eyeL = face.querySelector(".eye-l");
 const eyeR = face.querySelector(".eye-r");
 const mouth = face.querySelector(".mouth");
+const faceFeatures = face.querySelector(".face-features");
+const microLeaves = face.querySelector("#micro-leaves");
+const stageDemo = $("stage-demo");
 const caption = $("caption");
 const mood = $("mood");
 const tabs = $("tabs");
@@ -92,6 +125,131 @@ const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window
 let state = "calm";
 let frame = 0;
 let chatting = false;
+// Growth view from Rust (growth_status / growth:stage). null = unknown yet.
+let growth = null;
+
+// ---------------------------------------------------------------- growth
+// Form-line growth (plan-morph.md §3.6): Rust decides (stage / dormant /
+// day_index), this file only draws. Same ownership rule as the face states.
+
+function mixColor(a, b, t) {
+  const pa = [1, 3, 5].map((i) => parseInt(a.slice(i, i + 2), 16));
+  const pb = [1, 3, 5].map((i) => parseInt(b.slice(i, i + 2), 16));
+  return (
+    "#" +
+    pa
+      .map((v, i) => Math.round(v + (pb[i] - v) * t).toString(16).padStart(2, "0"))
+      .join("")
+  );
+}
+
+const TINT_FROM = { "--leaf": "#4c8c2b", "--leaf-dark": "#3a6e21", "--leaf-light": "#6aa846" };
+const TINT_TO = { "--leaf": "#3a6e21", "--leaf-dark": "#2e5a19", "--leaf-light": "#4c8c2b" };
+const TINT_DORMANT = { "--leaf": "#9aa85e", "--leaf-dark": "#87945a", "--leaf-light": "#b3ad6d" };
+
+function applyLeafTint(day, dormant) {
+  const t = Math.min(day ?? 0, 7) / 7;
+  for (const k of Object.keys(TINT_FROM)) {
+    svg.style.setProperty(k, dormant ? TINT_DORMANT[k] : mixColor(TINT_FROM[k], TINT_TO[k], t));
+  }
+}
+
+function renderMicroLeaves(seed, count) {
+  microLeaves.replaceChildren();
+  const used = new Set();
+  let s = (Number(seed) >>> 0) || 1; // 32-bit slice: deterministic, no BigInt
+  for (let i = 0; i < count; i++) {
+    s = (s * 1103515245 + 12345) >>> 0;
+    let idx = s % MICRO_SLOTS.length;
+    let tries = 0;
+    while (used.has(idx) && tries < MICRO_SLOTS.length) {
+      idx = (idx + 1) % MICRO_SLOTS.length;
+      tries++;
+    }
+    if (used.has(idx)) break;
+    used.add(idx);
+    const [cx, cy] = MICRO_SLOTS[idx];
+    const c = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    c.setAttribute("cx", cx);
+    c.setAttribute("cy", cy);
+    c.setAttribute("r", 5);
+    c.setAttribute("class", "micro-leaf");
+    microLeaves.appendChild(c);
+  }
+}
+
+function applyStageToSvg(stage, dormant, dayIndex, seed) {
+  const s = Math.max(0, Math.min(3, Number(stage) || 0));
+  svg.dataset.stage = s;
+  svg.dataset.dormant = dormant ? "true" : "false";
+  for (const g of svg.querySelectorAll(".stage-g")) {
+    const gs = Number(g.dataset.s);
+    // S3 is an overlay ON the S2 form: keep S2 visible, add flowers + moss.
+    const on = s >= 3 ? gs === 2 || gs === 3 : gs === s;
+    g.classList.toggle("on", on);
+  }
+  applyLeafTint(dayIndex, dormant);
+  renderMicroLeaves(seed ?? 0, Math.min(Math.max(0, dayIndex ?? 0), 6));
+  const lay = STAGE_LAYOUT[s] || STAGE_LAYOUT[2];
+  faceFeatures.style.transform = `translateY(${lay.shift}px)`;
+  renderFrame();
+}
+
+function applyGrowth(st) {
+  if (!st || typeof st.stage === "undefined") return;
+  growth = st;
+  applyStageToSvg(st.stage, st.dormant, st.day_index ?? 0, st.micro_seed ?? 0);
+  syncStageDemo();
+}
+
+// Caption: the stage narration replaces the plain state caption on base
+// states; transient states keep their own lines (plan §3.3).
+function growthCaptionText() {
+  if (!growth || typeof growth.stage !== "number") return null;
+  if (growth.dormant) return "好久没人理我了……";
+  const pool = STAGE_CAPTIONS[growth.stage];
+  if (!pool) return null;
+  const hour = new Date().getHours();
+  const bucket = hour < 6 ? 2 : hour < 12 ? 0 : hour < 18 ? 1 : 2;
+  return pool[(growth.day_index + bucket) % pool.length];
+}
+
+function syncStageDemo() {
+  for (const b of stageDemo.querySelectorAll("button")) {
+    if (b.dataset.stage !== undefined) {
+      const on = Number(b.dataset.stage) === (growth?.stage ?? Number(svg.dataset.stage));
+      b.classList.toggle("active", on);
+    } else {
+      b.classList.toggle("active", b.dataset.dormant === "true" && !!growth?.dormant);
+    }
+  }
+}
+
+stageDemo.addEventListener("click", (e) => {
+  const btn = e.target.closest("button");
+  if (!btn) return;
+  // Preview only: draws on the SVG without touching the real growth state.
+  if (btn.dataset.stage !== undefined) {
+    applyStageToSvg(Number(btn.dataset.stage), growth?.dormant ?? false, growth?.day_index ?? 0, growth?.micro_seed ?? 0);
+  } else {
+    applyStageToSvg(growth?.stage ?? 0, true, growth?.day_index ?? 0, growth?.micro_seed ?? 0);
+  }
+  for (const b of stageDemo.querySelectorAll("button")) b.classList.remove("active");
+  btn.classList.add("active");
+});
+
+// Announcements (plan §3.5): drain the pending queue at a window-open
+// breakpoint — never proactively, never twice (notified_at is acked here).
+async function drainGrowthAnnouncements() {
+  const st = await invoke("growth_status");
+  applyGrowth(st);
+  const pending = st.pending || [];
+  for (const p of pending) {
+    addAnnouncement(p.note, `它长大了 · ${STAGE_NAMES[p.stage] ?? "成长"}`);
+    await invoke("growth_ack", { id: p.id }).catch(() => {});
+  }
+  if (pending.length) toast("阿盆长大了点");
+}
 
 // ---------------------------------------------------------------- face
 
@@ -101,9 +259,20 @@ function renderFrame() {
   eyeL.setAttribute("ry", pose.eyes[1]);
   eyeR.setAttribute("rx", pose.eyes[2]);
   eyeR.setAttribute("ry", pose.eyes[3]);
-  mouth.setAttribute("d", pose.mouth);
-  svg.style.transform = pose.transform;
-  if (caption.textContent !== CAPTIONS[state]) caption.textContent = CAPTIONS[state];
+  const lay = STAGE_LAYOUT[Number(svg.dataset.stage)] || STAGE_LAYOUT[2];
+  if (svg.dataset.dormant === "true") {
+    // Wilted: a flat mouth and a slight droop. The pose transform composes.
+    const y = 82 + lay.shift;
+    mouth.setAttribute("d", `M92 ${y} L108 ${y}`);
+    svg.style.transform = `${pose.transform} rotate(-4deg)`;
+  } else {
+    mouth.setAttribute("d", pose.mouth);
+    svg.style.transform = pose.transform;
+  }
+  const gc = growthCaptionText();
+  const nextCaption =
+    gc && (state === "calm" || state === "focused" || state === "sleepy") ? gc : CAPTIONS[state];
+  if (caption.textContent !== nextCaption) caption.textContent = nextCaption;
   if (mood.textContent !== MOODS[state]) mood.textContent = MOODS[state];
 }
 
@@ -255,6 +424,26 @@ function addPrediction(id, guess) {
   });
   bubble.appendChild(row);
 
+  messages.appendChild(bubble);
+  stick();
+  return bubble;
+}
+
+// Form-line growth announcements share the prediction card's beige look —
+// they are system messages in 阿盆's own words, no buttons.
+function addAnnouncement(text, label) {
+  hideEmpty();
+  const bubble = document.createElement("div");
+  bubble.className = "bubble bot prediction";
+  const body = document.createElement("span");
+  body.className = "body";
+  body.textContent = text;
+  bubble.appendChild(body);
+  bubble.appendChild(document.createElement("br"));
+  const badge = document.createElement("span");
+  badge.className = "badge";
+  badge.textContent = label;
+  bubble.appendChild(badge);
   messages.appendChild(bubble);
   stick();
   return bubble;
@@ -658,9 +847,21 @@ if (inTauri) {
     toast("阿盆猜了一件事");
   }).catch(() => {});
 
+  // Form-line growth (P1 item 2): stage unlocks + dormancy flips arrive as
+  // growth:stage; announcements drain at the window-open breakpoint only.
+  listen("growth:stage", () => {
+    drainGrowthAnnouncements().catch(() => {});
+  }).catch(() => {});
+  listen("window:shown", () => {
+    drainGrowthAnnouncements().catch(() => {});
+  }).catch(() => {});
+  drainGrowthAnnouncements().catch(() => {});
+
   face.addEventListener("click", () => {
     poke();
     invoke("face_poke").catch(() => {});
+    // Stage-flavoured poke copy (plan §3.7: every stage changes an interaction).
+    toast(POKE_LINES[Math.min(growth?.stage ?? 0, POKE_LINES.length - 1)]);
   });
 
   loadPerceptionConfig();
@@ -673,8 +874,7 @@ if (inTauri) {
     poke();
     setState("greeted");
     setTimeout(() => setState(DEMO[i]), 2500);
-  });
-  setInterval(() => {
+  });  setInterval(() => {
     i = (i + 1) % DEMO.length;
     setState(DEMO[i]);
   }, 6000);
@@ -709,3 +909,6 @@ renderFrame();
 syncButtons();
 syncSubsState();
 autosize();
+// First paint: put the default (S0) form on screen. The real state from
+// Rust replaces this via drainGrowthAnnouncements → applyGrowth.
+applyStageToSvg(Number(svg.dataset.stage) || 0, false, 0, 1);

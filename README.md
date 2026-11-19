@@ -90,6 +90,7 @@ The Rust core implements: L1 perception (per-source switches, default off), L2 m
   - [Plan: three-layer memory + nightly consolidation](./docs/zh/plan-memory.md) — implementation plan for MVP P0 item 3 (M1–M4 implemented)
   - [Plan: persona card v1 + consistency suite](./docs/zh/plan-persona.md) — implementation plan for MVP P0 item 4 (PM1–PM3 implemented)
   - [Plan: predict-verify loop](./docs/zh/plan-predict.md) — implementation plan for MVP P1 item 1 (G1–G4 implemented)
+  - [Plan: form-line growth](./docs/zh/plan-morph.md) — implementation plan for MVP P1 item 2 (G1–G4 implemented)
 
 ## Status
 
@@ -113,7 +114,7 @@ MVP P1 progress:
 | P1 item | Status |
 | --- | --- |
 | Predict-verify loop | 🔨 implemented: at most one explainable guess per day (habit direct / 14-day rhythm extrapolation / continuity), three-tier feedback (hit / miss / shut_up) written back into preference confidence, 3-day back-off on "shut_up"; mutually exclusive with the proactive channel, never interrupts when busy; metric gates (accuracy ≥50%, back-off rate <10%) are permanent CI tests (docs/zh/plan-predict.md) |
-| Form-line growth (7-day visible change) | ⬜ not started |
+| Form-line growth (7-day visible change) | 🔨 implemented: four stages over seven days (破土 day 0–1 / 抽枝 day 2 / 成形 day 4 / 成景 day 6), time-driven with no check-ins and no scores; schema v4 growth tables (birth anchor backfilled from the earliest event, monotonic stage, idempotent daily tick); daily micro-variations (deeper leaf tint + deterministic extra leaves + stage self-narration); dormancy instead of death (7 silent days → wilted resting form, first activity wakes it); unlock announcements queue until the user opens the window and fire exactly once (`notified_at` idempotency, no interruption budget spent); S3 unlocks the `proud` face and stage-flavoured poke copy; three metrics (unlock punctuality / announcement idempotency / dormancy correctness) are permanent CI tests (docs/zh/plan-morph.md) |
 | Boundary onboarding Q&A | ⬜ not started |
 
 ## Documentation

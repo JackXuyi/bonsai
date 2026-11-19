@@ -1,6 +1,7 @@
-//! SQLite schema (v3) and primitives for the memory layer.
+//! SQLite schema (v4) and primitives for the memory layer.
 //!
-//! Plans: docs/zh/plan-memory.md §3–§4, docs/zh/plan-predict.md §3.4.
+//! Plans: docs/zh/plan-memory.md §3–§4, docs/zh/plan-predict.md §3.4,
+//! docs/zh/plan-morph.md §3.2.
 //! Three layers: events (ground truth) → facts (traced assertions) →
 //! preferences/boundaries (high-confidence user model).
 //!
@@ -15,7 +16,7 @@ use rusqlite::{params, Connection};
 
 use super::clock;
 
-pub(crate) const SCHEMA_VERSION: i64 = 3;
+pub(crate) const SCHEMA_VERSION: i64 = 4;
 
 pub fn open(path: &std::path::Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
@@ -101,6 +102,29 @@ CREATE TABLE IF NOT EXISTS predictions (
     feedback       TEXT,                    -- 'hit'|'miss'|'shut_up' (NULL = no reply yet)
     feedback_at    TEXT,
     resolved_at    TEXT                     -- 48h window close (auto-resolve)
+);
+
+-- Form-line growth (plan-morph.md §3.2). Single-row state (id = 1):
+-- born_at anchors the day count (backfilled from the earliest event so
+-- existing users don't restart), stage only ever increases (invariant 1),
+-- last_tick_date makes the daily advance idempotent, dormant_since is the
+-- reversible "sleeping" marker (report §6.3 decision 1: no death, only rest).
+CREATE TABLE IF NOT EXISTS growth (
+    id             INTEGER PRIMARY KEY CHECK (id = 1),
+    born_at        TEXT NOT NULL,
+    stage          INTEGER NOT NULL DEFAULT 0,
+    last_tick_date TEXT,
+    dormant_since  TEXT
+);
+
+-- Growth audit: one row per stage unlock. notified_at makes the
+-- window-open announcement idempotent (announced exactly once).
+CREATE TABLE IF NOT EXISTS growth_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    stage       INTEGER NOT NULL,
+    unlocked_at TEXT NOT NULL,
+    notified_at TEXT,
+    note        TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
@@ -348,10 +372,12 @@ pub fn forget_session(conn: &Connection, session_id: &str) -> rusqlite::Result<u
 }
 
 /// User: "forget everything" → the nuclear option. Wipes all three layers
-/// plus the prediction audit (plan-predict.md §7: compliance extends to it).
+/// plus the prediction audit (plan-predict.md §7) and the growth tables
+/// (plan-morph.md §7: compliance extends to growth too — starting over IS
+/// the honest interpretation of "forget everything").
 pub fn forget_all(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
-        "DELETE FROM predictions; DELETE FROM boundaries; DELETE FROM preferences; DELETE FROM facts; DELETE FROM events;",
+        "DELETE FROM growth_log; DELETE FROM growth; DELETE FROM predictions; DELETE FROM boundaries; DELETE FROM preferences; DELETE FROM facts; DELETE FROM events;",
     )?;
     Ok(())
 }
@@ -656,6 +682,121 @@ pub fn prediction_stats(conn: &Connection) -> rusqlite::Result<PredictionStats> 
         s.backoff_rate = Some(s.shut_up as f64 / s.asked as f64);
     }
     Ok(s)
+}
+
+// ------------------------------------------------- form-line growth
+// (docs/zh/plan-morph.md §3.2)
+
+#[derive(Debug, Clone)]
+pub struct GrowthState {
+    pub born_at: String,
+    pub stage: i64,
+    pub last_tick_date: Option<String>,
+    pub dormant_since: Option<String>,
+}
+
+/// The single growth row, if it exists yet.
+pub fn growth_state(conn: &Connection) -> rusqlite::Result<Option<GrowthState>> {
+    let mut stmt = conn.prepare(
+        "SELECT born_at, stage, last_tick_date, dormant_since FROM growth WHERE id = 1",
+    )?;
+    let mut rows = stmt.query_map([], |row| {
+        Ok(GrowthState {
+            born_at: row.get(0)?,
+            stage: row.get(1)?,
+            last_tick_date: row.get(2)?,
+            dormant_since: row.get(3)?,
+        })
+    })?;
+    rows.next().transpose()
+}
+
+/// Ensure the growth row exists, anchoring `born_at` to the earliest event
+/// (plan open question 3: existing users don't restart the clock — "it has
+/// actually been with you for N days" is the stronger first impression).
+/// The anchor is written once and never changed afterwards.
+pub fn ensure_growth(conn: &Connection) -> rusqlite::Result<GrowthState> {
+    if let Some(s) = growth_state(conn)? {
+        return Ok(s);
+    }
+    let earliest: Option<String> = conn
+        .query_row("SELECT MIN(ts) FROM events", [], |r| r.get(0))
+        .ok()
+        .flatten();
+    let born_at = earliest.unwrap_or_else(|| clock::now_iso());
+    conn.execute(
+        "INSERT INTO growth (id, born_at, stage) VALUES (1, ?1, 0)",
+        params![born_at],
+    )?;
+    Ok(GrowthState {
+        born_at,
+        stage: 0,
+        last_tick_date: None,
+        dormant_since: None,
+    })
+}
+
+pub fn set_growth_stage(conn: &Connection, stage: i64) -> rusqlite::Result<()> {
+    // Guarded by `stage > ?2` at the call site; the WHERE re-asserts the
+    // monotonicity invariant (stage only ever increases).
+    conn.execute(
+        "UPDATE growth SET stage = ?1 WHERE id = 1 AND stage < ?1",
+        params![stage],
+    )?;
+    Ok(())
+}
+
+pub fn set_growth_tick_date(conn: &Connection, date: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE growth SET last_tick_date = ?1 WHERE id = 1",
+        params![date],
+    )?;
+    Ok(())
+}
+
+/// `Some(iso)` = went dormant; `None` = woke up. Never overwrites an
+/// existing dormant_since with another one (first sleep wins until wake).
+pub fn set_dormant(conn: &Connection, since: Option<&str>) -> rusqlite::Result<usize> {
+    match since {
+        Some(iso) => conn.execute(
+            "UPDATE growth SET dormant_since = ?1 WHERE id = 1 AND dormant_since IS NULL",
+            params![iso],
+        ),
+        None => conn.execute(
+            "UPDATE growth SET dormant_since = NULL WHERE id = 1 AND dormant_since IS NOT NULL",
+            [],
+        ),
+    }
+}
+
+pub fn add_growth_log(conn: &Connection, stage: i64, note: &str) -> rusqlite::Result<i64> {
+    conn.execute(
+        "INSERT INTO growth_log (stage, unlocked_at, note) VALUES (?1, ?2, ?3)",
+        params![stage, clock::now_iso(), note],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Un-announced unlocks (oldest first) — the window-open announcement queue.
+pub fn pending_growth_logs(conn: &Connection) -> rusqlite::Result<Vec<(i64, i64, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, stage, note FROM growth_log
+         WHERE notified_at IS NULL ORDER BY id ASC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?))
+    })?;
+    rows.collect()
+}
+
+/// Idempotent announcement: only a row with notified_at still NULL is
+/// marked, so a double window-open cannot announce twice.
+pub fn mark_growth_notified(conn: &Connection, id: i64) -> rusqlite::Result<bool> {
+    let n = conn.execute(
+        "UPDATE growth_log SET notified_at = ?1 WHERE id = ?2 AND notified_at IS NULL",
+        params![clock::now_iso(), id],
+    )?;
+    Ok(n > 0)
 }
 
 // ------------------------------------------------------- reads for consolidate
@@ -1046,6 +1187,67 @@ mod tests {
         let conn = mem();
         assert!(promote_fact(&conn, "like", "user loves rainy days", 0.9).unwrap());
         assert!(!promote_fact(&conn, "like", "user loves rainy days", 0.9).unwrap());
+    }
+
+    #[test]
+    fn growth_anchor_backfills_from_earliest_event_and_never_moves() {
+        let conn = mem();
+        let _clock = clock::pinned("2026-11-01T00:00:00Z");
+        add_event(&conn, "chat", "oldest").unwrap();
+        let _clock2 = clock::pinned("2026-11-18T00:00:00Z");
+        add_event(&conn, "chat", "newer").unwrap();
+
+        let s = ensure_growth(&conn).unwrap();
+        assert_eq!(s.born_at, "2026-11-01T00:00:00Z", "anchor = earliest event");
+        assert_eq!(s.stage, 0);
+
+        // The anchor is written once; later calls never move it.
+        let s2 = ensure_growth(&conn).unwrap();
+        assert_eq!(s2.born_at, s.born_at);
+    }
+
+    #[test]
+    fn growth_stage_monotonic_and_announcement_idempotent() {
+        let conn = mem();
+        ensure_growth(&conn).unwrap();
+        set_growth_stage(&conn, 2).unwrap();
+        // A smaller stage must not rewind the state (invariant 1).
+        set_growth_stage(&conn, 0).unwrap();
+        assert_eq!(growth_state(&conn).unwrap().unwrap().stage, 2);
+
+        let id = add_growth_log(&conn, 2, "成形了。").unwrap();
+        assert_eq!(pending_growth_logs(&conn).unwrap().len(), 1);
+        assert!(mark_growth_notified(&conn, id).unwrap());
+        // Second window open: the row is already announced → no-op.
+        assert!(!mark_growth_notified(&conn, id).unwrap());
+        assert!(pending_growth_logs(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn dormancy_flips_are_guards_against_double_write() {
+        let conn = mem();
+        ensure_growth(&conn).unwrap();
+        assert_eq!(set_dormant(&conn, Some("2026-11-19T00:00:00Z")).unwrap(), 1);
+        // Already dormant: the second sleep write is a no-op.
+        assert_eq!(set_dormant(&conn, Some("2026-11-20T00:00:00Z")).unwrap(), 0);
+        let s = growth_state(&conn).unwrap().unwrap();
+        assert_eq!(s.dormant_since.as_deref(), Some("2026-11-19T00:00:00Z"));
+        assert_eq!(set_dormant(&conn, None).unwrap(), 1);
+        // Awake: a second wake is a no-op.
+        assert_eq!(set_dormant(&conn, None).unwrap(), 0);
+    }
+
+    #[test]
+    fn forget_all_cascades_growth_tables() {
+        let conn = mem();
+        ensure_growth(&conn).unwrap();
+        set_growth_stage(&conn, 1).unwrap();
+        add_growth_log(&conn, 1, "抽枝了。").unwrap();
+        forget_all(&conn).unwrap();
+        assert!(growth_state(&conn).unwrap().is_none());
+        // A later ensure re-anchors from scratch (events are gone too).
+        let s = ensure_growth(&conn).unwrap();
+        assert_eq!(s.stage, 0);
     }
 
     #[test]

@@ -9,23 +9,52 @@
   <body>
     <main class="app" id="app" data-tab="chat">
       <!-- L6: the face. 12 frames = 6 states × 2, driven by ui/main.js from
-           the Rust state machine (face:state events). -->
+           the Rust state machine (face:state events). The FORM is driven by
+           the growth state machine (morph.rs → growth:stage): stages are
+           discrete forms, Rust decides, this file only draws. -->
       <header class="hero">
         <button class="face" id="face" data-state="calm" aria-label="和阿盆打招呼" title="点一下，打个招呼">
           <span class="ripple" aria-hidden="true"></span>
-          <svg viewBox="0 0 200 200" aria-hidden="true">
+          <svg viewBox="0 0 200 200" data-stage="0" data-dormant="false" aria-hidden="true">
             <path class="pot" d="M70 150 h60 l-8 34 h-44 z" />
             <rect class="pot-rim" x="64" y="142" width="72" height="12" rx="4" />
-            <path class="trunk" d="M96 142 C 96 120 94 108 90 96 M90 104 C 78 100 72 94 68 86" />
-            <circle class="leaf leaf-a" cx="100" cy="66" r="34" />
-            <circle class="leaf leaf-b" cx="66" cy="76" r="20" />
-            <circle class="leaf leaf-c" cx="134" cy="76" r="20" />
-            <circle class="leaf leaf-d" cx="100" cy="94" r="22" />
-            <g class="eyes">
-              <ellipse class="eye eye-l" cx="84" cy="62" rx="6" ry="8" />
-              <ellipse class="eye eye-r" cx="116" cy="62" rx="6" ry="8" />
+            <!-- S0 破土 (day 0–1): a sprout, two cotyledons -->
+            <g class="stage-g" data-s="0">
+              <path class="trunk" d="M100 142 C 100 132 100 124 100 116" />
+              <circle class="leaf leaf-b" cx="80" cy="106" r="12" />
+              <circle class="leaf leaf-c" cx="120" cy="106" r="12" />
             </g>
-            <path class="mouth" d="M92 82 Q 100 88 108 82" />
+            <!-- S1 抽枝 (day 2–4): a young tree, side branch + small canopy -->
+            <g class="stage-g" data-s="1">
+              <path class="trunk" d="M96 142 C 96 124 95 112 92 100 M93 108 C 82 104 74 98 68 90" />
+              <circle class="leaf leaf-a" cx="100" cy="86" r="24" />
+              <circle class="leaf leaf-b" cx="64" cy="82" r="12" />
+            </g>
+            <!-- S2 成形 (day 4–6): the full form the app always had -->
+            <g class="stage-g" data-s="2">
+              <path class="trunk" d="M96 142 C 96 120 94 108 90 96 M90 104 C 78 100 72 94 68 86" />
+              <circle class="leaf leaf-a" cx="100" cy="66" r="34" />
+              <circle class="leaf leaf-b" cx="66" cy="76" r="20" />
+              <circle class="leaf leaf-c" cx="134" cy="76" r="20" />
+              <circle class="leaf leaf-d" cx="100" cy="94" r="22" />
+            </g>
+            <!-- S3 成景 (day 7+): flowers + moss on top of the full form -->
+            <g class="stage-g stage-overlay" data-s="3">
+              <circle class="flower f-1" cx="82" cy="52" r="4.5" />
+              <circle class="flower f-2" cx="118" cy="58" r="4" />
+              <circle class="flower f-3" cx="100" cy="38" r="4" />
+              <ellipse class="moss m-1" cx="80" cy="152" rx="9" ry="3" />
+              <ellipse class="moss m-2" cx="106" cy="156" rx="7" ry="2.5" />
+              <ellipse class="moss m-3" cx="92" cy="150" rx="5" ry="2" />
+            </g>
+            <g class="micro-leaves" id="micro-leaves"></g>
+            <g class="face-features" id="face-features">
+              <g class="eyes">
+                <ellipse class="eye eye-l" cx="84" cy="62" rx="6" ry="8" />
+                <ellipse class="eye eye-r" cx="116" cy="62" rx="6" ry="8" />
+              </g>
+              <path class="mouth" d="M92 82 Q 100 88 108 82" />
+            </g>
           </svg>
         </button>
 
@@ -86,8 +115,16 @@
           <button data-state="greeted">被搭话</button>
           <button data-state="displeased">不高兴</button>
           <button data-state="thinking">思考</button>
+          <button data-state="proud">得意</button>
         </div>
-        <p class="hint">点脸 = 打招呼。这里只是预览瞬态表情，<br />不会改它真实的状态。</p>
+        <div class="states states-secondary" id="stage-demo">
+          <button data-stage="0">破土</button>
+          <button data-stage="1">抽枝</button>
+          <button data-stage="2">成形</button>
+          <button data-stage="3">成景</button>
+          <button data-dormant="true">休眠</button>
+        </div>
+        <p class="hint">点脸 = 打招呼。上面是瞬态表情，下面是形态演示，<br />都只是看看，不会改它真实的状态。</p>
       </section>
 
       <!-- ── 工具 ───────────────────────────────────────────── -->

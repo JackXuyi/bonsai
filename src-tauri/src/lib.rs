@@ -16,6 +16,7 @@ pub mod face;
 pub mod generation;
 pub mod llm;
 pub mod memory;
+pub mod morph;
 pub mod perception;
 pub mod persona;
 pub mod predict;
@@ -107,6 +108,10 @@ pub fn run() {
             // the proactive chat channel.
             predict::spawn(app.handle().clone());
 
+            // Form-line growth (P1 item 2, docs/zh/plan-morph.md): four
+            // stages over seven days, time-driven, no death — only dormancy.
+            morph::spawn(app.handle().clone());
+
             // L0: tray icon + menu. The main window is created lazily on click,
             // keeping "boot to tray ready" fast.
             tray::setup(app)?;
@@ -139,6 +144,8 @@ pub fn run() {
             decision::evaluate,
             predict::prediction_feedback,
             predict::prediction_stats,
+            morph::growth_status,
+            morph::growth_ack,
             dialogue::dialogue_chat,
             dialogue::dialogue_chat_stream,
             dialogue::dialogue_proactive_now,

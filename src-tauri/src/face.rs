@@ -10,9 +10,9 @@
 //! - Weekday working hours (09–11, 14–17) → Focused
 //! - otherwise → Calm
 //!
-//! Greeted / Displeased / Thinking are transient: they expire back to the
-//! base state. Later, L4 (growth events) and L5 (disagreements) will drive
-//! these via `face_preview` instead of hard-coding behavior.
+//! Greeted / Displeased / Thinking / Proud are transient: they expire back
+//! to the base state. L4 (growth events) drives `proud` via morph.rs (the
+//! S3 stage perk); `face_preview` remains the manual hook.
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -31,6 +31,8 @@ pub enum FaceState {
     Greeted,
     Displeased,
     Thinking,
+    /// S3 growth perk only (plan-morph.md §3.7): never in the base rotation.
+    Proud,
 }
 
 impl FaceState {
@@ -42,6 +44,7 @@ impl FaceState {
             FaceState::Greeted => "greeted",
             FaceState::Displeased => "displeased",
             FaceState::Thinking => "thinking",
+            FaceState::Proud => "proud",
         }
     }
 }
@@ -141,17 +144,27 @@ pub fn face_current(
         .map(|c| c.current(base))
 }
 
-/// The user clicked / addressed the face.
+/// The user clicked / addressed the face. From S3 onward (plan-morph.md
+/// §3.7) a poke may flash the `proud` perk state instead of `greeted`.
 #[tauri::command]
 pub fn face_poke(handle: AppHandle) -> Result<FaceState, String> {
+    let now = chrono::Local::now();
+    let desired = {
+        let store = handle.state::<crate::memory::MemoryStore>();
+        match store.inner().0.lock() {
+            Ok(conn) => crate::morph::poke_face(&conn, now),
+            Err(_) => FaceState::Greeted,
+        }
+    };
     let controller = handle.state::<Mutex<FaceController>>();
     let state = {
         let mut c = controller.lock().map_err(|e| e.to_string())?;
-        c.poke();
-        c.current(derive_base_state(
-            chrono::Local::now().hour() as u8,
-            is_weekend(&chrono::Local::now()),
-        ))
+        if desired == FaceState::Proud {
+            c.preview(FaceState::Proud);
+        } else {
+            c.poke();
+        }
+        c.current(derive_base_state(now.hour() as u8, is_weekend(&now)))
     };
     let _ = handle.emit("face:state", state);
     Ok(state)
