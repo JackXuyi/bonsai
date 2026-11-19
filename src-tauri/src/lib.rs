@@ -18,6 +18,7 @@ pub mod llm;
 pub mod memory;
 pub mod perception;
 pub mod persona;
+pub mod predict;
 pub mod report;
 pub mod tray;
 
@@ -101,6 +102,11 @@ pub fn run() {
             // (and stays silent when the local model is down).
             dialogue::spawn_proactive(app.handle().clone());
 
+            // Predict-verify loop (P1 item 1, docs/zh/plan-predict.md):
+            // one guess per day, evidence-backed, mutually exclusive with
+            // the proactive chat channel.
+            predict::spawn(app.handle().clone());
+
             // L0: tray icon + menu. The main window is created lazily on click,
             // keeping "boot to tray ready" fast.
             tray::setup(app)?;
@@ -131,6 +137,8 @@ pub fn run() {
             perception::perception_set_config,
             perception::perception_status,
             decision::evaluate,
+            predict::prediction_feedback,
+            predict::prediction_stats,
             dialogue::dialogue_chat,
             dialogue::dialogue_chat_stream,
             dialogue::dialogue_proactive_now,

@@ -89,6 +89,7 @@ The Rust core implements: L1 perception (per-source switches, default off), L2 m
   - [调研报告](./docs/zh/research-report.md) — 立项依据：市场、可行性、记忆、人格、养成、合规、MVP、风险
   - [Plan: three-layer memory + nightly consolidation](./docs/zh/plan-memory.md) — implementation plan for MVP P0 item 3 (M1–M4 implemented)
   - [Plan: persona card v1 + consistency suite](./docs/zh/plan-persona.md) — implementation plan for MVP P0 item 4 (PM1–PM3 implemented)
+  - [Plan: predict-verify loop](./docs/zh/plan-predict.md) — implementation plan for MVP P1 item 1 (G1–G4 implemented)
 
 ## Status
 
@@ -106,5 +107,13 @@ MVP P0 progress (research report §8.3):
 | One real job (daily digest of clipboard/downloads) | 🔨 done: aggregates the day's perception events + memory delta into one markdown page (`daily_report` command), optional one-line local-LLM summary with rule-based fallback, reports persisted to app_data/reports/ |
 
 Blockers on the critical path: runtime verification via `pnpm app`, real-model verification with a local Ollama instance.
+
+MVP P1 progress:
+
+| P1 item | Status |
+| --- | --- |
+| Predict-verify loop | 🔨 implemented: at most one explainable guess per day (habit direct / 14-day rhythm extrapolation / continuity), three-tier feedback (hit / miss / shut_up) written back into preference confidence, 3-day back-off on "shut_up"; mutually exclusive with the proactive channel, never interrupts when busy; metric gates (accuracy ≥50%, back-off rate <10%) are permanent CI tests (docs/zh/plan-predict.md) |
+| Form-line growth (7-day visible change) | ⬜ not started |
+| Boundary onboarding Q&A | ⬜ not started |
 
 ## Documentation

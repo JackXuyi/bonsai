@@ -409,6 +409,23 @@ body {
   background: #fbfdf7;
 }
 
+.bubble.bot.prediction {
+  border-color: #e4d6bd;
+  background: #fdfcf6;
+}
+
+.predict-row {
+  display: flex;
+  gap: 6px;
+  margin-top: 7px;
+}
+
+.predict-row .chip:disabled {
+  opacity: 0.45;
+  cursor: default;
+  transform: none;
+}
+
 .badge {
   display: inline-block;
   margin-top: 5px;

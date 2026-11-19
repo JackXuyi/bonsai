@@ -80,6 +80,7 @@ Rust 核心已实现：L1 感知层（逐项授权、默认关闭）、L2 记忆
   - [调研报告](./docs/zh/research-report.md) — 立项依据：市场、可行性、记忆、人格、养成、合规、MVP、风险
   - [方案：三层记忆 + 夜间整理](./docs/zh/plan-memory.md) — MVP P0 第 3 项的实施计划（M1–M4 已实施）
   - [方案：人格卡 v1 + 一致性测试集](./docs/zh/plan-persona.md) — MVP P0 第 4 项的实施计划（PM1–PM3 已实施）
+  - [方案：预测-验证循环](./docs/zh/plan-predict.md) — MVP P1 第 1 项的实施计划（G1–G4 已实施）
 - English
   - [Research report](./docs/en/research-report.md) — founding research: market, feasibility, memory, personality, growth, compliance, MVP, risks
 
@@ -99,3 +100,11 @@ MVP P0 进度（调研报告 §8.3）：
 | 一件真活（剪贴板/下载整理成日报） | 🔨 日报完成：按本地日聚合感知事件 + 记忆增量渲染为一页 markdown（`daily_report` 命令），本地 LLM 一句话总结可选、失败降级规则拼接，报告落盘 app_data/reports/ |
 
 关键路径上的阻塞项：`pnpm app` 实测验证、本地模型（Ollama）真机验证。
+
+MVP P1 进度：
+
+| P1 项 | 状态 |
+| --- | --- |
+| 预测-验证循环 | 🔨 已实现：每天最多 1 次证据可溯源的猜测（habit 直推 / 14 天节律外推 / 连续性猜），三档反馈（对/错/别烦我）回写偏好置信度，「别烦我」退避 3 天；与主动搭话互斥、busy 不打断；指标门槛（命中率 ≥50%、退避率 <10%）为常驻 CI 测试（见 docs/zh/plan-predict.md） |
+| 形态线成长（7 天可见变化） | ⬜ 未开始 |
+| 边界 onboarding 问答 | ⬜ 未开始 |

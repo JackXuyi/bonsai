@@ -204,6 +204,62 @@ function addTyping() {
   return el;
 }
 
+// Predict-verify loop (P1 item 1): the guess arrives as its own card with
+// the three verdict buttons; feedback goes straight to the memory layer.
+const VERDICTS = [
+  { key: "hit", label: "猜对了" },
+  { key: "miss", label: "猜错了" },
+  { key: "shut_up", label: "别烦我" },
+];
+const VERDICT_NOTES = {
+  hit: "已记下：猜对了。它会把这条学得更牢。",
+  miss: "已记下：猜错了。它会降低这类猜测。",
+  shut_up: "已记下。这类猜测先停 3 天。",
+};
+
+function addPrediction(id, guess) {
+  hideEmpty();
+  const bubble = document.createElement("div");
+  bubble.className = "bubble bot prediction";
+  const body = document.createElement("span");
+  body.className = "body";
+  body.textContent = guess;
+  bubble.appendChild(body);
+  bubble.appendChild(document.createElement("br"));
+
+  const badge = document.createElement("span");
+  badge.className = "badge";
+  badge.textContent = "它猜的 · 预测验证";
+  bubble.appendChild(badge);
+
+  const row = document.createElement("div");
+  row.className = "predict-row";
+  const buttons = VERDICTS.map((v) => {
+    const b = document.createElement("button");
+    b.className = "chip";
+    b.textContent = v.label;
+    b.addEventListener("click", async () => {
+      for (const x of buttons) x.disabled = true;
+      try {
+        const applied = await invoke("prediction_feedback", { id, verdict: v.key });
+        badge.textContent = applied
+          ? VERDICT_NOTES[v.key]
+          : "这条已经过了反馈窗口（48 小时），没有记。";
+      } catch (err) {
+        badge.textContent = `反馈失败：${err}`;
+        for (const x of buttons) x.disabled = false;
+      }
+    });
+    row.appendChild(b);
+    return b;
+  });
+  bubble.appendChild(row);
+
+  messages.appendChild(bubble);
+  stick();
+  return bubble;
+}
+
 function appendNote(bubble, note) {
   if (!note) return;
   const badge = document.createElement("span");
@@ -592,6 +648,16 @@ if (inTauri) {
     invoke("face_preview", { state: "greeted" }).catch(() => {});
   }).catch(() => {});
 
+  // Predict-verify loop: one guess per day from Rust (evidence-backed,
+  // quota-checked there). Three verdict buttons; feedback writes back to
+  // preference confidence on the Rust side.
+  listen("prediction:asked", (event) => {
+    addPrediction(event.payload.id, event.payload.guess);
+    selectTab("chat");
+    messages.scrollTop = messages.scrollHeight;
+    toast("阿盆猜了一件事");
+  }).catch(() => {});
+
   face.addEventListener("click", () => {
     poke();
     invoke("face_poke").catch(() => {});
@@ -613,6 +679,10 @@ if (inTauri) {
     setState(DEMO[i]);
   }, 6000);
   syncSubsState();
+  // Preview-only demo of the prediction card (buttons won't reach Rust).
+  const demoCard = addPrediction(0, "（预览示例）我猜你接下来大概要打开 VSCode——猜错了别笑我。");
+  demoCard.querySelector(".predict-row").remove();
+  demoCard.querySelector(".badge").textContent = "预览示例 · 预测卡片长这样";
   perceptionLine.textContent = "浏览器预览模式：后端未连接";
 }
 
