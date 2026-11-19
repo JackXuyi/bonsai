@@ -1,7 +1,8 @@
-//! SQLite schema (v5) and primitives for the memory layer.
+//! SQLite schema (v6) and primitives for the memory layer.
 //!
 //! Plans: docs/zh/plan-memory.md §3–§4, docs/zh/plan-predict.md §3.4,
-//! docs/zh/plan-morph.md §3.2, docs/zh/plan-onboarding.md §3.1.
+//! docs/zh/plan-morph.md §3.2, docs/zh/plan-onboarding.md §3.1,
+//! docs/zh/plan-relationship.md §3.3.
 //! Three layers: events (ground truth) → facts (traced assertions) →
 //! preferences/boundaries (high-confidence user model).
 //!
@@ -16,7 +17,7 @@ use rusqlite::{params, Connection};
 
 use super::clock;
 
-pub(crate) const SCHEMA_VERSION: i64 = 5;
+pub(crate) const SCHEMA_VERSION: i64 = 6;
 
 pub fn open(path: &std::path::Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
@@ -143,6 +144,43 @@ CREATE TABLE IF NOT EXISTS onboarding_answers (
     answer   TEXT NOT NULL,
     skipped  INTEGER NOT NULL DEFAULT 0,    -- 1 = user skipped
     ts       TEXT NOT NULL
+);
+
+-- Relationship line (plan-relationship.md §3.3). Single-row state (id = 1).
+-- No born_at here: the day count reuses growth.born_at so the two timelines
+-- share one origin. stage only ever increases; cold_since is the reversible
+-- "rusty" marker (never rewinds the stage).
+CREATE TABLE IF NOT EXISTS relationship (
+    id             INTEGER PRIMARY KEY CHECK (id = 1),
+    stage          INTEGER NOT NULL DEFAULT 0,   -- 0 拘谨 | 1 熟络 | 2 会顶嘴
+    stage_since    TEXT,                          -- current stage start (7-day "first refusal" window)
+    cold_since     TEXT,                          -- NULL = warm
+    last_tick_date TEXT                           -- makes the daily advance idempotent
+);
+
+-- Daily evidence, RECOMPUTED not accumulated: one UPSERT per day derived from
+-- predictions + events. Same source data → same score (replayable, testable).
+-- The numeric score is internal only — it never leaves this process.
+CREATE TABLE IF NOT EXISTS relationship_progress (
+    date          TEXT PRIMARY KEY,               -- local day YYYY-MM-DD
+    present       INTEGER NOT NULL DEFAULT 0,
+    hits          INTEGER NOT NULL DEFAULT 0,
+    misses        INTEGER NOT NULL DEFAULT 0,
+    disagreements INTEGER NOT NULL DEFAULT 0,
+    shut_ups      INTEGER NOT NULL DEFAULT 0,
+    score         INTEGER NOT NULL DEFAULT 0,
+    computed_at   TEXT NOT NULL
+);
+
+-- Relationship audit: one row per stage unlock (notified_at = announced once).
+-- `kind` separates stage promotions from the one-off "first refusal" moment.
+CREATE TABLE IF NOT EXISTS relationship_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind        TEXT NOT NULL DEFAULT 'stage',   -- 'stage' | 'first_refusal'
+    stage       INTEGER NOT NULL,
+    unlocked_at TEXT NOT NULL,
+    notified_at TEXT,
+    note        TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
@@ -395,7 +433,16 @@ pub fn forget_session(conn: &Connection, session_id: &str) -> rusqlite::Result<u
 /// the honest interpretation of "forget everything").
 pub fn forget_all(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
-        "DELETE FROM onboarding_answers; DELETE FROM settings; DELETE FROM growth_log; DELETE FROM growth; DELETE FROM predictions; DELETE FROM boundaries; DELETE FROM preferences; DELETE FROM facts; DELETE FROM events;",
+        "DELETE FROM relationship_log; DELETE FROM relationship_progress; DELETE FROM relationship; DELETE FROM onboarding_answers; DELETE FROM settings; DELETE FROM growth_log; DELETE FROM growth; DELETE FROM predictions; DELETE FROM boundaries; DELETE FROM preferences; DELETE FROM facts; DELETE FROM events;",
+    )?;
+    Ok(())
+}
+
+/// Reset ONLY the relationship line (tool-page button, plan §3.8): the user
+/// may want to "start over" socially without losing memory or the plant.
+pub fn forget_relationship(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "DELETE FROM relationship_log; DELETE FROM relationship_progress; DELETE FROM relationship;",
     )?;
     Ok(())
 }
@@ -875,6 +922,212 @@ pub fn mark_growth_notified(conn: &Connection, id: i64) -> rusqlite::Result<bool
     Ok(n > 0)
 }
 
+// ------------------------------------------------- relationship (plan §3.3)
+
+#[derive(Debug, Clone)]
+pub struct RelationshipState {
+    pub stage: i64,
+    pub stage_since: Option<String>,
+    pub cold_since: Option<String>,
+    pub last_tick_date: Option<String>,
+}
+
+/// One day of understanding evidence (plan §3.2). `score` is derived by
+/// `relationship::score_day` — it exists here only as an audit column and is
+/// NEVER returned to the frontend.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DayEvidence {
+    pub present: i64,
+    pub hits: i64,
+    pub misses: i64,
+    pub disagreements: i64,
+    pub shut_ups: i64,
+    pub score: i64,
+}
+
+pub fn relationship_state(conn: &Connection) -> rusqlite::Result<Option<RelationshipState>> {
+    let mut stmt = conn.prepare(
+        "SELECT stage, stage_since, cold_since, last_tick_date FROM relationship WHERE id = 1",
+    )?;
+    let mut rows = stmt.query_map([], |row| {
+        Ok(RelationshipState {
+            stage: row.get(0)?,
+            stage_since: row.get(1)?,
+            cold_since: row.get(2)?,
+            last_tick_date: row.get(3)?,
+        })
+    })?;
+    rows.next().transpose()
+}
+
+/// Ensure the single row exists. Unlike `ensure_growth` there is no anchor to
+/// backfill — the relationship timeline reuses `growth.born_at`.
+pub fn ensure_relationship(conn: &Connection) -> rusqlite::Result<RelationshipState> {
+    if let Some(s) = relationship_state(conn)? {
+        return Ok(s);
+    }
+    conn.execute("INSERT OR IGNORE INTO relationship (id, stage) VALUES (1, 0)", [])?;
+    Ok(RelationshipState {
+        stage: 0,
+        stage_since: None,
+        cold_since: None,
+        last_tick_date: None,
+    })
+}
+
+/// Monotonic stage write (the WHERE re-asserts invariant 1: never rewinds).
+pub fn set_relationship_stage(conn: &Connection, stage: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE relationship SET stage = ?1, stage_since = ?2 WHERE id = 1 AND stage < ?1",
+        params![stage, clock::now_iso()],
+    )?;
+    Ok(())
+}
+
+/// `Some(iso)` = went cold; `None` = warmed up. Same double-write guard as
+/// `set_dormant`: the first cold stamp wins until it actually thaws.
+pub fn set_relationship_cold(conn: &Connection, since: Option<&str>) -> rusqlite::Result<usize> {
+    match since {
+        Some(iso) => conn.execute(
+            "UPDATE relationship SET cold_since = ?1 WHERE id = 1 AND cold_since IS NULL",
+            params![iso],
+        ),
+        None => conn.execute(
+            "UPDATE relationship SET cold_since = NULL WHERE id = 1 AND cold_since IS NOT NULL",
+            [],
+        ),
+    }
+}
+
+pub fn set_relationship_tick_date(conn: &Connection, date: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE relationship SET last_tick_date = ?1 WHERE id = 1",
+        params![date],
+    )?;
+    Ok(())
+}
+
+/// Recompute-then-store for one local day. Idempotent by construction: the
+/// caller derives `ev` from source tables every time, so a second call with
+/// unchanged sources writes the same numbers.
+pub fn upsert_progress(
+    conn: &Connection,
+    date: &str,
+    ev: &DayEvidence,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO relationship_progress
+             (date, present, hits, misses, disagreements, shut_ups, score, computed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(date) DO UPDATE SET
+             present = excluded.present,
+             hits = excluded.hits,
+             misses = excluded.misses,
+             disagreements = excluded.disagreements,
+             shut_ups = excluded.shut_ups,
+             score = excluded.score,
+             computed_at = excluded.computed_at",
+        params![
+            date,
+            ev.present,
+            ev.hits,
+            ev.misses,
+            ev.disagreements,
+            ev.shut_ups,
+            ev.score,
+            clock::now_iso()
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn progress_on_day(conn: &Connection, date: &str) -> rusqlite::Result<Option<DayEvidence>> {
+    let mut stmt = conn.prepare(
+        "SELECT present, hits, misses, disagreements, shut_ups, score
+         FROM relationship_progress WHERE date = ?1",
+    )?;
+    let mut rows = stmt.query_map(params![date], |row| {
+        Ok(DayEvidence {
+            present: row.get(0)?,
+            hits: row.get(1)?,
+            misses: row.get(2)?,
+            disagreements: row.get(3)?,
+            shut_ups: row.get(4)?,
+            score: row.get(5)?,
+        })
+    })?;
+    rows.next().transpose()
+}
+
+/// Cumulative evidence BEFORE `date` — today never counts, so a single hit
+/// cannot promote the relationship mid-day (plan §3.3).
+pub fn progress_sum_before(conn: &Connection, date: &str) -> rusqlite::Result<i64> {
+    conn.query_row(
+        "SELECT COALESCE(SUM(score), 0) FROM relationship_progress WHERE date < ?1",
+        params![date],
+        |r| r.get(0),
+    )
+}
+
+/// Cumulative evidence in the half-open window `[from, before)` — the rolling
+/// 30-day view used by the promotion rule (plan §3.3).
+pub fn progress_sum_between(
+    conn: &Connection,
+    from: &str,
+    before: &str,
+) -> rusqlite::Result<i64> {
+    conn.query_row(
+        "SELECT COALESCE(SUM(score), 0) FROM relationship_progress
+         WHERE date >= ?1 AND date < ?2",
+        params![from, before],
+        |r| r.get(0),
+    )
+}
+
+pub fn add_relationship_log(conn: &Connection, stage: i64, note: &str) -> rusqlite::Result<i64> {
+    add_relationship_log_kind(conn, "stage", stage, note)
+}
+
+pub fn add_relationship_log_kind(
+    conn: &Connection,
+    kind: &str,
+    stage: i64,
+    note: &str,
+) -> rusqlite::Result<i64> {
+    conn.execute(
+        "INSERT INTO relationship_log (kind, stage, unlocked_at, note) VALUES (?1, ?2, ?3, ?4)",
+        params![kind, stage, clock::now_iso(), note],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// (id, kind, stage, note) — oldest first, un-announced only.
+pub fn pending_relationship_logs(
+    conn: &Connection,
+) -> rusqlite::Result<Vec<(i64, String, i64, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, kind, stage, note FROM relationship_log
+         WHERE notified_at IS NULL ORDER BY id ASC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+    rows.collect()
+}
+
+pub fn mark_relationship_notified(conn: &Connection, id: i64) -> rusqlite::Result<bool> {
+    let n = conn.execute(
+        "UPDATE relationship_log SET notified_at = ?1 WHERE id = ?2 AND notified_at IS NULL",
+        params![clock::now_iso(), id],
+    )?;
+    Ok(n > 0)
+}
+
 // ------------------------------------------------------- reads for consolidate
 
 /// Unconsumed events inside `[window_start, window_end)`, oldest first.
@@ -1324,6 +1577,99 @@ mod tests {
         // A later ensure re-anchors from scratch (events are gone too).
         let s = ensure_growth(&conn).unwrap();
         assert_eq!(s.stage, 0);
+    }
+
+    #[test]
+    fn relationship_stage_is_monotonic_and_cold_flips_once() {
+        let conn = mem();
+        assert!(relationship_state(&conn).unwrap().is_none());
+        let s = ensure_relationship(&conn).unwrap();
+        assert_eq!(s.stage, 0);
+        // Second ensure is a no-op (single row, no duplicate insert).
+        ensure_relationship(&conn).unwrap();
+
+        set_relationship_stage(&conn, 1).unwrap();
+        let s = relationship_state(&conn).unwrap().unwrap();
+        assert_eq!(s.stage, 1);
+        assert!(s.stage_since.is_some(), "promotion stamps stage_since");
+
+        // Going backwards is a silent no-op — invariant 1 (never rewinds).
+        set_relationship_stage(&conn, 0).unwrap();
+        assert_eq!(relationship_state(&conn).unwrap().unwrap().stage, 1);
+        set_relationship_stage(&conn, 2).unwrap();
+        assert_eq!(relationship_state(&conn).unwrap().unwrap().stage, 2);
+
+        // Cold stamps once, thaws once (double writes are no-ops).
+        assert_eq!(set_relationship_cold(&conn, Some("2026-11-19T00:00:00Z")).unwrap(), 1);
+        assert_eq!(set_relationship_cold(&conn, Some("2026-11-20T00:00:00Z")).unwrap(), 0);
+        assert_eq!(set_relationship_cold(&conn, None).unwrap(), 1);
+        assert_eq!(set_relationship_cold(&conn, None).unwrap(), 0);
+        assert_eq!(relationship_state(&conn).unwrap().unwrap().stage, 2, "cold never rewinds stage");
+    }
+
+    #[test]
+    fn progress_upsert_is_recompute_not_accumulate() {
+        let conn = mem();
+        let ev = DayEvidence {
+            present: 1,
+            hits: 1,
+            misses: 0,
+            disagreements: 1,
+            shut_ups: 0,
+            score: 3,
+        };
+        upsert_progress(&conn, "2026-11-19", &ev).unwrap();
+        // Same source data recomputed → the row is replaced, not summed.
+        upsert_progress(&conn, "2026-11-19", &ev).unwrap();
+        let got = progress_on_day(&conn, "2026-11-19").unwrap().unwrap();
+        assert_eq!(got, ev, "double recompute must not double the score");
+
+        // A changed source (one more miss) overwrites the day honestly.
+        let ev2 = DayEvidence { misses: 1, score: 2, ..ev.clone() };
+        upsert_progress(&conn, "2026-11-19", &ev2).unwrap();
+        assert_eq!(progress_on_day(&conn, "2026-11-19").unwrap().unwrap().score, 2);
+    }
+
+    #[test]
+    fn progress_sum_before_excludes_today() {
+        let conn = mem();
+        for (d, score) in [("2026-11-17", 2), ("2026-11-18", 1), ("2026-11-19", 3)] {
+            upsert_progress(&conn, d, &DayEvidence { score, ..Default::default() }).unwrap();
+        }
+        // Today (11-19) never counts toward promotion — no mid-day jump.
+        assert_eq!(progress_sum_before(&conn, "2026-11-19").unwrap(), 3);
+        assert_eq!(progress_sum_before(&conn, "2026-11-20").unwrap(), 6);
+        assert_eq!(progress_sum_before(&conn, "2026-11-17").unwrap(), 0);
+    }
+
+    #[test]
+    fn relationship_reset_keeps_memory_and_growth() {
+        let conn = mem();
+        ensure_growth(&conn).unwrap();
+        set_growth_stage(&conn, 2).unwrap();
+        add_event(&conn, "dialogue", "hi").unwrap();
+        ensure_relationship(&conn).unwrap();
+        set_relationship_stage(&conn, 2).unwrap();
+        add_relationship_log(&conn, 2, "会顶嘴了。").unwrap();
+        upsert_progress(&conn, "2026-11-19", &DayEvidence { score: 2, ..Default::default() }).unwrap();
+
+        forget_relationship(&conn).unwrap();
+        assert!(relationship_state(&conn).unwrap().is_none());
+        assert!(pending_relationship_logs(&conn).unwrap().is_empty());
+        assert!(progress_on_day(&conn, "2026-11-19").unwrap().is_none());
+        // Memory and the plant are untouched — "start over socially" only.
+        assert_eq!(growth_state(&conn).unwrap().unwrap().stage, 2);
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
+
+        // forget_all still cascades the relationship tables.
+        ensure_relationship(&conn).unwrap();
+        add_relationship_log(&conn, 1, "熟络了。").unwrap();
+        forget_all(&conn).unwrap();
+        assert!(relationship_state(&conn).unwrap().is_none());
+        assert!(pending_relationship_logs(&conn).unwrap().is_empty());
     }
 
     #[test]

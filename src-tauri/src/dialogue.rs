@@ -28,6 +28,7 @@ use crate::memory::MemoryStore;
 use crate::perception::PerceptionState;
 use crate::persona::prompt::{render, PromptContext};
 use crate::persona::{eval::DialogueBackend, Persona};
+use crate::relationship;
 use crate::report;
 use crate::AppState;
 
@@ -68,6 +69,11 @@ fn mood_str(state: FaceState) -> &'static str {
     }
 }
 
+/// First `n` characters — evidence snippets, not full transcripts.
+fn clip(text: &str, n: usize) -> String {
+    text.chars().take(n).collect()
+}
+
 fn is_weekend_today() -> bool {
     use chrono::Datelike;
     matches!(
@@ -85,6 +91,8 @@ fn system_prompt(
     let boundaries = db::boundaries(conn)?;
     let hour8 = hour as u8;
     let mood = mood_str(face::derive_base_state(hour8, is_weekend_today()));
+    // Long-term tone (plan-relationship.md §3.5): 拘谨 / 熟络 / 会顶嘴 / 生疏.
+    let relationship_mode = relationship::current_mode(conn);
     Ok(render(
         card,
         &PromptContext {
@@ -92,6 +100,7 @@ fn system_prompt(
             hour,
             raining,
             user_boundaries: &boundaries,
+            relationship_mode: relationship_mode.as_str(),
         },
     ))
 }
@@ -144,10 +153,7 @@ fn chat_turn_inner(
         db::add_event_meta(conn, "dialogue", &reply, Some("assistant"), Some(session_id))?;
         return Ok(DialogueOutcome {
             reply,
-            filter: generation::FilterReport {
-                unconditional_affirmation: false,
-                hedged_disagreement: false,
-            },
+            filter: generation::FilterReport::default(),
             model_used: false,
             crisis: true,
         });
@@ -168,6 +174,20 @@ fn chat_turn_inner(
     let filter = generation::filter(&reply);
     db::add_event_meta(conn, "dialogue", user_text, Some("user"), Some(session_id))?;
     db::add_event_meta(conn, "dialogue", &reply, Some("assistant"), Some(session_id))?;
+
+    // Anti-sycophancy evidence (plan-relationship.md §3.6): the filter used to
+    // be report-only, so "how often does it actually push back" was
+    // unknowable. Record the two shapes as events — explicit push-back is the
+    // relationship line's only qualitative evidence.
+    if filter.explicit_disagreement {
+        db::add_event(conn, "disagreement", &clip(&reply, 80))?;
+    }
+    if filter.hedged_disagreement {
+        db::add_event(conn, "disagreement_hedged", &clip(&reply, 80))?;
+        // The wishy-washy moment may be the one worth telling a story about
+        // (R2 + 7 days, fired at most once, ever).
+        let _ = relationship::maybe_first_refusal(conn, chrono::Local::now());
+    }
     Ok(DialogueOutcome { reply, filter, model_used, crisis: false })
 }
 
@@ -402,6 +422,46 @@ mod tests {
         assert_eq!(history[0].assistant, "太棒了，就这么办！");
         // Other sessions see nothing.
         assert!(db::dialogue_history(&conn, "s2", 6).unwrap().is_empty());
+    }
+
+    /// Anti-sycophancy evidence (plan-relationship.md §3.6): the filter used
+    /// to be report-only, so the relationship line could never count push-
+    /// backs. Both shapes must land as events, and a plain reply must not.
+    #[test]
+    fn filter_evidence_is_persisted_as_events() {
+        let conn = mem();
+        let c = card();
+        let mut backend = MockBackend::new("我不同意这个判断，因为数据对不上。");
+        let out = chat_turn(&conn, &mut backend, &c, "s1", "这个方案如何", 10, false).unwrap();
+        assert!(out.filter.explicit_disagreement);
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM events WHERE kind = 'disagreement'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "explicit push-back must be recorded");
+
+        let mut b2 = MockBackend::new("虽然很有道理，但也可以再想想。");
+        chat_turn(&conn, &mut b2, &c, "s1", "再想想？", 10, false).unwrap();
+        let h: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE kind = 'disagreement_hedged'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(h, 1, "hedged push-back is recorded separately");
+
+        // A plain reply writes no evidence at all — the pipeline must not
+        // manufacture signals out of nothing.
+        let mut b3 = MockBackend::new("行，那就这么办。");
+        chat_turn(&conn, &mut b3, &c, "s1", "好", 10, false).unwrap();
+        let total: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE kind LIKE 'disagreement%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(total, 2);
     }
 
     #[test]

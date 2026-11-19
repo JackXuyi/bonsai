@@ -82,6 +82,7 @@ Rust 核心已实现：L1 感知层（逐项授权、默认关闭）、L2 记忆
   - [方案：人格卡 v1 + 一致性测试集](./docs/zh/plan-persona.md) — MVP P0 第 4 项的实施计划（PM1–PM3 已实施）
   - [方案：预测-验证循环](./docs/zh/plan-predict.md) — MVP P1 第 1 项的实施计划（G1–G4 已实施）
   - [方案：形态线成长](./docs/zh/plan-morph.md) — MVP P1 第 2 项的实施计划（G1–G4 已实施）
+  - [方案：关系线成长](./docs/zh/plan-relationship.md) — MVP P2 第 1 项的实施计划（Q1–Q4 已实施）
 - English
   - [Research report](./docs/en/research-report.md) — founding research: market, feasibility, memory, personality, growth, compliance, MVP, risks
 
@@ -109,3 +110,13 @@ MVP P1 进度：
 | 预测-验证循环 | 🔨 已实现：每天最多 1 次证据可溯源的猜测（habit 直推 / 14 天节律外推 / 连续性猜），三档反馈（对/错/别烦我）回写偏好置信度，「别烦我」退避 3 天；与主动搭话互斥、busy 不打断；指标门槛（命中率 ≥50%、退避率 <10%）为常驻 CI 测试（见 docs/zh/plan-predict.md） |
 | 形态线成长（7 天可见变化） | 🔨 已实现：四阶段 7 天节奏（破土 day0–1 / 抽枝 day2 / 成形 day4 / 成景 day6），靠时间推进、无签到无数值；schema v4 growth 表（出生锚点从最早事件回填、阶段单调不减、daily tick 幂等）；日微变化（叶色渐深 + 按日确定性加小叶 + 阶段自述）；休眠而非死亡（7 天无互动 → 落叶待机，回来即恢复）；升阶播报只在开窗断点播一次（`notified_at` 幂等，不占打扰额度）；S3 解锁「得意」表情与 poke 文案分级；三指标（升阶准时率 / 播报幂等率 / 休眠正确率）为常驻 CI 测试（见 docs/zh/plan-morph.md） |
 | 边界 onboarding 问答 | 🔨 已实现：首次启动模态引导（年龄屏硬门槛 → 危机资源卡 → 五问 → 完成页，除年龄外全可跳过）；schema v5 settings + onboarding_answers 审计表（跳过也记录）；q1/q2/q4 逐字保真切条写入 boundaries（prompt 已自动注入生效，重复提交幂等），q3/q5 写 preferences 而非边界；exact「不准记录」条目在记忆抽取入口拦截（原文保留、绝不成为事实）；危机词表规则级拦截（模型挂也生效）+ 未成年人在对话命令层二次门禁；托盘「重新做一次引导」保留答案重走流程；工具页边界清单可查看/删除；三指标（转写保真率 / 幂等率 / 拦截正确率）为常驻 CI 测试（见 docs/zh/plan-onboarding.md） |
+
+MVP P2 进度：
+
+| P2 项 | 状态 |
+| --- | --- |
+| 关系线成长（8–30 天，靠理解准确度） | 🔨 已实现：三阶段（拘谨 → 熟络 day≥9 且证据≥12 → 会顶嘴 day≥22 且证据≥30，双条件、天数只给窗口不给进度）；证据每日从 predictions + events 重算（在场/猜中/顶嘴没被拒 各 +1 上限，猜错 −1 不累积），分数永不出进程、不上 UI；「别烦我」不扣分只暂停推进（退避率 >10%）；7 天无互动 → 生疏（语气收回，阶段不退）；prompt 注入四档关系模式，R2 把缓冲句禁令写成硬约束；反谄媚命中首次落库为 disagreement / disagreement_hedged 事件；R2 后 7 天内「第一次没顺着你」彩蛋（只播一次）；工具页一行 + 重置（只清关系线）；四指标为常驻 CI 测试（见 docs/zh/plan-relationship.md） |
+| 日历 / 邮件工具调用 | ⬜ 未开始 |
+| 语音（偶发语音） | ⬜ 未开始 |
+| 屏幕感知 | ⬜ 未开始 |
+| 跨设备 / 数据可携带 | ⬜ 未开始 |

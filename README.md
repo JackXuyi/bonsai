@@ -91,6 +91,7 @@ The Rust core implements: L1 perception (per-source switches, default off), L2 m
   - [Plan: persona card v1 + consistency suite](./docs/zh/plan-persona.md) — implementation plan for MVP P0 item 4 (PM1–PM3 implemented)
   - [Plan: predict-verify loop](./docs/zh/plan-predict.md) — implementation plan for MVP P1 item 1 (G1–G4 implemented)
   - [Plan: form-line growth](./docs/zh/plan-morph.md) — implementation plan for MVP P1 item 2 (G1–G4 implemented)
+  - [Plan: relationship-line growth](./docs/zh/plan-relationship.md) — implementation plan for MVP P2 item 1 (Q1–Q4 implemented)
 
 ## Status
 
@@ -116,5 +117,15 @@ MVP P1 progress:
 | Predict-verify loop | 🔨 implemented: at most one explainable guess per day (habit direct / 14-day rhythm extrapolation / continuity), three-tier feedback (hit / miss / shut_up) written back into preference confidence, 3-day back-off on "shut_up"; mutually exclusive with the proactive channel, never interrupts when busy; metric gates (accuracy ≥50%, back-off rate <10%) are permanent CI tests (docs/zh/plan-predict.md) |
 | Form-line growth (7-day visible change) | 🔨 implemented: four stages over seven days (破土 day 0–1 / 抽枝 day 2 / 成形 day 4 / 成景 day 6), time-driven with no check-ins and no scores; schema v4 growth tables (birth anchor backfilled from the earliest event, monotonic stage, idempotent daily tick); daily micro-variations (deeper leaf tint + deterministic extra leaves + stage self-narration); dormancy instead of death (7 silent days → wilted resting form, first activity wakes it); unlock announcements queue until the user opens the window and fire exactly once (`notified_at` idempotency, no interruption budget spent); S3 unlocks the `proud` face and stage-flavoured poke copy; three metrics (unlock punctuality / announcement idempotency / dormancy correctness) are permanent CI tests (docs/zh/plan-morph.md) |
 | Boundary onboarding Q&A | 🔨 Implemented: modal first-run flow (age gate → crisis resource card → five questions → done; everything but age is skippable); schema v5 settings + onboarding_answers audit table (skips recorded too); q1/q2/q4 split mechanically and stored verbatim as boundaries (prompt injection already picks them up; resubmission is idempotent), q3/q5 go to preferences, not boundaries; "never record" items are blocked at the memory-extraction door (raw event kept, never becomes a fact); rule-level crisis intercept (works with the model down) + a second minor gate at the dialogue commands; tray "redo onboarding" keeps answers; tools page lists and deletes boundaries; three metrics (transcription fidelity / idempotency / intercept correctness) are standing CI tests (see docs/zh/plan-onboarding.md) |
+
+MVP P2 progress:
+
+| P2 item | Status |
+| --- | --- |
+| Relationship-line growth (day 8–30, driven by understanding accuracy) | 🔨 Implemented: three stages (拘谨 → 熟络 at day ≥ 9 with ≥ 12 evidence points → 会顶嘴 at day ≥ 22 with ≥ 30); both conditions required — days only open the window, they never carry progress. Evidence is recomputed daily from predictions + events (presence / hits / un-waved push-backs +1 each, a wrong guess −1 and never compounding); the score never leaves the process and has no UI. "Shut up" never subtracts points, it only pauses promotion (back-off > 10%). Seven silent days → rusty tone without rewinding the stage. The prompt gets one of four relationship modes; at R2 the banned hedge openers become a hard rule. Anti-sycophancy hits are finally persisted as disagreement / disagreement_hedged events. A once-ever "first time it didn't go along with you" moment inside the 7-day window after R2. Tools page shows one line + a relationship-only reset. Four metrics are permanent CI tests (see docs/zh/plan-relationship.md) |
+| Calendar / mail tool calls | ⬜ not started |
+| Voice (occasional utterances) | ⬜ not started |
+| Screen perception | ⬜ not started |
+| Cross-device / data portability | ⬜ not started |
 
 ## Documentation

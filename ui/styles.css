@@ -1316,3 +1316,11 @@ dialog:focus {
 .boundary-del:hover {
   color: #b0533a;
 }
+
+/* ── 工具页 · 关系线（plan-relationship.md §3.8）────────────────── */
+.rel-reset {
+  flex: none;
+  font-size: 12px;
+  padding: 4px 10px;
+  white-space: nowrap;
+}

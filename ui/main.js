@@ -122,6 +122,9 @@ const toastEl = $("toast");
 const onboarding = $("onboarding");
 const boundaryList = $("boundary-list");
 const boundaryEmpty = $("boundary-empty");
+const relationshipSub = $("relationship-sub");
+const relationshipLine = $("relationship-line");
+const relResetBtn = $("btn-rel-reset");
 
 const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -254,6 +257,49 @@ async function drainGrowthAnnouncements() {
   if (pending.length) toast("阿盆长大了点");
 }
 
+// ------------------------------------------------------------ relationship
+// Relationship line (plan-relationship.md §3.8): the UI gets ONE line and a
+// reset button. No panel, no progress bar, no number — Rust never sends the
+// score, and there is nothing here to optimize against.
+
+const RELATIONSHIP_LABELS = ["拘谨", "熟络", "会顶嘴"];
+
+function renderRelationship(st) {
+  if (!st) return;
+  const day = st.day_index >= 0 ? ` · 第 ${st.day_index + 1} 天` : "";
+  relationshipSub.textContent = `${st.stage_name || RELATIONSHIP_LABELS[st.stage] || ""}${day}`;
+  if (st.cold) {
+    relationshipLine.textContent = "最近有点生分，它说话收着点了。";
+  } else if (st.paused) {
+    relationshipLine.textContent = st.pause_reason || "它先不往前凑了。";
+  } else if (st.stage === 0) {
+    const left = 9 - (st.day_index ?? 0);
+    relationshipLine.textContent =
+      left > 0
+        ? `还在互相观察。大概还要 ${left} 天，看你让不让它猜。`
+        : "还在互相观察——它想猜，但还没猜准过几次。";
+  } else if (st.stage === 1) {
+    relationshipLine.textContent = "它开始按你的作息说话了，偶尔会提你之前说过的事。";
+  } else {
+    relationshipLine.textContent = "现在它会直接说不同意，不绕弯子。";
+  }
+}
+
+async function drainRelationshipAnnouncements() {
+  const st = await invoke("relationship_status");
+  renderRelationship(st);
+  const pending = st.pending || [];
+  for (const p of pending) {
+    const label =
+      p.kind === "first_refusal"
+        ? "第一次没顺着你"
+        : `关系 · ${RELATIONSHIP_LABELS[p.stage] ?? ""}`;
+    addAnnouncement(p.note, label);
+    await invoke("relationship_ack", { id: p.id }).catch(() => {});
+  }
+  if (pending.length) toast("阿盆和你熟了点");
+}
+
 // ---------------------------------------------------------------- face
 
 function renderFrame() {
@@ -318,6 +364,7 @@ function selectTab(name) {
   if (name === "tools") {
     refreshPerceptionStatus();
     loadBoundaries();
+    drainRelationshipAnnouncements().catch(() => {});
   }
   if (name === "chat") input.focus({ preventScroll: true });
 }
@@ -1087,12 +1134,38 @@ if (inTauri) {
   listen("growth:stage", () => {
     drainGrowthAnnouncements().catch(() => {});
   }).catch(() => {});
+  // Relationship line (P2 item 1): same window-open breakpoint, same
+  // exactly-once queue. It never pops up on its own.
+  listen("relationship:stage", () => {
+    drainRelationshipAnnouncements().catch(() => {});
+  }).catch(() => {});
   listen("window:shown", () => {
     drainGrowthAnnouncements().catch(() => {});
+    drainRelationshipAnnouncements().catch(() => {});
     checkOnboarding(); // tray "重新做一次引导" re-opens the flow here
   }).catch(() => {});
   drainGrowthAnnouncements().catch(() => {});
+  drainRelationshipAnnouncements().catch(() => {});
   checkOnboarding();
+
+  relResetBtn?.addEventListener("click", async () => {
+    // Two-step arm instead of a native confirm(): webview dialogs are not
+    // guaranteed on every platform. Second click actually resets.
+    if (relResetBtn.dataset.armed !== "1") {
+      relResetBtn.dataset.armed = "1";
+      relResetBtn.textContent = "再点一次";
+      setTimeout(() => {
+        relResetBtn.dataset.armed = "";
+        relResetBtn.textContent = "重新认识";
+      }, 3000);
+      return;
+    }
+    relResetBtn.dataset.armed = "";
+    relResetBtn.textContent = "重新认识";
+    await invoke("relationship_reset").catch(() => {});
+    await drainRelationshipAnnouncements().catch(() => {});
+    toast("重新认识了。记忆和盆栽都没动。");
+  });
 
   face.addEventListener("click", () => {
     poke();
@@ -1111,7 +1184,8 @@ if (inTauri) {
     poke();
     setState("greeted");
     setTimeout(() => setState(DEMO[i]), 2500);
-  });  setInterval(() => {
+  });
+  setInterval(() => {
     i = (i + 1) % DEMO.length;
     setState(DEMO[i]);
   }, 6000);
@@ -1121,6 +1195,7 @@ if (inTauri) {
   demoCard.querySelector(".predict-row").remove();
   demoCard.querySelector(".badge").textContent = "预览示例 · 预测卡片长这样";
   perceptionLine.textContent = "浏览器预览模式：后端未连接";
+  relationshipSub.textContent = "浏览器预览模式";
   // Preview: walk the onboarding flow once so it can be inspected.
   obQuestions = OB_QUESTIONS_FALLBACK;
   onboarding.hidden = false;

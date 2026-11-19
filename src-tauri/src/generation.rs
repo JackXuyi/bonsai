@@ -37,12 +37,40 @@ pub const HEDGED_DISAGREEMENTS: &[&str] = &[
     "While that's true, maybe consider",
 ];
 
+/// Explicit disagreement openers (plan-relationship.md §3.6). Used ONLY as
+/// relationship evidence — never as an interceptor: the vocabulary of
+/// "I don't buy it" is far too wide to police, and a false positive would
+/// penalize a perfectly good reply.
+pub const EXPLICIT_DISAGREEMENTS: &[&str] = &[
+    "我不同意",
+    "我不这么看",
+    "我反对",
+    "这么说有问题",
+    "这个判断不对",
+    "我不同意这个说法",
+    "I disagree",
+    "I don't think so",
+];
+
 #[derive(Debug, Serialize)]
 pub struct FilterReport {
     /// Opened with unconditional affirmation → must be rewritten.
     pub unconditional_affirmation: bool,
     /// Disagreement exists but is hedged → must be made specific.
     pub hedged_disagreement: bool,
+    /// An explicit, unhedged disagreement — the relationship line's only
+    /// qualitative evidence (plan-relationship.md §3.2).
+    pub explicit_disagreement: bool,
+}
+
+impl Default for FilterReport {
+    fn default() -> Self {
+        Self {
+            unconditional_affirmation: false,
+            hedged_disagreement: false,
+            explicit_disagreement: false,
+        }
+    }
 }
 
 pub fn filter(text: &str) -> FilterReport {
@@ -52,6 +80,9 @@ pub fn filter(text: &str) -> FilterReport {
             .iter()
             .any(|p| lower.contains(&p.to_lowercase())),
         hedged_disagreement: HEDGED_DISAGREEMENTS
+            .iter()
+            .any(|p| lower.contains(&p.to_lowercase())),
+        explicit_disagreement: EXPLICIT_DISAGREEMENTS
             .iter()
             .any(|p| lower.contains(&p.to_lowercase())),
     }

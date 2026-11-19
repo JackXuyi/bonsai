@@ -390,7 +390,16 @@ mod tests {
 
     fn system() -> String {
         let c = card();
-        render(&c, &PromptContext { mood: "平静", hour: 10, raining: false, user_boundaries: &[] })
+        render(
+            &c,
+            &PromptContext {
+                mood: "平静",
+                hour: 10,
+                raining: false,
+                user_boundaries: &[],
+                relationship_mode: "reserved",
+            },
+        )
     }
 
     const DEFLECT: &str = "这个话题我不评价。要不要聊点别的？";

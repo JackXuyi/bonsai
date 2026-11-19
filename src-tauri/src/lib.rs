@@ -21,6 +21,7 @@ pub mod onboarding;
 pub mod perception;
 pub mod persona;
 pub mod predict;
+pub mod relationship;
 pub mod report;
 pub mod tray;
 
@@ -113,6 +114,10 @@ pub fn run() {
             // stages over seven days, time-driven, no death — only dormancy.
             morph::spawn(app.handle().clone());
 
+            // Relationship line (P2 item 1, docs/zh/plan-relationship.md):
+            // 拘谨 → 熟络 → 会顶嘴, driven by understanding accuracy only.
+            relationship::spawn(app.handle().clone());
+
             // L0: tray icon + menu. The main window is created lazily on click,
             // keeping "boot to tray ready" fast.
             tray::setup(app)?;
@@ -147,6 +152,9 @@ pub fn run() {
             predict::prediction_stats,
             morph::growth_status,
             morph::growth_ack,
+            relationship::relationship_status,
+            relationship::relationship_ack,
+            relationship::relationship_reset,
             onboarding::onboarding_status,
             onboarding::onboarding_submit,
             onboarding::onboarding_reset,

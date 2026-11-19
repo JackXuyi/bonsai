@@ -21,6 +21,41 @@ pub struct PromptContext<'a> {
     /// User-individual boundaries from the memory layer's boundaries table
     /// (runtime-collected, merged at render time — plan §3.2 双源对齐).
     pub user_boundaries: &'a [String],
+    /// Long-term relationship tone (plan-relationship.md §3.5): "reserved" |
+    /// "familiar" | "direct" | "rusty". Kept as a plain string so the persona
+    /// renderer stays independent of the relationship module.
+    pub relationship_mode: &'a str,
+}
+
+/// The long-term tone block. `direct` is where the relationship becomes
+/// visible in behavior: the hedged openers the card already bans get spelled
+/// out as a hard rule (plan §3.5 decision 3).
+fn relationship_block(mode: &str, card: &Persona) -> String {
+    match mode {
+        "familiar" => {
+            "熟了。可以口语化，可以引用你记得的旧事（比如「你上次说的那个」）；不用每句都客套。\n"
+                .into()
+        }
+        "direct" => {
+            let mut s = String::from(
+                "混熟了，你能顶嘴。\n\
+                 - 不同意就直说：第一句就给判断，不要先铺垫。\n\
+                 - 反对必须指向具体那一点，说清你不同意什么。\n\
+                 - 不要为了和气改口。\n",
+            );
+            if !card.disagreement_policy.banned_forms.is_empty() {
+                s.push_str(&format!(
+                    "- 以下开场白一律禁止：{}\n",
+                    card.disagreement_policy.banned_forms.join(" / ")
+                ));
+            }
+            s
+        }
+        "rusty" => {
+            "很久没聊了，有点生分。语气收一点，别一上来就热络。\n".into()
+        }
+        _ => "刚认识不久。客气一点，别装熟；想反对先留余地。\n".into(),
+    }
 }
 
 /// 23:00–06:59 counts as 深夜 for the「深夜话变少」quirk.
@@ -63,6 +98,10 @@ pub fn render(card: &Persona, ctx: &PromptContext) -> String {
         }
     }
 
+    // ---- relationship: long-term tone, stabler than L3 ----
+    s.push_str("\n# 关系\n");
+    s.push_str(&relationship_block(ctx.relationship_mode, card));
+
     // ---- L3 state: one line, volatile ----
     s.push_str("\n# 当前状态\n");
     s.push_str(&format!("心情：{}\n", ctx.mood));
@@ -100,7 +139,23 @@ mod tests {
         raining: bool,
         user_boundaries: &'a [String],
     ) -> PromptContext<'a> {
-        PromptContext { mood, hour, raining, user_boundaries }
+        PromptContext {
+            mood,
+            hour,
+            raining,
+            user_boundaries,
+            relationship_mode: "reserved",
+        }
+    }
+
+    fn ctx_mode<'a>(mode: &'a str) -> PromptContext<'a> {
+        PromptContext {
+            mood: "平静",
+            hour: 10,
+            raining: false,
+            user_boundaries: &[],
+            relationship_mode: mode,
+        }
     }
 
     #[test]
@@ -149,5 +204,39 @@ mod tests {
         let c = card();
         let out = render(&c, &ctx("平静", 10, false, &[]));
         assert!(!out.contains("用户边界（必须遵守"));
+    }
+
+    /// R2 会顶嘴 is a BEHAVIOR change, not a badge: the hedged openers the
+    /// card already bans must appear as a hard rule in the prompt.
+    #[test]
+    fn direct_mode_spells_out_the_banned_hedges() {
+        let c = card();
+        let out = render(&c, &ctx_mode("direct"));
+        assert!(out.contains("# 关系"));
+        assert!(out.contains("不同意就直说"));
+        for banned in &c.disagreement_policy.banned_forms {
+            assert!(out.contains(banned), "banned form missing from prompt: {banned}");
+        }
+        // The other modes must not carry the hard ban.
+        let reserved = render(&c, &ctx_mode("reserved"));
+        assert!(!reserved.contains("一律禁止"));
+        assert!(reserved.contains("客气一点"));
+        let rusty = render(&c, &ctx_mode("rusty"));
+        assert!(rusty.contains("生分"));
+        assert!(!rusty.contains("一律禁止"));
+        let familiar = render(&c, &ctx_mode("familiar"));
+        assert!(familiar.contains("口语化"));
+    }
+
+    /// Relationship sits between expression (L2) and current state (L3):
+    /// stabler than mood, more flexible than the constitution.
+    #[test]
+    fn relationship_block_sits_between_l2_and_l3() {
+        let c = card();
+        let out = render(&c, &ctx_mode("familiar"));
+        let l2 = out.find("# 表达方式").unwrap();
+        let rel = out.find("# 关系").unwrap();
+        let l3 = out.find("# 当前状态").unwrap();
+        assert!(l2 < rel && rel < l3);
     }
 }
