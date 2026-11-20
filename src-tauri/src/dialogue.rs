@@ -158,7 +158,7 @@ fn agent_pipeline(
 
     // The `DialogueOutcome.tool` label, prefixed by the tool's kind so the
     // frontend can tell MCP calls (`mcp:x`) from built-ins (`builtin:x`).
-    // Looks in the FULL catalog: the ≤20 prompt cap must not unlabel a
+    // Looks in the FULL catalog: the ≤100 prompt cap must not unlabel a
     // legitimate tail-tool call.
     let tool_label = |kit: &crate::mcp_admin::AgentKit, name: &str| -> Option<String> {
         kit.catalog_all()
@@ -185,9 +185,9 @@ fn agent_pipeline(
     };
 
     // Whitelist + cap (silent degrade, spec-s3 §3). The whitelist checks the
-    // FULL provider catalog — the ≤20 prompt display cap (spec-s3: 字典序稳定
-    // 截断) must not execution-bar the tail tools: on this machine 39 cached
-    // tools means 19 names the prompt never shows but the whitelist must.
+    // FULL provider catalog — the ≤100 prompt display cap (spec-s3: 字典序稳定
+    // 截断) must not execution-bar the tail tools: any tool past the cap the
+    // model names anyway (history, prior turn's catalog) must stay callable.
     let full_catalog = kit.catalog_all();
     let mut selected: Vec<crate::agent_tools::ToolDescriptor> = Vec::new();
     for c in cands {
@@ -1323,16 +1323,16 @@ mod tests {
         assert!(kit.trace_ref().contains("level2:json-not-prose"));
     }
 
-    /// The ≤20 prompt cap must not execution-bar tail tools: with 25 tools
-    /// cached, tool #25 never fits the level-0 names, but a model that names
+    /// The ≤100 prompt cap must not execution-bar tail tools: with 120 tools
+    /// cached, tool #119 never fits the level-0 names, but a model that names
     /// it anyway (history, prior turn's catalog) must still be whitelisted.
     #[test]
     fn whitelist_checks_full_catalog_not_the_prompt_cap() {
         let conn = mem();
         let c = card();
-        let providers: Vec<Box<dyn crate::agent_tools::ToolProvider>> = (0..25)
+        let providers: Vec<Box<dyn crate::agent_tools::ToolProvider>> = (0..120)
             .map(|i| {
-                let name = format!("tool{i:02}");
+                let name = format!("tool{i:03}");
                 Box::new(crate::mcp::MockMcpProvider {
                     tools: vec![crate::agent_tools::ToolDescriptor {
                         name: name.clone(),
@@ -1351,11 +1351,11 @@ mod tests {
             gate: Box::new(crate::agent_tools::AutoAllowGate),
             prompt_trace: std::sync::Mutex::new(Vec::new()),
         };
-        assert_eq!(kit.catalog().len(), 20);
-        assert_eq!(kit.catalog_all().len(), 25);
+        assert_eq!(kit.catalog().len(), 100);
+        assert_eq!(kit.catalog_all().len(), 120);
         let mut backend = SeqBackend::new(&[
-            r#"{"candidates": ["tool24"]}"#,
-            r#"{"tool": "tool24", "args": {}}"#,
+            r#"{"candidates": ["tool119"]}"#,
+            r#"{"tool": "tool119", "args": {}}"#,
             "tail tool 回答。",
         ]);
         let out = chat_turn_with_kit(
@@ -1364,10 +1364,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out.reply, "tail tool 回答。");
-        assert_eq!(out.tool.as_deref(), Some("mcp:tool24"));
+        assert_eq!(out.tool.as_deref(), Some("mcp:tool119"));
         let records = db::tool_call_records(&conn, 5).unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].tool, "mcp");
-        assert_eq!(records[0].action, "tool24");
+        assert_eq!(records[0].action, "tool119");
     }
 }

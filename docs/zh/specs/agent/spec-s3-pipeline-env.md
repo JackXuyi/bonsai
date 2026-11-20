@@ -35,7 +35,7 @@ pub trait ToolProvider {
 
 ```
 第 0 级：system prompt 追加
-  【可用能力（仅名称）】mcp_tool_a · mcp_tool_b · skill_x（≤20 项）
+  【可用能力（仅名称）】mcp_tool_a · mcp_tool_b · skill_x（≤100 项）
   指令：需要用能力时只输出 {"candidates": ["name", …]}；否则正常回答。
 第 1 轮（模型第 1 次调用，不流式）：
   → 解析 candidates（严格 JSON；解析失败/为空/超 5 个 → 本轮回复即最终回复，管线结束）
@@ -65,7 +65,9 @@ pub trait ToolProvider {
 5. skill 路径：pass2 直接作答（无执行），kind=skill 落库（1）→ `pipeline_skill_body_answers_without_execution`
 6. 无 provider → 走原路径、流式逐字不变（1）→ `chat_turn_streaming_deltas_and_records_match_chat_turn`、`capability_section_appears_only_when_tools_exist`
 7. 静默降级：pass1 出垃圾 → 正常回复、无审计行（1）→ `pipeline_degrades_silently_on_garbage`
-8. tool 超 20 截断按字典序稳定（1）→ `name_catalog_lists_up_to_20`、`catalog_is_sorted_and_capped`
+8. tool 超 100 截断按字典序稳定（1）→ `name_catalog_lists_up_to_100`、`catalog_is_sorted_and_capped`
+   （偏差记录 2026-11-20：原 ≤20；实测单机 39 个 MCP 工具时 20 的截断让尾部 19 个永不可见不可调，
+   白名单已改走全量 catalog、提示词上限放宽到 100——用户裁决）
 9. 第 0 级只注入名称（不含 summary）：`capability_section_appears_only_when_tools_exist` 断言 prompt 含 `weather` 但不含 `查天气`
 
 ## 5. 验收清单

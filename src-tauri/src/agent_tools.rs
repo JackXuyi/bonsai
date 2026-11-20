@@ -142,11 +142,13 @@ pub fn clip_chars(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
 
-/// Name-only catalog line (level 0): `a · b · c`, ≤20 entries.
+/// Name-only catalog line (level 0): `a · b · c`, ≤100 entries (D-裁决
+/// 2026-11-20：spec-s3 从 20 放宽到 100——单机 39 个 MCP 工具时 20 的
+/// 截断让尾部工具永远不可见；100 个名字约 600 字符，本地上下文无压力).
 pub fn name_catalog(descriptors: &[ToolDescriptor]) -> String {
     descriptors
         .iter()
-        .take(20)
+        .take(100)
         .map(|d| d.name.as_str())
         .collect::<Vec<_>>()
         .join(" · ")
@@ -330,12 +332,12 @@ mod tests {
     }
 
     #[test]
-    fn name_catalog_lists_up_to_20() {
-        let d: Vec<_> = (0..25).map(|i| desc(&format!("t{i:02}"), ToolKind::Mcp)).collect();
+    fn name_catalog_lists_up_to_100() {
+        let d: Vec<_> = (0..120).map(|i| desc(&format!("t{i:03}"), ToolKind::Mcp)).collect();
         let cat = name_catalog(&d);
-        assert!(cat.starts_with("t00 · t01"));
-        assert!(cat.ends_with("t19"));
-        assert!(!cat.contains("t20"), "only 20 entries");
+        assert!(cat.starts_with("t000 · t001"));
+        assert!(cat.ends_with("t099"));
+        assert!(!cat.contains("t100"), "only 100 entries");
     }
 
     #[test]

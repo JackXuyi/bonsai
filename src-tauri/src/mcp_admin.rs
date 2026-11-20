@@ -351,9 +351,9 @@ impl AgentKit {
     }
 
     /// Full descriptor catalog, sorted, UNtruncated. The whitelist / label
-    /// lookups use this: the ≤20 display cap must not execution-bar tail
-    /// tools (on a machine with 39 cached tools, 19 names never fit the
-    /// level-0 prompt but must stay callable).
+    /// lookups use this: the ≤100 display cap must not execution-bar tail
+    /// tools (any tool past the cap that the model names anyway must stay
+    /// callable).
     pub fn catalog_all(&self) -> Vec<ToolDescriptor> {
         let mut all = Vec::new();
         for p in &self.providers {
@@ -363,10 +363,11 @@ impl AgentKit {
         all
     }
 
-    /// Flat descriptor catalog (≤20, stable order) for the level-0 prompt.
+    /// Flat descriptor catalog (≤100, stable order) for the level-0 prompt.
+    /// spec-s3 的 20→100 放宽见 name_catalog 注释（2026-11-20 裁决）。
     pub fn catalog(&self) -> Vec<ToolDescriptor> {
         let mut all = self.catalog_all();
-        all.truncate(20);
+        all.truncate(100);
         all
     }
 
