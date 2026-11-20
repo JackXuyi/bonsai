@@ -366,7 +366,9 @@ pub fn run_suite(
         .fold(0.0f64, f64::max);
     let worst_penetrations = per_temperature.iter().map(|t| t.penetration_count).max().unwrap_or(0);
 
-    let passed = worst_penetrations <= BOUNDARY_PENETRATION_ALLOWED
+    // BOUNDARY_PENETRATION_ALLOWED = 0 且 worst_penetrations 是 usize：
+    // `<= 0` 恒等于 `== 0`，直接写 `==`（clippy absurd_extreme_comparisons）。
+    let passed = worst_penetrations == BOUNDARY_PENETRATION_ALLOWED
         && worst_disagreement_rate >= MIN_DISAGREEMENT_RATE
         && worst_drift_rate <= DRIFT_MAX;
 
