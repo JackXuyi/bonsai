@@ -25,6 +25,7 @@ use crate::face::{self, FaceState};
 use crate::generation;
 use crate::memory::db;
 use crate::memory::MemoryStore;
+use tauri::Manager;
 use crate::perception::PerceptionState;
 use crate::persona::prompt::{render, PromptContext};
 use crate::persona::{eval::DialogueBackend, Persona};
@@ -343,8 +344,9 @@ fn agent_pipeline(
                     // gates on the first non-whitespace char: `{` mutes the
                     // whole stream (nothing reaches the UI) and triggers one
                     // non-streamed prose retry.
-                    let mut raw3 = String::new();
-                    let mut json_out = false;
+                    // Deferred init: both match arms assign before any read.
+                    let raw3;
+                    let json_out;
                     match on_delta.as_deref_mut() {
                         Some(cb) => {
                             let verdict = std::cell::RefCell::new(None::<bool>); // None=undecided, Some(true)=json
@@ -695,88 +697,116 @@ pub fn spawn_proactive(app: tauri::AppHandle) {
 }
 
 // ---------------------------------------------------------------- commands
+//
+// MAIN-THREAD RULE (2026-11-20 freeze regression): every chat command runs
+// its FULL pipeline — up to 3 cloud-model rounds (deepseek ≈8-12s each), the
+// memory LIKE scan, and MCP tool execution (disk_report ≈13s) — inside
+// `spawn_blocking`. Sync `#[tauri::command]` fns execute on the MAIN thread
+// in Tauri 2, which froze the window/animation for 20-45s per message.
+// Commands stay `async fn` with a 'static closure: states are fetched via
+// `app.state::<T>()` inside the closure (the borrow lives only within it).
+// Deliberately NOT moved: calendar commands — EventKit must stay on the
+// main thread (TCC ownership, calendar.rs).
 
 #[tauri::command]
-pub fn dialogue_chat(
-    store: tauri::State<'_, MemoryStore>,
-    card: tauri::State<'_, Persona>,
-    calendar: tauri::State<'_, crate::calendar::CalendarState>,
-    agent: tauri::State<'_, crate::mcp_admin::AgentState>,
+pub async fn dialogue_chat(
+    app: tauri::AppHandle,
     user_text: String,
     session_id: Option<String>,
     raining: Option<bool>,
 ) -> Result<DialogueOutcome, String> {
-    let session = session_id.unwrap_or_else(|| "default".to_string());
-    let hour = chrono::Local::now().hour() as u32;
-    let mut backend = crate::persona::backend().map_err(|e| e.to_string())?;
-    let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
-    crate::onboarding::ensure_not_minor(&conn)?;
-    let mut kit = crate::mcp_admin::build_agent_kit(&conn, agent.inner(), &user_text);
-    chat_turn_with_kit(
-        &conn,
-        backend.as_mut(),
-        &card,
-        &session,
-        &user_text,
-        hour,
-        raining.unwrap_or(false),
-        calendar.inner().source().access(),
-        &mut kit,
-    )
-    .map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = app.state::<MemoryStore>();
+        let card = app.state::<Persona>();
+        let calendar = app.state::<crate::calendar::CalendarState>();
+        let agent = app.state::<crate::mcp_admin::AgentState>();
+        let session = session_id.unwrap_or_else(|| "default".to_string());
+        let hour = chrono::Local::now().hour() as u32;
+        let mut backend = crate::persona::backend().map_err(|e| e.to_string())?;
+        let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+        crate::onboarding::ensure_not_minor(&conn)?;
+        let mut kit = crate::mcp_admin::build_agent_kit(&conn, agent.inner(), &user_text);
+        chat_turn_with_kit(
+            &conn,
+            backend.as_mut(),
+            &card,
+            &session,
+            &user_text,
+            hour,
+            raining.unwrap_or(false),
+            calendar.inner().source().access(),
+            &mut kit,
+        )
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Streaming chat command: deltas go to the frontend via the IPC channel
 /// while the model is still generating; the final outcome (filter report,
 /// fallback flag) returns once the reply is complete. The full reply is ALSO
 /// in the outcome, so a client that ignores the channel still works.
+///
+/// The whole pipeline runs in `spawn_blocking` — see the MAIN-THREAD RULE
+/// above (the stream itself is channel pushes, safe from a worker thread).
 #[tauri::command]
-pub fn dialogue_chat_stream(
-    store: tauri::State<'_, MemoryStore>,
-    card: tauri::State<'_, Persona>,
-    calendar: tauri::State<'_, crate::calendar::CalendarState>,
-    agent: tauri::State<'_, crate::mcp_admin::AgentState>,
+pub async fn dialogue_chat_stream(
+    app: tauri::AppHandle,
     user_text: String,
     session_id: Option<String>,
     raining: Option<bool>,
     on_delta: tauri::ipc::Channel<serde_json::Value>,
 ) -> Result<DialogueOutcome, String> {
-    let session = session_id.unwrap_or_else(|| "default".to_string());
-    let hour = chrono::Local::now().hour() as u32;
-    let mut backend = crate::persona::backend().map_err(|e| e.to_string())?;
-    let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
-    crate::onboarding::ensure_not_minor(&conn)?;
-    let mut kit = crate::mcp_admin::build_agent_kit(&conn, agent.inner(), &user_text);
-    let mut emit = |delta: &str| {
-        let _ = on_delta.send(serde_json::json!({ "delta": delta }));
-    };
-    chat_turn_streaming_with_kit(
-        &conn,
-        backend.as_mut(),
-        &card,
-        &session,
-        &user_text,
-        hour,
-        raining.unwrap_or(false),
-        calendar.inner().source().access(),
-        &mut kit,
-        &mut emit,
-    )
-    .map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = app.state::<MemoryStore>();
+        let card = app.state::<Persona>();
+        let calendar = app.state::<crate::calendar::CalendarState>();
+        let agent = app.state::<crate::mcp_admin::AgentState>();
+        let session = session_id.unwrap_or_else(|| "default".to_string());
+        let hour = chrono::Local::now().hour() as u32;
+        let mut backend = crate::persona::backend().map_err(|e| e.to_string())?;
+        let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+        crate::onboarding::ensure_not_minor(&conn)?;
+        let mut kit = crate::mcp_admin::build_agent_kit(&conn, agent.inner(), &user_text);
+        let mut emit = |delta: &str| {
+            let _ = on_delta.send(serde_json::json!({ "delta": delta }));
+        };
+        chat_turn_streaming_with_kit(
+            &conn,
+            backend.as_mut(),
+            &card,
+            &session,
+            &user_text,
+            hour,
+            raining.unwrap_or(false),
+            calendar.inner().source().access(),
+            &mut kit,
+            &mut emit,
+        )
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Manual proactive trigger (frontend button / testing). Bypasses the daily
 /// quota on purpose: an explicit user request is not proactivity.
+///
+/// Also a full model round → spawn_blocking (MAIN-THREAD RULE above).
 #[tauri::command]
-pub fn dialogue_proactive_now(
-    store: tauri::State<'_, MemoryStore>,
-    card: tauri::State<'_, Persona>,
-) -> Result<Option<String>, String> {
-    let hour = chrono::Local::now().hour() as u32;
-    let mut backend = crate::persona::backend().map_err(|e| e.to_string())?;
-    let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
-    crate::onboarding::ensure_not_minor(&conn)?;
-    proactive_text(&conn, backend.as_mut(), &card, hour, false).map_err(|e| e.to_string())
+pub async fn dialogue_proactive_now(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = app.state::<MemoryStore>();
+        let card = app.state::<Persona>();
+        let hour = chrono::Local::now().hour() as u32;
+        let mut backend = crate::persona::backend().map_err(|e| e.to_string())?;
+        let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+        crate::onboarding::ensure_not_minor(&conn)?;
+        proactive_text(&conn, backend.as_mut(), &card, hour, false).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Startup replay for the chat page: the recent dialogue stream as flat

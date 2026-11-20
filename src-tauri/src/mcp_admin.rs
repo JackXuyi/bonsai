@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use rusqlite::Connection;
 use serde::Serialize;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 use crate::agent_tools::{
     clip_chars, mask_secrets, ApprovalDecision, ApprovalGate, ToolCall, ToolDescriptor, ToolOutput,
@@ -849,40 +849,47 @@ fn delete_server(conn: &Connection, id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Toggle runs a LIVE connect (up to CONNECT_TIMEOUT ≈10s on a dead server)
+/// — spawn_blocking per the MAIN-THREAD RULE in dialogue.rs: a sync command
+/// would freeze the whole app while the handshake runs.
 #[tauri::command]
-pub fn mcp_server_toggle(
-    store: tauri::State<'_, crate::memory::MemoryStore>,
-    agent: tauri::State<'_, AgentState>,
-    id: String,
-    enable: bool,
-) -> Result<(), String> {
-    let conn = now_conn(&store)?;
-    if !enable {
-        conn.execute("UPDATE mcp_servers SET enabled=0 WHERE id=?1", [&id])
+pub async fn mcp_server_toggle(app: tauri::AppHandle, id: String, enable: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = app.state::<crate::memory::MemoryStore>();
+        let agent = app.state::<AgentState>();
+        let conn = now_conn(&store)?;
+        if !enable {
+            conn.execute("UPDATE mcp_servers SET enabled=0 WHERE id=?1", [&id])
+                .map_err(|e| e.to_string())?;
+            agent.manager.remove(&id);
+            return Ok(());
+        }
+        let row = row_from(&conn, &id)?;
+        let (client, _) = connect_and_cache(&conn, &row)?;
+        conn.execute("UPDATE mcp_servers SET enabled=1 WHERE id=?1", [&id])
             .map_err(|e| e.to_string())?;
-        agent.manager.remove(&id);
-        return Ok(());
-    }
-    let row = row_from(&conn, &id)?;
-    let (client, _) = connect_and_cache(&conn, &row)?;
-    conn.execute("UPDATE mcp_servers SET enabled=1 WHERE id=?1", [&id])
-        .map_err(|e| e.to_string())?;
-    agent.manager.insert(id, client);
-    Ok(())
+        agent.manager.insert(id, client);
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
-/// Connection test: connect + list, never flips `enabled`.
+/// Connection test: connect + list, never flips `enabled`. Live connect
+/// (≈10s timeout) → spawn_blocking (MAIN-THREAD RULE in dialogue.rs).
 #[tauri::command]
-pub fn mcp_server_test(
-    store: tauri::State<'_, crate::memory::MemoryStore>,
-    id: String,
-) -> Result<usize, String> {
-    let conn = now_conn(&store)?;
-    let row = row_from(&conn, &id)?;
-    let (client, descriptors) = connect_and_cache(&conn, &row)?;
-    let count = descriptors.len();
-    drop(client); // explicit shutdown — a test must not leave a process behind
-    Ok(count)
+pub async fn mcp_server_test(app: tauri::AppHandle, id: String) -> Result<usize, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = app.state::<crate::memory::MemoryStore>();
+        let conn = now_conn(&store)?;
+        let row = row_from(&conn, &id)?;
+        let (client, descriptors) = connect_and_cache(&conn, &row)?;
+        let count = descriptors.len();
+        drop(client); // explicit shutdown — a test must not leave a process behind
+        Ok(count)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Cached tool list (5-min TTL semantics: caller may refresh via toggle).
