@@ -57,3 +57,32 @@ ALTER TABLE tool_calls ADD COLUMN remote         INTEGER DEFAULT 0;
 - [x] grep 确认：headers 明文只存在于写入路径，读取返回脱敏值
 - [ ] 真机：设置页添加 stdio server → 启用 → 工具清单出现
 - [ ] 真机：重启后 enabled/tool_cache 持久
+
+## 5. 本机自动发现（mcp_discover.rs，2026-11-20）
+
+MCP 协议没有本地服务发现标准：stdio 服务没有配置就无法发现（命令 + 魔法参数如
+`prune mcp` 从二进制推断不出来），端口探测 / mDNS 不做。因此「自动发现」=
+**扫描本机各客户端配置文件 + 通用 manifest sweep → 候选一键导入**。
+
+- 配置源（硬编码，按优先级）：Cursor `~/.cursor/mcp.json`、Claude Desktop
+  `~/Library/Application Support/Claude/claude_desktop_config.json`、Claude Code
+  `~/.claude.json`（只取全局 `mcpServers`）、VS Code / Insiders `…/Code/User/mcp.json`
+  （`mcpServers` 与 `servers` 两种键都认）、Windsurf `~/.codeium/windsurf/mcp_config.json`。
+- 通用 sweep：`~/Library/Application Support/*/mcp*.json` 与 `~/.config/*/mcp*.json`
+  一层深度、目录上限 200；known source 已覆盖的目录跳过。
+- 解析：`command`+`args`+`env` → stdio，`url`+`headers` → http；支持
+  `${env:NAME}` / `${NAME}` / `~/` 展开（缺变量保留字面量，不静默置空）。
+  无法识别的条目跳过，单个坏文件不中断整个扫描。
+- 去重签名：stdio = `stdio|{command}|{args.join(\u001f)}`，http = `http|{url}`，
+  与 `mcp_admin::row_signature` 逐字节一致；同签名多来源保留首个（known source 标签更准）。
+- 命令：`mcp_discover_scan`（候选 + imported 标记，env/headers 脱敏）、
+  `mcp_discover_import(signatures)`（按签名**后端重扫落盘**导入，明文不经过前端
+  IPC；导入行 `enabled=0`，RK-04 不破）。启用仍走手动 toggle + connect 验证。
+- UI：工具页「扫描本机」→ 候选弹窗（已导入的禁选）→ 勾选导入。
+
+验收：
+
+- [x] cargo test 290 全绿（新增 6：cursor/http 解析、坏条目跳过、变量展开、
+      签名与 row_signature 一致、known+manifest 扫描去重、导入停用与跳重）
+- [x] vitest 75 全绿（新增 1：扫描弹窗渲染 + 按 signature 导入 + 重扫刷新）
+- [ ] 真机：本机 Cursor 5 个 server 扫出 → 导入 → prune 启用成功
