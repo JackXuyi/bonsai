@@ -164,8 +164,9 @@ pub struct CandidatesReply {
 
 /// Extract the first balanced JSON object from a reply. Local 2B models
 /// wrap JSON in prose or code fences often enough that a bare
-/// `serde_json::from_str` is too brittle.
-fn json_object_slice(reply: &str) -> Option<&str> {
+/// `serde_json::from_str` is too brittle. crate-visible so the dialogue
+/// pipeline can tell "prose" from "regurgitated JSON" before trusting it.
+pub(crate) fn json_object_slice(reply: &str) -> Option<&str> {
     let start = reply.find('{')?;
     let bytes = reply.as_bytes();
     let mut depth = 0i32;

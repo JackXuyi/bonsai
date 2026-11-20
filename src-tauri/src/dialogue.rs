@@ -122,6 +122,21 @@ fn env_prefix(conn: &Connection) -> String {
 
 // ---------------------------------------------------------------- agent pipeline
 
+/// Natural-language retry used whenever the model fumbles the JSON protocol:
+/// one more round with the catalog stripped, so the turn still lands as
+/// prose instead of leaking protocol output into the chat.
+fn prose_retry(
+    backend: &mut dyn DialogueBackend,
+    system: &str,
+    history: &[crate::persona::eval::Turn],
+    user_text: &str,
+) -> String {
+    let sys = format!(
+        "{system}\n\n（这个问题没有匹配到任何可用工具，请直接用自然语言回答用户；不要输出 JSON，不要提工具。）"
+    );
+    backend.reply(&sys, history, user_text, CHAT_TEMPERATURE)
+}
+
 /// The three-stage progressive disclosure pipeline (spec-s3 §3). Activated
 /// ONLY when the kit has capabilities — with none, the turn is untouched
 /// (legacy behavior, all existing tests ride that path).
@@ -139,12 +154,14 @@ fn agent_pipeline(
     user_text: &str,
     mut on_delta: Option<&mut dyn FnMut(&str)>,
 ) -> (String, Option<String>, bool) {
-    use crate::agent_tools::{name_catalog, parse_candidates, parse_tool_decision, ToolDecision, ToolKind};
+    use crate::agent_tools::{json_object_slice, name_catalog, parse_candidates, parse_tool_decision, ToolDecision, ToolKind};
 
     // The `DialogueOutcome.tool` label, prefixed by the tool's kind so the
     // frontend can tell MCP calls (`mcp:x`) from built-ins (`builtin:x`).
+    // Looks in the FULL catalog: the ≤20 prompt cap must not unlabel a
+    // legitimate tail-tool call.
     let tool_label = |kit: &crate::mcp_admin::AgentKit, name: &str| -> Option<String> {
-        kit.catalog()
+        kit.catalog_all()
             .into_iter()
             .find(|d| d.name == name)
             .map(|d| format!("{}:{}", d.kind.as_str(), name))
@@ -167,13 +184,17 @@ fn agent_pipeline(
         return (raw1, None, false);
     };
 
-    // Whitelist + cap (silent degrade, spec-s3 §3).
+    // Whitelist + cap (silent degrade, spec-s3 §3). The whitelist checks the
+    // FULL provider catalog — the ≤20 prompt display cap (spec-s3: 字典序稳定
+    // 截断) must not execution-bar the tail tools: on this machine 39 cached
+    // tools means 19 names the prompt never shows but the whitelist must.
+    let full_catalog = kit.catalog_all();
     let mut selected: Vec<crate::agent_tools::ToolDescriptor> = Vec::new();
     for c in cands {
         if selected.len() >= 5 {
             break;
         }
-        let Some(d) = catalog.iter().find(|d| d.name == c) else {
+        let Some(d) = full_catalog.iter().find(|d| d.name == c) else {
             continue; // unknown name → dropped
         };
         if !selected.iter().any(|s| s.name == d.name) {
@@ -184,13 +205,8 @@ fn agent_pipeline(
         kit.trace("level1:no-valid-candidate".into());
         // The model *wanted* tools but named none that exist (hallucinated
         // names or a since-disabled server). Never leak the raw candidates
-        // JSON into the chat (2026-11-20 screenshot regression): re-ask once
-        // with the catalog stripped so the turn still lands as prose.
-        let sys_retry = format!(
-            "{system}\n\n（这个问题没有匹配到任何可用工具，请直接用自然语言回答用户；不要输出 JSON，不要提工具。）"
-        );
-        let raw_retry = backend.reply(&sys_retry, history, user_text, CHAT_TEMPERATURE);
-        return (raw_retry, None, false);
+        // JSON into the chat (2026-11-20 screenshot regression).
+        return (prose_retry(backend, system, history, user_text), None, false);
     }
     kit.trace(format!(
         "level1:{}",
@@ -240,6 +256,14 @@ fn agent_pipeline(
     }
 
     match parse_tool_decision(&raw2) {
+        // Prose answer (skill body sufficed, or the model declined) — UNLESS
+        // the "prose" is itself JSON: a 2B model sometimes regurgitates the
+        // level-0 candidates format here instead of a decision, and shipping
+        // it verbatim is exactly the 2026-11-20 leak. Re-ask in prose.
+        Err(_) if json_object_slice(&raw2).is_some() => {
+            kit.trace("level2:json-not-prose".into());
+            (prose_retry(backend, system, history, user_text), None, false)
+        }
         // Prose answer (skill body sufficed, or the model declined).
         Err(_) => {
             for d in used.iter().filter(|d| d.kind == ToolKind::Skill) {
@@ -1273,5 +1297,77 @@ mod tests {
         assert_eq!(out.tool, None);
         assert!(!out.reply.contains("candidates"));
         assert!(kit.trace_ref().contains("level1:no-valid-candidate"));
+    }
+
+    /// Second screenshot regression (2026-11-20): the model passed level-0
+    /// fine (all names real) but regurgitated the candidates JSON in pass 2
+    /// instead of a tool decision. The Err fallback must not ship JSON as
+    /// "prose" — re-ask and land as natural language.
+    #[test]
+    fn pass2_json_regurgitation_never_ships_as_prose() {
+        let conn = mem();
+        let c = card();
+        let mut kit = weather_kit();
+        let mut backend = SeqBackend::new(&[
+            r#"{"candidates": ["weather"]}"#,
+            r#"{"candidates": ["getHardwareInfo", "getBatteryInfo", "getCpuUsage"]}"#,
+            "设备状态这块我手头的工具查不了，你可以在系统设置里看。",
+        ]);
+        let out = chat_turn_with_kit(
+            &conn, &mut backend, &c, "s1", "当前设备的状态", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit,
+        )
+        .unwrap();
+        assert_eq!(out.reply, "设备状态这块我手头的工具查不了，你可以在系统设置里看。");
+        assert_eq!(out.tool, None);
+        assert!(kit.trace_ref().contains("level2:json-not-prose"));
+    }
+
+    /// The ≤20 prompt cap must not execution-bar tail tools: with 25 tools
+    /// cached, tool #25 never fits the level-0 names, but a model that names
+    /// it anyway (history, prior turn's catalog) must still be whitelisted.
+    #[test]
+    fn whitelist_checks_full_catalog_not_the_prompt_cap() {
+        let conn = mem();
+        let c = card();
+        let providers: Vec<Box<dyn crate::agent_tools::ToolProvider>> = (0..25)
+            .map(|i| {
+                let name = format!("tool{i:02}");
+                Box::new(crate::mcp::MockMcpProvider {
+                    tools: vec![crate::agent_tools::ToolDescriptor {
+                        name: name.clone(),
+                        summary: "测试工具".into(),
+                        detail: "{}".into(),
+                        kind: crate::agent_tools::ToolKind::Mcp,
+                        remote: false,
+                    }],
+                    replies: [(name, "tail tool 结果".to_string())].into_iter().collect(),
+                    fail_for: vec![],
+                }) as Box<dyn crate::agent_tools::ToolProvider>
+            })
+            .collect();
+        let mut kit = crate::mcp_admin::AgentKit {
+            providers,
+            gate: Box::new(crate::agent_tools::AutoAllowGate),
+            prompt_trace: std::sync::Mutex::new(Vec::new()),
+        };
+        assert_eq!(kit.catalog().len(), 20);
+        assert_eq!(kit.catalog_all().len(), 25);
+        let mut backend = SeqBackend::new(&[
+            r#"{"candidates": ["tool24"]}"#,
+            r#"{"tool": "tool24", "args": {}}"#,
+            "tail tool 回答。",
+        ]);
+        let out = chat_turn_with_kit(
+            &conn, &mut backend, &c, "s1", "用最后一个工具", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit,
+        )
+        .unwrap();
+        assert_eq!(out.reply, "tail tool 回答。");
+        assert_eq!(out.tool.as_deref(), Some("mcp:tool24"));
+        let records = db::tool_call_records(&conn, 5).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].tool, "mcp");
+        assert_eq!(records[0].action, "tool24");
     }
 }

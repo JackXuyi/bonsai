@@ -350,13 +350,22 @@ impl AgentKit {
         !self.providers.is_empty()
     }
 
-    /// Flat descriptor catalog (≤20, stable order) for the level-0 prompt.
-    pub fn catalog(&self) -> Vec<ToolDescriptor> {
+    /// Full descriptor catalog, sorted, UNtruncated. The whitelist / label
+    /// lookups use this: the ≤20 display cap must not execution-bar tail
+    /// tools (on a machine with 39 cached tools, 19 names never fit the
+    /// level-0 prompt but must stay callable).
+    pub fn catalog_all(&self) -> Vec<ToolDescriptor> {
         let mut all = Vec::new();
         for p in &self.providers {
             all.extend(p.descriptors());
         }
         all.sort_by(|a, b| a.name.cmp(&b.name));
+        all
+    }
+
+    /// Flat descriptor catalog (≤20, stable order) for the level-0 prompt.
+    pub fn catalog(&self) -> Vec<ToolDescriptor> {
+        let mut all = self.catalog_all();
         all.truncate(20);
         all
     }
