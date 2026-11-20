@@ -4,7 +4,7 @@
 |---|---|
 | 版本 | v1.0 |
 | 日期 | 2026-11-19 |
-| 状态 | 初稿，待评审 |
+| 状态 | v1.1：P3-4（MCP/Skill）已落地、G-07/G-11/G-12 状态回填（2026-11-20）；其余仍待评审 |
 | 上游输入 | docs/zh/research-report.md（产品定位）、plan-calendar.md（P2 规划）、代码实况（commit 9bdd2ed）、外部调研（2026-11-19 联网检索） |
 | 定位约束 | 桌面养成系 AI 搭档：先干活，才谈得上陪你；本地 LLM 优先；助手非伴侣；合规红线不变 |
 
@@ -63,7 +63,7 @@
 |---|---|---|
 | 对话 | 本地 Ollama sidecar（qwen3.5:2b，GGUF 本地导入）、流式输出、危机词拦截、未成年门禁 | C1（部分）、C6（入口） |
 | 人格 | persona.json 三层（宪法/表达/状态）、disagreement_policy 反谄媚、prompt 四档亲疏 | C3 个性化（独有深度） |
-| 记忆 | SQLite 事件/事实/偏好/边界（schema v7）、抽取、夜间 consolidate、预测-验证循环（48h 反馈窗） | C3（自建，无向量检索） |
+| 记忆 | SQLite 事件/事实/偏好/边界（schema v8）、抽取、夜间 consolidate、预测-验证循环（48h 反馈窗） | C3（自建，无向量检索） |
 | 感知 | L1：前台 App、idle、剪贴板（≤1000 字符）、下载目录；逐项授权默认关闭、粗标签、不抓窗口标题 | C4 感知（部分） |
 | 决策 | should_speak（含 in_meeting 闭嘴、日历联动） | C4 决策 |
 | 工具 | 日历只读（TTL 5min 缓存、提醒 lane 四道闸、22–08 静默）、tool_calls 计数 | C2、C6（最小集） |
@@ -86,12 +86,12 @@
 | G-04 | 邮件工具 | 无 | 改造 | 原规划 T5；只读摘要先做，发送必须 Ask-first | P3-1 |
 | G-05 | 文件系统操作 | 无（仅读下载目录元数据） | 改造 | 只读搜索/摘要先行；写入仅限用户指定目录且二次确认 | P3-2 |
 | G-06 | Web 检索 | 无 | 改造 | 本地 LLM 总结网页/搜索结果；无网时明示不可用 | P3-3 |
-| G-07 | MCP 客户端 | 无 | 采纳 | 行业标准工具协议；本地 stdio MCP 服务器不影响隐私定位 | P3-4 |
+| G-07 | MCP 客户端 | 无 → **已落地** | 采纳 | 行业标准工具协议；本地 stdio MCP 服务器不影响隐私定位 | P3-4（2026-11-20 实施，stdio + Streamable HTTP） |
 | G-08 | 定时/常驻任务 | 仅夜间 consolidate、提醒 lane | 改造 | 把 consolidate 模式推广为通用 job 表（cron 语义），为 C5 铺路 | P3-5 |
 | G-09 | 轻量任务模式（目标→步骤→执行→验证） | 无（单轮对话+规则路由） | 改造 | 2B 模型跑不稳自由 ReAct；改为「结构化任务卡」：LLM 只填字段，执行与重试由 Rust 引擎控制 | P4-1 |
 | G-10 | 工具权限分级 + Ask-first 审批 | 隐性（日历只读无需审批） | 采纳 | 工具增多后必须显式化：只读/询问/禁止三档 + 审批 UI | P4-2 |
-| G-11 | 审计轨迹（工具调用日志） | tool_calls 仅计数 | 改造 | 扩为「参数摘要+结果状态+时间」审计表，UI 可查 | P4-2 |
-| G-12 | 提示注入 / 记忆投毒防御 | 无 | 采纳 | G-06/G-07 引入外部内容后必做；策略：外部内容打标签、永不直接入库为事实 | P4-3 |
+| G-11 | 审计轨迹（工具调用日志） | tool_calls 仅计数 → **最小版已扩** | 改造 | 扩为「参数摘要+结果状态+时间」审计表，UI 可查 | P4-2（最小版随 P3-4 落地；权限分级仍在 P4-2） |
+| G-12 | 提示注入 / 记忆投毒防御 | 无 → **最小版已落地** | 采纳 | G-06/G-07 引入外部内容后必做；策略：外部内容打标签、永不直接入库为事实 | P4-3（skill 注入黑名单 + 工具结果只以摘要进 prompt、原文不入库不抽取，随 P3-4 落地；untrusted 标签随 P3-3） |
 | G-13 | 向量检索 / RAG | 关键词+规则匹配 | 缓做 | 触发条件：事实库 >5k 条或检索召回投诉；本地嵌入模型可后补，接口先留位 | P5 视触发 |
 | G-14 | Computer Use（截屏点击） | 无 | 缓做 | 2B 模型不可靠（行业长任务通过率仅约 20%）；触发条件：默认模型 ≥7B 多模态且实测通过率可接受 | 远期 |
 | G-15 | 浏览器自动化 | 无 | 缓做 | 依赖 G-14 之外的登录态与稳定性方案；先以「打开 URL + 读页面」半自动替代 | 远期 |
@@ -110,7 +110,7 @@
 |---|---|---|---|---|
 | P2-3 | 语音输入与播报 | 端侧 ASR（whisper.cpp 或系统能力）→ 走现有 chat_turn；TTS 用系统语音合成；逐项授权默认关闭 | Given 授权开启，When 按住快捷键说话，Then 文本进入对话且可用开关关闭；Given 未授权，Then 无任何音频采集 | sidecar 就绪 |
 | P2-4 | 屏幕感知 L2（改造） | 窗口标题白名单抓取（仅用户勾选的 App）+ 用户主动「教」盆栽的名词；不截屏、不做视觉理解 | Given 用户勾选某 App，When 前台切换，Then 仅该 App 粗标签入事件；Given 未勾选，Then 事件无窗口信息 | perception.rs 扩展 |
-| P2-5 | 数据可携带 | 一键导出：SQLite 全量 + persona.json + 设置 → 单文件 zip（含 schema 版本）；导入校验 schema 后合并/替换二选一 | Given 导出，When 换机导入，Then 对话/记忆/成长/边界全部恢复且人格不变；Given schema 不匹配，Then 明确报错不写入 | schema v7 稳定 |
+| P2-5 | 数据可携带 | 一键导出：SQLite 全量 + persona.json + 设置 → 单文件 zip（含 schema 版本）；导入校验 schema 后合并/替换二选一 | Given 导出，When 换机导入，Then 对话/记忆/成长/边界全部恢复且人格不变；Given schema 不匹配，Then 明确报错不写入 | schema v8 稳定 |
 | P2-6 | 打包发布实测 | sidecar + ollama-runtime 进 bundle；签名与公证流程 | Given 干净机器安装 dmg，When 首启，Then 本地模型可离线问答（断网验证） | 229MB runtime 裁剪评估 |
 
 ### P3：工具与生态扩展（「能干活」主线）
@@ -120,8 +120,8 @@
 | P3-1 | 邮件只读 + 摘要 | MailKit/系统框架只读；摘要走本地 LLM；发送功能仅出「草稿」不发送 | Given 授权，When 用户问「今天有什么邮件」，Then 摘要准确且原文不出机器；Given 未授权，Then Err(mail_denied)（对齐日历 TCC 教训） | 日历 TCC 验收经验 |
 | P3-2 | 文件操作（分级） | T0：指定目录内搜索+读取+摘要；T1：写文件（仅用户显式给的目录+二次确认）；禁止移动/删除 | Given T0 授权目录，When 查询，Then 仅返回该目录内容；Given 删除请求，Then 永远拒绝 | P4-2 权限框架可并行设计 |
 | P3-3 | Web 检索 | 系统默认浏览器打开 + 本地抓取（HTTP 客户端）→ 本地 LLM 总结；外部内容强制打 untrusted 标签 | Given 断网，When 触发搜索，Then 明示「当前离线」不虚构；Given 抓取到网页，When 总结，Then 引用含 URL 可溯源 | G-12 同期落地 |
-| P3-4 | MCP 客户端（stdio） | 实现 MCP client 最小集（tools/list + tools/call）；MCP 工具默认「询问档」；与 tools.rs 规则路由对接 | Given 配置一个 stdio MCP 服务器，When 对话命中其工具描述，Then 可经审批调用并计入 tool_calls | P4-2 审批框架先行 |
-| P3-5 | 常驻任务框架 | job 表（schema v8）：name/cron/last_run/status；把 consolidate、日报、提醒 lane 迁入统一调度 | Given 新增 job，When 到达计划时间，Then 执行且失败有重试上限（≤3）与状态记录 | 现有 scheduler.rs |
+| P3-4 | MCP 客户端（stdio + HTTP） | ✅ **已实施（2026-11-20）**：rmcp 官方 SDK 双传输（stdio 子进程 / Streamable HTTP）、schema v8 `mcp_servers`、三级渐进注入（名称→候选→详情）、`ApprovalGate`（默认 auto；ask 弹卡 30s 超时拒绝）、tool_calls 审计（脱敏参数摘要 + result_status + prompt_trace）、Skill 包提示注入同期落地 | 见 docs/zh/plan-agent-mcp-skill.md §8；真机项待验（MCP 实连 / 2B 误触发率） | P4-2 审批框架的**钩子**已先行（分级仍在 P4-2） |
+| P3-5 | 常驻任务框架 | job 表（schema v9 —— v8 已被 mcp_servers 占用）：name/cron/last_run/status；把 consolidate、日报、提醒 lane 迁入统一调度 | Given 新增 job，When 到达计划时间，Then 执行且失败有重试上限（≤3）与状态记录 | 现有 scheduler.rs |
 | P3-6 | 打包发布 | | | （合并入 P2-6，此处占位保持编号连续） |
 
 ### P4：从「会答」到「会办」——规划与治理
