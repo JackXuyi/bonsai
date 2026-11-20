@@ -26,6 +26,12 @@ const approvalGetMock = vi.fn().mockResolvedValue<"auto" | "ask">("auto");
 const approvalSetMock = vi.fn().mockResolvedValue(undefined);
 const scanMock = vi.fn().mockResolvedValue<DiscoveredServer[]>([]);
 const importMock = vi.fn().mockResolvedValue({ inserted: 0, skipped: 0 });
+const toolsMock = vi.fn().mockResolvedValue<
+  { name: string; summary: string; detail: string; kind: "mcp" | "skill" | "builtin"; remote: boolean }[]
+>([]);
+const builtinMock = vi.fn().mockResolvedValue<
+  { name: string; summary: string; detail: string; kind: "mcp" | "skill" | "builtin"; remote: boolean }[]
+>([]);
 
 vi.mock("@/lib/commands", async (importOriginal) => {
   const orig = await importOriginal<typeof import("@/lib/commands")>();
@@ -36,7 +42,8 @@ vi.mock("@/lib/commands", async (importOriginal) => {
     mcpServerSave: (...args: unknown[]) => saveMock(...args),
     mcpServerRemove: vi.fn().mockResolvedValue(undefined),
     mcpServerTest: vi.fn().mockResolvedValue(3),
-    mcpServerTools: vi.fn().mockResolvedValue([]),
+    mcpServerTools: (...args: unknown[]) => toolsMock(...args),
+    builtinToolsList: (...args: unknown[]) => builtinMock(...args),
     skillList: (...args: unknown[]) => skillListMock(...args),
     skillToggle: vi.fn().mockResolvedValue(undefined),
     toolCallRecords: (...args: unknown[]) => recordsMock(...args),
@@ -55,6 +62,13 @@ beforeEach(() => {
   approvalSetMock.mockClear();
   scanMock.mockClear().mockResolvedValue<DiscoveredServer[]>([]);
   importMock.mockClear().mockResolvedValue({ inserted: 0, skipped: 0 });
+  toolsMock.mockClear().mockResolvedValue([
+    { name: "read_file", summary: "读文件", detail: "{}", kind: "mcp", remote: false },
+    { name: "list_dir", summary: "列目录", detail: "{}", kind: "mcp", remote: false },
+  ]);
+  builtinMock.mockClear().mockResolvedValue([
+    { name: "memory_search", summary: "按日期或关键词翻找过往聊天记录与记忆（本地）", detail: "{}", kind: "builtin", remote: false },
+  ]);
 });
 
 describe("McpSection", () => {
@@ -150,6 +164,35 @@ describe("McpSection", () => {
     // 导入成功后重扫刷新 imported 标记
     await waitFor(() => expect(scanMock).toHaveBeenCalledTimes(2));
     expect(screen.getByText(/已导入 1 条/)).toBeTruthy();
+  });
+
+  it("expanding a server row lists its cached tools", async () => {
+    render(<McpSection />);
+    await waitFor(() => screen.getByText("文件检索"));
+    // 收起态不显示工具
+    expect(screen.queryByTestId("tools-of-srv1")).toBeNull();
+    // 点行头展开 → 懒拉工具清单并渲染（字母序）
+    fireEvent.click(screen.getByText("文件检索"));
+    await waitFor(() => expect(screen.getByTestId("tools-of-srv1")).toBeTruthy());
+    expect(toolsMock).toHaveBeenCalledWith("srv1");
+    expect(screen.getByText("read_file")).toBeTruthy();
+    expect(screen.getByText("读文件")).toBeTruthy();
+    // 再点一次收起
+    fireEvent.click(screen.getByText("文件检索"));
+    await waitFor(() => expect(screen.queryByTestId("tools-of-srv1")).toBeNull());
+    // 缓存复用：收起再展开不再发第二次请求
+    fireEvent.click(screen.getByText("文件检索"));
+    await waitFor(() => expect(screen.getByTestId("tools-of-srv1")).toBeTruthy());
+    expect(toolsMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders the built-in tools card from the registry", async () => {
+    render(<McpSection />);
+    await waitFor(() => expect(screen.getByTestId("builtin-tools-card")).toBeTruthy());
+    expect(screen.getByTestId("builtin-row")).toBeTruthy();
+    expect(screen.getByText("memory_search")).toBeTruthy();
+    expect(screen.getByText(/自动挂载/)).toBeTruthy();
+    expect(builtinMock).toHaveBeenCalled();
   });
 });
 

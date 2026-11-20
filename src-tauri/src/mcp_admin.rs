@@ -899,6 +899,13 @@ pub fn mcp_server_tools(
         .ok_or_else(|| "no_tool_cache".into())
 }
 
+/// Built-in tools for the settings page「内置工具」module. Reads the shared
+/// registry (agent_tools::builtin_tools), no DB, no connection.
+#[tauri::command]
+pub fn builtin_tools_list() -> Result<Vec<ToolDescriptor>, String> {
+    Ok(crate::agent_tools::builtin_tools())
+}
+
 // ---- skills
 
 #[derive(Debug, Serialize)]

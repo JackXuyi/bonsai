@@ -6,6 +6,7 @@ import { useCallback, useEffect, useState } from "react";
 import {
   agentApprovalGet,
   agentApprovalSet,
+  builtinToolsList,
   humanizeAgentError,
   mcpDiscoverImport,
   mcpDiscoverScan,
@@ -14,8 +15,9 @@ import {
   mcpServerSave,
   mcpServerTest,
   mcpServerToggle,
+  mcpServerTools,
 } from "@/lib/commands";
-import type { DiscoveredServer, McpServerRow } from "@/lib/types";
+import type { DiscoveredServer, McpServerRow, ToolDescriptor } from "@/lib/types";
 
 /** null = 关闭；"new" = 添加；id = 编辑 */
 type FormState = null | "new" | string;
@@ -27,6 +29,11 @@ export function McpSection() {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [confirmId, setConfirmId] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
+  /** 展开时懒加载的工具清单缓存（id → descriptors），一次拉取终身复用。 */
+  const [tools, setTools] = useState<Record<string, ToolDescriptor[]>>({});
+  const [toolsLoading, setToolsLoading] = useState(false);
+  /** 内置工具（随版本内置，无启停）。 */
+  const [builtins, setBuiltins] = useState<ToolDescriptor[]>([]);
   const [approval, setApproval] = useState<"auto" | "ask">("auto");
   // 本机扫描（spec-s2 §6）
   const [scanOpen, setScanOpen] = useState(false);
@@ -50,7 +57,23 @@ export function McpSection() {
     void agentApprovalGet()
       .then(setApproval)
       .catch(() => setApproval("auto"));
+    void builtinToolsList()
+      .then(setBuiltins)
+      .catch(() => setBuiltins([]));
   }, [refresh]);
+
+  // 展开 server 行时懒拉工具清单（测试连接成功也会展开 → 这里统一兜住）。
+  useEffect(() => {
+    if (!expanded || tools[expanded] || toolsLoading) return;
+    setToolsLoading(true);
+    mcpServerTools(expanded)
+      .then((list) => {
+        const sorted = [...list].sort((a, b) => a.name.localeCompare(b.name));
+        setTools((prev) => ({ ...prev, [expanded]: sorted }));
+      })
+      .catch(() => setTools((prev) => ({ ...prev, [expanded]: [] })))
+      .finally(() => setToolsLoading(false));
+  }, [expanded, tools, toolsLoading]);
 
   async function switchApproval(next: "auto" | "ask") {
     setApproval(next);
@@ -138,6 +161,7 @@ export function McpSection() {
   }
 
   return (
+    <>
     <div className="card agent-card">
       <p className="card-title">MCP 工具</p>
       {error && <p className="model-error">{error}</p>}
@@ -164,7 +188,13 @@ export function McpSection() {
         <div className="agent-list">
           {rows.map((r) => (
             <div key={r.id} className="agent-row" data-testid="mcp-row">
-              <div className="agent-row-main">
+              <div
+                className="agent-row-main"
+                style={{ cursor: r.toolCount > 0 ? "pointer" : "default" }}
+                onClick={() => {
+                  if (r.toolCount > 0) setExpanded(expanded === r.id ? null : r.id);
+                }}
+              >
                 <span className="agent-transport" data-transport={r.transport}>
                   {r.transport}
                 </span>
@@ -172,6 +202,11 @@ export function McpSection() {
                 <span className="hint-line">
                   {r.toolCount > 0 ? `${r.toolCount} 个工具` : "未取到工具"}
                 </span>
+                {r.toolCount > 0 && (
+                  <span className="agent-chevron" aria-hidden="true">
+                    {expanded === r.id ? "▾" : "▸"}
+                  </span>
+                )}
               </div>
               <div className="agent-row-actions">
                 <button
@@ -198,7 +233,18 @@ export function McpSection() {
                 </button>
               </div>
               {expanded === r.id && r.toolCount > 0 && (
-                <p className="hint-line agent-tools-hint">工具清单见下方详情（测试连接后自动刷新）</p>
+                <div className="agent-tool-grid" data-testid={`tools-of-${r.id}`}>
+                  {toolsLoading && !tools[r.id] && <p className="hint-line">拉取工具清单…</p>}
+                  {tools[r.id]?.map((t) => (
+                    <div key={t.name} className="agent-tool-line">
+                      <span className="agent-tool-name">{t.name}</span>
+                      <span className="agent-tool-summary">{t.summary || "—"}</span>
+                    </div>
+                  ))}
+                  {tools[r.id] && tools[r.id].length === 0 && (
+                    <p className="hint-line">工具缓存为空——点「测试」重新连接获取。</p>
+                  )}
+                </div>
               )}
             </div>
           ))}
@@ -316,6 +362,32 @@ export function McpSection() {
         </div>
       )}
     </div>
+
+    <div className="card agent-card" data-testid="builtin-tools-card">
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+        <p className="card-title" style={{ marginBottom: 0 }}>内置工具</p>
+        <span className="hint-line">{builtins.length} 个 · 随版本内置</span>
+      </div>
+      {builtins.length === 0 ? (
+        <p className="hint-line" style={{ marginTop: 8 }}>没有内置工具。</p>
+      ) : (
+        <div className="agent-list" style={{ marginTop: 8 }}>
+          {builtins.map((t) => (
+            <div key={t.name} className="agent-row" data-testid="builtin-row">
+              <div className="agent-row-main">
+                <span className="agent-transport" data-transport="builtin">内置</span>
+                <span className="agent-name" style={{ fontFamily: "var(--font-mono, monospace)" }}>{t.name}</span>
+                <span className="hint-line">{t.summary}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      <p className="hint-line" style={{ marginTop: 8 }}>
+        内置工具随 app 版本发布，不走 MCP 连接、不可停用；对话中出现召回信号（如「总结一下我 18 号说了啥」）时自动挂载，数据不出设备。
+      </p>
+    </div>
+    </>
   );
 }
 

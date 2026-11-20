@@ -335,7 +335,7 @@ export interface ToolDescriptor {
   name: string;
   summary: string;
   detail: string;
-  kind: "mcp" | "skill";
+  kind: "mcp" | "skill" | "builtin";
   remote: boolean;
 }
 

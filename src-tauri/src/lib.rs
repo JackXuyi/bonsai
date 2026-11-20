@@ -270,6 +270,7 @@ pub fn run() {
             mcp_admin::mcp_server_toggle,
             mcp_admin::mcp_server_test,
             mcp_admin::mcp_server_tools,
+            mcp_admin::builtin_tools_list,
             mcp_discover::mcp_discover_scan,
             mcp_discover::mcp_discover_import,
             mcp_admin::skill_list,

@@ -466,6 +466,20 @@ impl Recall {
 
 // ---------------------------------------------------------------- provider
 
+/// Single-source descriptor for the built-in memory recall tool. Both the
+/// provider (model-facing catalog) and the settings-page registry
+/// (`agent_tools::builtin_tools` → `builtin_tools_list`) read from here, so
+/// the model's view and the UI's view can never drift.
+pub fn builtin_descriptor() -> ToolDescriptor {
+    ToolDescriptor {
+        name: "memory_search".into(),
+        summary: "按日期或关键词翻找过往聊天记录与记忆（本地）".into(),
+        detail: r#"{"type":"object","properties":{"query":{"type":"string","description":"用户原话，日期与关键词由系统解析"}},"required":["query"]}"#.into(),
+        kind: ToolKind::Builtin,
+        remote: false,
+    }
+}
+
 /// The built-in tool. Prompt-only kinds answer `unsupported` in `execute`;
 /// this one overrides `execute_with_conn` because it reads the memory store
 /// directly (the pipeline always holds the connection).
@@ -473,13 +487,7 @@ pub struct MemorySearchProvider;
 
 impl ToolProvider for MemorySearchProvider {
     fn descriptors(&self) -> Vec<ToolDescriptor> {
-        vec![ToolDescriptor {
-            name: "memory_search".into(),
-            summary: "按日期或关键词翻找过往聊天记录与记忆（本地）".into(),
-            detail: r#"{"type":"object","properties":{"query":{"type":"string","description":"用户原话，日期与关键词由系统解析"}},"required":["query"]}"#.into(),
-            kind: ToolKind::Builtin,
-            remote: false,
-        }]
+        vec![builtin_descriptor()]
     }
 
     fn execute(&self, _call: &ToolCall) -> Result<ToolOutput, String> {
@@ -504,6 +512,19 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         db::init_schema_for_test(&conn).unwrap();
         conn
+    }
+
+    /// Registry single-source: `agent_tools::builtin_tools` must equal what
+    /// the provider mounts, so the settings page and the model agree.
+    #[test]
+    fn builtin_registry_matches_provider() {
+        let reg = crate::agent_tools::builtin_tools();
+        assert_eq!(reg, vec![builtin_descriptor()]);
+        assert_eq!(reg.len(), 1);
+        assert_eq!(reg[0].name, "memory_search");
+        assert_eq!(reg[0].kind, ToolKind::Builtin);
+        assert!(!reg[0].remote);
+        assert!(MemorySearchProvider.descriptors() == reg);
     }
 
     /// Raw insert with an explicit UTC ts (add_event stamps the pinned clock,

@@ -35,10 +35,19 @@ impl ToolKind {
     }
 }
 
+/// Single source of truth for built-in tools (ToolKind::Builtin). The
+/// settings page lists these under「内置工具」; the dialogue pipeline mounts
+/// them from the same registry, so model view and UI view cannot drift.
+/// Each entry delegates to its owning module's `builtin_descriptor` (one
+/// definition per tool, referenced here — not duplicated).
+pub fn builtin_tools() -> Vec<ToolDescriptor> {
+    vec![crate::memory_search::builtin_descriptor()]
+}
+
 /// Three disclosure levels in one struct (spec-s3 §1): the pipeline shows
 /// `name` by default, `summary` after the name-selection round, `detail`
 /// only for the finalists.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ToolDescriptor {
     pub name: String,
     pub summary: String,

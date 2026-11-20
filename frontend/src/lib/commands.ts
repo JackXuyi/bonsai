@@ -172,6 +172,8 @@ export const mcpServerTest = (id: string) =>
   invokeWithTimeout<number>("mcp_server_test", { id }, 30000);
 export const mcpServerTools = (id: string) =>
   call<ToolDescriptor[]>("mcp_server_tools", { id });
+/** 内置工具清单（随版本发布，不走 MCP 连接，settings 页「内置工具」模块用）。 */
+export const builtinToolsList = () => call<ToolDescriptor[]>("builtin_tools_list");
 /** 本机 MCP 自动发现：扫客户端配置文件 + 应用 manifest，候选默认停用。 */
 export const mcpDiscoverScan = () => call<DiscoveredServer[]>("mcp_discover_scan");
 /** 导入选中的候选（按 signature，后端重扫落盘，明文不经过前端）。 */

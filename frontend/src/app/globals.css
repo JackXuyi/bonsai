@@ -33,6 +33,19 @@
   background: rgba(123,199,60,.16); color: #4d7d22;
 }
 .agent-transport[data-transport="http"] { background: rgba(240,146,34,.16); color: #b3660f; }
+.agent-transport[data-transport="builtin"] { background: rgba(55,138,221,.14); color: #185fa5; }
+.agent-chevron { font-size: 12px; color: var(--text-tertiary, #999); user-select: none; }
+.agent-tool-grid {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 2px 20px;
+  border-top: 1px solid var(--line, rgba(0,0,0,.08)); padding-top: 8px; margin-top: 2px;
+}
+.agent-tool-line { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.agent-tool-name { font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px; flex-shrink: 0; }
+.agent-tool-summary {
+  font-size: 12px; color: var(--text-secondary, #666);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+@media (max-width: 560px) { .agent-tool-grid { grid-template-columns: 1fr; } }
 .agent-row-actions { display: flex; gap: 6px; align-items: center; }
 .agent-tools-hint { margin: 0; }
 .agent-invalid { font-size: 12px; color: #c0392b; }
