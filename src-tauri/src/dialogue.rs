@@ -1178,6 +1178,29 @@ pub fn dialogue_history(
     .map_err(|e| e.to_string())
 }
 
+/// Full generation trace of one turn (spec-s8). Read-only; `None` = the turn
+/// predates the trace tables (frontend shows the honest empty state).
+#[tauri::command]
+pub fn turn_trace_get(
+    store: tauri::State<'_, MemoryStore>,
+    turn_id: i64,
+) -> Result<Option<db::TurnTraceRow>, String> {
+    let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+    db::turn_trace_get(&conn, turn_id).map_err(|e| e.to_string())
+}
+
+/// Reverse lookup by dialogue event id (either side of the pair) — the trace
+/// page's entry point for bubbles that only carry an event id (history
+/// replay). Read-only.
+#[tauri::command]
+pub fn turn_trace_find_by_event(
+    store: tauri::State<'_, MemoryStore>,
+    event_id: i64,
+) -> Result<Option<i64>, String> {
+    let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+    db::turn_trace_find_by_event(&conn, event_id).map_err(|e| e.to_string())
+}
+
 // ---------------------------------------------------------------- tests
 
 #[cfg(test)]

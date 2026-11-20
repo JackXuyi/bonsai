@@ -19,6 +19,12 @@ export interface ChatMessage {
   streaming?: boolean;
   prediction?: { id: number; guess: string };
   reminder?: CalendarRemindPayload;
+  /** 消息时间（ISO；实时路径发送/落库时记录，回放路径取 events.ts） */
+  ts?: string;
+  /** events 表 id（spec-s8）：历史回放直接带，实时路径落库后补 */
+  eventId?: number;
+  /** 链路追踪回合 id（spec-s8）：气泡「查看详情」入口 */
+  turnId?: number;
 }
 
 interface ChatState {

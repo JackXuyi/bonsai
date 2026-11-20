@@ -252,6 +252,8 @@ pub fn run() {
             dialogue::dialogue_chat_stream,
             dialogue::dialogue_proactive_now,
             dialogue::dialogue_history,
+            dialogue::turn_trace_get,
+            dialogue::turn_trace_find_by_event,
             report::daily_report,
             llm_admin::llm_config_get,
             llm_admin::llm_config_set_active,

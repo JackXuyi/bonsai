@@ -136,6 +136,50 @@ export interface DialogueOutcome {
   tool?: string | null;
   model_used?: boolean;
   filter?: DialogueFilter;
+  /** 本回合链路追踪 id（spec-s8），气泡「查看详情」入口 */
+  turn_id?: number | null;
+}
+
+/** 主动搭话手动触发的返回（spec-s8：文本 + trace turn id）。 */
+export interface ProactiveReply {
+  text: string;
+  turnId: number;
+}
+
+/** 链路追踪单步（trace_steps 行，spec-s8）。 */
+export interface TraceStep {
+  seq: number;
+  stepKind:
+    | "crisis_check"
+    | "tool_intent"
+    | "llm_round"
+    | "tool_call"
+    | "json_retry"
+    | "prose_retry"
+    | "filter";
+  title: string;
+  prompt?: string | null;
+  output?: string | null;
+  argsJson?: string | null;
+  summary?: string | null;
+  outcome?: string | null;
+  durationMs?: number | null;
+  ts: string;
+}
+
+/** 链路追踪回合主档 + 有序步骤（turn_trace 行，spec-s8）。 */
+export interface TurnTrace {
+  id: number;
+  sessionId: string;
+  userEventId?: number | null;
+  assistantEventId?: number | null;
+  kind: "model" | "tool" | "crisis" | "proactive";
+  modelUsed: boolean;
+  toolLabel?: string | null;
+  filterReport?: string | null;
+  durationMs?: number | null;
+  ts: string;
+  steps: TraceStep[];
 }
 
 /** 对话页启动回放的单条消息（events 表 kind=dialogue 平铺行，旧→新）。 */

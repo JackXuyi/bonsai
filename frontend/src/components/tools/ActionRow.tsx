@@ -102,12 +102,13 @@ export function ActionRow({ onReport }: { onReport: (md: string) => void }) {
         disabled={!!busy}
         onClick={() =>
           run("proactive", async () => {
-            const text = await dialogueProactiveNow();
-            if (text) {
+            const reply = await dialogueProactiveNow();
+            if (reply) {
               useChatStore.getState().add({
                 kind: "bot",
-                text,
+                text: reply.text,
                 proactive: true,
+                turnId: reply.turnId,
                 note: "主动搭话 · 你手动要的",
               });
               router.push("/");

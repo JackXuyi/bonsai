@@ -31,6 +31,8 @@ import type {
   SkillView,
   ToolCallRecord,
   ToolDescriptor,
+  ProactiveReply,
+  TurnTrace,
 } from "./types";
 
 async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -68,7 +70,15 @@ export const dialogueChatStream = (
  *  beforeId 为滚动加载游标（只取更早的行）。 */
 export const dialogueHistory = (sessionId: string, limit?: number, beforeId?: number) =>
   call<DialogueBubble[]>("dialogue_history", { sessionId, limit, beforeId });
-export const dialogueProactiveNow = () => call<string>("dialogue_proactive_now");
+export const dialogueProactiveNow = () => call<ProactiveReply>("dialogue_proactive_now");
+
+// ---------- 对话链路追踪（dialogue.rs，spec-s8）----------
+/** 单回合完整生成链路；None = 追踪上线前的旧消息（前端空态）。 */
+export const turnTraceGet = (turnId: number) =>
+  call<TurnTrace | null>("turn_trace_get", { turnId });
+/** 按对话事件 id 反查 trace turn id（气泡只带 eventId 时的详情入口）。 */
+export const turnTraceFindByEvent = (eventId: number) =>
+  call<number | null>("turn_trace_find_by_event", { eventId });
 
 // ---------- prediction ----------
 export const predictionFeedback = (id: number, verdict: string) =>
