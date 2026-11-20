@@ -7,10 +7,6 @@ settings:
 importers:
 
   .:
-    dependencies:
-      '@tauri-apps/api':
-        specifier: ^2
-        version: 2.12.5
     devDependencies:
       '@resvg/resvg-js':
         specifier: ^2.6.2
@@ -21,9 +17,6 @@ importers:
       lucide-static:
         specifier: ^1.74.0
         version: 1.74.0
-      vite:
-        specifier: ^6
-        version: 6.4.6(@types/node@26.6.6)(jiti@1.21.6)(yaml@2.9.1)
 
   frontend:
     dependencies:
@@ -5770,20 +5763,6 @@ snapshots:
       tinyglobby: 0.2.17
     optionalDependencies:
       '@types/node': 22.10.2
-      fsevents: 2.3.3
-      jiti: 1.21.6
-      yaml: 2.9.1
-
-  vite@6.4.6(@types/node@26.6.6)(jiti@1.21.6)(yaml@2.9.1):
-    dependencies:
-      esbuild: 0.25.0
-      fdir: 6.5.0(picomatch@4.0.7)
-      picomatch: 4.0.7
-      postcss: 8.5.33
-      rollup: 4.68.4
-      tinyglobby: 0.2.17
-    optionalDependencies:
-      '@types/node': 26.6.6
       fsevents: 2.3.3
       jiti: 1.21.6
       yaml: 2.9.1
