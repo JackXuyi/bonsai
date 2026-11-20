@@ -321,18 +321,67 @@ fn agent_pipeline(
                         out.summary
                     );
                     kit.trace("level3:answered".into());
-                    let raw3 = match on_delta.as_deref_mut() {
+                    // Third JSON-leak guard (2026-11-20 regression trio): the
+                    // model can echo its own pass-2 decision JSON instead of
+                    // prose. Streaming deltas are IRRETRACTABLE, so the sink
+                    // gates on the first non-whitespace char: `{` mutes the
+                    // whole stream (nothing reaches the UI) and triggers one
+                    // non-streamed prose retry.
+                    let mut raw3 = String::new();
+                    let mut json_out = false;
+                    match on_delta.as_deref_mut() {
                         Some(cb) => {
-                            backend.reply_streaming(&sys2, history, user_text, CHAT_TEMPERATURE, cb)
+                            let verdict = std::cell::RefCell::new(None::<bool>); // None=undecided, Some(true)=json
+                            let mut sink = |d: &str| {
+                                let is_json = {
+                                    let mut g = verdict.borrow_mut();
+                                    match *g {
+                                        Some(true) => return,
+                                        Some(false) => false,
+                                        None => match d.chars().find(|c| !c.is_whitespace()) {
+                                            None => return,
+                                            Some(c) => {
+                                                let json = c == '{';
+                                                *g = Some(json);
+                                                json
+                                            }
+                                        },
+                                    }
+                                };
+                                if is_json {
+                                    return;
+                                }
+                                cb(d);
+                            };
+                            raw3 = backend.reply_streaming(&sys2, history, user_text, CHAT_TEMPERATURE, &mut sink);
+                            json_out = matches!(*verdict.borrow(), Some(true)) || raw3.trim_start().starts_with('{');
                         }
-                        None => backend.reply(&sys2, history, user_text, CHAT_TEMPERATURE),
-                    };
+                        None => {
+                            raw3 = backend.reply(&sys2, history, user_text, CHAT_TEMPERATURE);
+                            json_out = raw3.trim_start().starts_with('{');
+                        }
+                    }
                     if raw3.trim().is_empty() {
                         (
                             format!("（{name} 跑完了，但盆栽没组织好语言——结果：{}）", out.summary),
                             label,
                             true,
                         )
+                    } else if json_out {
+                        kit.trace("level3:json-not-prose".into());
+                        let sys3 = format!(
+                            "{sys2}\n\n（你刚才的回复是 JSON，这不对。请直接用自然语言、面向用户回答；不要输出任何 JSON 或代码块。）"
+                        );
+                        let retry = backend.reply(&sys3, history, user_text, CHAT_TEMPERATURE);
+                        if !retry.trim().is_empty() && !retry.trim_start().starts_with('{') {
+                            (retry, label, false)
+                        } else {
+                            (
+                                format!("（{name} 的结果：{}）", out.summary),
+                                label,
+                                false,
+                            )
+                        }
                     } else {
                         (raw3, label, true)
                     }
@@ -1269,6 +1318,59 @@ mod tests {
         assert_eq!(records[0].action, "memory_search");
         assert_eq!(records[0].result_status.as_deref(), Some("auto_allowed"));
         assert!(records[0].params_summary.as_deref().unwrap_or("").contains("18号"));
+    }
+
+    /// Third JSON-leak guard: pass-3 echo regression (2026-11-20 screenshot —
+    /// the model replayed its own pass-2 decision JSON after the tool ran).
+    /// The streamed deltas must stay mute for JSON, one prose retry runs, and
+    /// the retry lands as the reply.
+    #[test]
+    fn pass3_json_echo_is_muted_and_retried_as_prose() {
+        let conn = mem();
+        let c = card();
+        let mut kit = weather_kit();
+        let decision = r#"{"tool": "weather", "args": {}}"#;
+        let mut backend = SeqBackend::new(&[
+            r#"{"candidates": ["weather"]}"#,
+            decision,
+            decision, // pass-3 echo attempt (would have leaked, streamed)
+            "杭州今天多云，18 度。", // prose retry
+        ]);
+        let deltas: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        let mut emit = |d: &str| deltas.lock().unwrap().push(d.to_string());
+        let out = chat_turn_streaming_with_kit(
+            &conn, &mut backend, &c, "s1", "天气", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit, &mut emit,
+        )
+        .unwrap();
+        assert_eq!(out.reply, "杭州今天多云，18 度。");
+        assert_eq!(out.tool.as_deref(), Some("mcp:weather"));
+        let seen = deltas.into_inner().unwrap().join("");
+        assert!(!seen.contains('{'), "JSON must never reach the UI stream: {seen}");
+        assert!(kit.trace_ref().contains("level3:json-not-prose"));
+    }
+
+    /// Pass-3 echo where even the prose retry is JSON → summary template
+    /// fallback (never the raw JSON).
+    #[test]
+    fn pass3_json_retry_still_json_falls_back_to_summary() {
+        let conn = mem();
+        let c = card();
+        let mut kit = weather_kit();
+        let decision = r#"{"tool": "weather", "args": {}}"#;
+        let mut backend = SeqBackend::new(&[
+            r#"{"candidates": ["weather"]}"#,
+            decision,
+            decision,
+            decision, // retry is JSON too
+        ]);
+        let out = chat_turn_with_kit(
+            &conn, &mut backend, &c, "s1", "天气", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit,
+        )
+        .unwrap();
+        assert_eq!(out.reply, "（weather 的结果：杭州今天多云 18 度）");
+        assert!(!out.reply.contains("\"tool\""));
     }
 
     /// The failure template must carry the failure CLASS (2026-11-20: a
