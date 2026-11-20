@@ -137,6 +137,25 @@ fn prose_retry(
     backend.reply(&sys, history, user_text, CHAT_TEMPERATURE)
 }
 
+/// Build the pass-3 (result-summary) system prompt. When the tool's summary
+/// is itself JSON (prune tools return JSON payloads; ToolOutput.summary is
+/// the clipped raw text), the prompt must explicitly demand INTERPRETATION —
+/// "请基于摘要简短回答" over a JSON blob makes the model echo the blob back
+/// as its "answer" (2026-11-20 mem_leaks regression: the user got the raw
+/// JSON in the fallback template because both pass-3 and the retry echoed).
+fn summary_round_prompt(sys1: &str, name: &str, summary: &str) -> String {
+    let t = summary.trim_start();
+    if t.starts_with('{') || t.starts_with('[') {
+        format!(
+            "{sys1}\n\n【工具 {name} 的结果（JSON 数据）】\n{summary}\n\n上面是 JSON 数据，不是答案。请解读它的字段含义，用中文口语向用户给出结论：关键数字、你的判断、下一步建议。不要输出 JSON，不要逐字复述结构。"
+        )
+    } else {
+        format!(
+            "{sys1}\n\n【工具 {name} 的结果摘要】\n{summary}\n\n请基于摘要简短回答用户；不要复述摘要全文，不要编造摘要之外的信息。"
+        )
+    }
+}
+
 /// The three-stage progressive disclosure pipeline (spec-s3 §3). Activated
 /// ONLY when the kit has capabilities — with none, the turn is untouched
 /// (legacy behavior, all existing tests ride that path).
@@ -316,10 +335,7 @@ fn agent_pipeline(
                 }
                 Ok(out) => {
                     // ---- pass 3: result-summary round (streaming lives here)
-                    let sys2 = format!(
-                        "{sys1}\n\n【工具 {name} 的结果摘要】\n{}\n\n请基于摘要简短回答用户；不要复述摘要全文，不要编造摘要之外的信息。",
-                        out.summary
-                    );
+                    let sys2 = summary_round_prompt(&sys1, &name, &out.summary);
                     kit.trace("level3:answered".into());
                     // Third JSON-leak guard (2026-11-20 regression trio): the
                     // model can echo its own pass-2 decision JSON instead of
@@ -370,7 +386,12 @@ fn agent_pipeline(
                     } else if json_out {
                         kit.trace("level3:json-not-prose".into());
                         let sys3 = format!(
-                            "{sys2}\n\n（你刚才的回复是 JSON，这不对。请直接用自然语言、面向用户回答；不要输出任何 JSON 或代码块。）"
+                            "{sys2}\n\n（你刚才的回复是 JSON，这不对。{} 请直接用自然语言、面向用户回答；不要输出任何 JSON 或代码块。）",
+                            if out.summary.trim_start().starts_with('{') || out.summary.trim_start().starts_with('[') {
+                                "解读上面的 JSON 数据，给出结论。"
+                            } else {
+                                ""
+                            }
                         );
                         let retry = backend.reply(&sys3, history, user_text, CHAT_TEMPERATURE);
                         if !retry.trim().is_empty() && !retry.trim_start().starts_with('{') {
@@ -1318,6 +1339,19 @@ mod tests {
         assert_eq!(records[0].action, "memory_search");
         assert_eq!(records[0].result_status.as_deref(), Some("auto_allowed"));
         assert!(records[0].params_summary.as_deref().unwrap_or("").contains("18号"));
+    }
+
+    /// Pass-3 prompt over a JSON payload must demand interpretation, not
+    /// echo (2026-11-20 mem_leaks regression: summary was raw JSON, model
+    /// parroted it, user saw JSON in the fallback template).
+    #[test]
+    fn summary_round_prompt_demands_interpretation_for_json() {
+        let p = summary_round_prompt("SYS", "mem_leaks", r#"{"below":43,"benign":115}"#);
+        assert!(p.contains("JSON 数据，不是答案"));
+        assert!(p.contains("解读"));
+        let q = summary_round_prompt("SYS", "weather", "杭州今天多云 18 度");
+        assert!(q.contains("结果摘要"));
+        assert!(!q.contains("解读"), "prose summaries keep the plain instruction");
     }
 
     /// Third JSON-leak guard: pass-3 echo regression (2026-11-20 screenshot —
