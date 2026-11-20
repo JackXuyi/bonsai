@@ -3,7 +3,7 @@
 // 对话页启动回放：挂载时拉 dialogue_history 灌入消息流（只在流为空时），
 // proactive 标注、跨天日期徽标、失败静默降级。
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import { ChatPane } from "@/components/chat/ChatPane";
 import { useChatStore } from "@/lib/stores/chatStore";
 
@@ -35,7 +35,7 @@ const ts = (d: Date) => d.toISOString();
 beforeEach(() => {
   h.tauri = true;
   useChatStore.setState({ messages: [] });
-  historyMock.mockClear().mockResolvedValue([]);
+  historyMock.mockReset().mockResolvedValue([]);
 });
 
 describe("ChatPane 启动回放", () => {
@@ -99,5 +99,72 @@ describe("ChatPane 启动回放", () => {
     await new Promise((r) => setTimeout(r, 20));
     expect(historyMock).not.toHaveBeenCalled();
     expect(screen.getByText("还没聊过")).toBeTruthy();
+  });
+});
+
+describe("ChatPane 向上分页", () => {
+  const PAGE = 30;
+  const mkRows = (from: number, count: number) =>
+    // 后端契约：旧→新（ASC）。from = 本页最新一行的 id。
+    Array.from({ length: count }, (_, i) => ({
+      id: from - count + 1 + i,
+      ts: ts(yesterday),
+      role: (i % 2 === 0 ? "user" : "assistant") as "user" | "assistant",
+      content: `row-${from - count + 1 + i}`,
+    }));
+
+  it("初次只拉一页；滚到顶部再拉更早一页并前插到最前面", async () => {
+    const page1 = mkRows(100, PAGE); // id 100..71
+    const page2 = mkRows(70, 5); // id 70..66
+    historyMock.mockResolvedValueOnce(page1).mockResolvedValueOnce(page2);
+
+    const { container } = render(<ChatPane />);
+    await waitFor(() => expect(useChatStore.getState().messages).toHaveLength(PAGE));
+
+    // 初次调用不带游标；游标 = 第一页最旧行的 id
+    expect(historyMock).toHaveBeenCalledTimes(1);
+    expect(historyMock.mock.calls[0][0]).toBe("default");
+    expect(historyMock.mock.calls[0][1]).toBe(PAGE);
+    expect(historyMock.mock.calls[0][2]).toBeUndefined();
+
+    // 模拟滚到顶部
+    const list = container.querySelector(".messages")!;
+    Object.defineProperty(list, "scrollTop", { value: 0, writable: true });
+    fireEvent.scroll(list);
+
+    await waitFor(() => expect(useChatStore.getState().messages).toHaveLength(PAGE + 5));
+    const msgs = useChatStore.getState().messages;
+    expect(msgs[0].text).toBe("row-66"); // 第二页最旧行在最前
+    expect(msgs[4].text).toBe("row-70"); // 第二页最新行
+    expect(msgs[5].text).toBe("row-71"); // 第一页最旧行紧随第二页
+    expect(msgs[PAGE + 4].text).toBe("row-100"); // 第一页最新行
+    // 第二次调用带上了游标（第一页最旧行的 id）
+    expect(historyMock).toHaveBeenLastCalledWith("default", PAGE, 71);
+  });
+
+  it("返回不足一页 → 到底，之后滚动不再请求", async () => {
+    historyMock
+      .mockResolvedValueOnce(mkRows(100, PAGE))
+      .mockResolvedValueOnce(mkRows(70, 3)); // 不足一页
+
+    const { container } = render(<ChatPane />);
+    await waitFor(() => expect(useChatStore.getState().messages).toHaveLength(PAGE));
+
+    const list = container.querySelector(".messages")!;
+    Object.defineProperty(list, "scrollTop", { value: 0, writable: true });
+    fireEvent.scroll(list);
+    await waitFor(() => expect(useChatStore.getState().messages).toHaveLength(PAGE + 3));
+
+    const calls = historyMock.mock.calls.length;
+    fireEvent.scroll(list);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(historyMock.mock.calls.length).toBe(calls); // hasMore=false，不再拉
+  });
+
+  it("页尺寸恢复为 30（避免一次灌太多导致卡顿）", async () => {
+    historyMock.mockResolvedValue(mkRows(100, PAGE));
+    render(<ChatPane />);
+    await waitFor(() => expect(useChatStore.getState().messages).toHaveLength(PAGE));
+    expect(historyMock.mock.calls[0][1]).toBe(30);
   });
 });

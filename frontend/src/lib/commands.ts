@@ -64,9 +64,10 @@ export const dialogueChatStream = (
     onDelta,
   });
 
-/** 对话页启动回放：最近消息流平铺气泡（旧→新），bot 主动消息也在内。 */
-export const dialogueHistory = (sessionId: string, limit?: number) =>
-  call<DialogueBubble[]>("dialogue_history", { sessionId, limit });
+/** 对话页启动回放 + 向上分页：最近消息流平铺气泡（旧→新）；
+ *  beforeId 为滚动加载游标（只取更早的行）。 */
+export const dialogueHistory = (sessionId: string, limit?: number, beforeId?: number) =>
+  call<DialogueBubble[]>("dialogue_history", { sessionId, limit, beforeId });
 export const dialogueProactiveNow = () => call<string>("dialogue_proactive_now");
 
 // ---------- prediction ----------

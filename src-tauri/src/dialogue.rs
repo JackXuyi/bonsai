@@ -648,17 +648,24 @@ pub fn dialogue_proactive_now(
 
 /// Startup replay for the chat page: the recent dialogue stream as flat
 /// bubbles (oldest first). Read-only — no minor gate needed (nothing is
-/// sent to a model), no session pairing. `limit` defaults to 50.
+/// sent to a model), no session pairing. `limit` defaults to 30;
+/// `before_id` is the scroll-up pagination cursor (id < before_id).
 #[tauri::command]
 pub fn dialogue_history(
     store: tauri::State<'_, MemoryStore>,
     session_id: Option<String>,
     limit: Option<i64>,
+    before_id: Option<i64>,
 ) -> Result<Vec<db::DialogueBubble>, String> {
     let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
     let session = session_id.unwrap_or_else(|| "default".to_string());
-    db::dialogue_bubbles(&conn, &session, limit.unwrap_or(50).clamp(1, 200) as usize)
-        .map_err(|e| e.to_string())
+    db::dialogue_bubbles(
+        &conn,
+        &session,
+        limit.unwrap_or(30).clamp(1, 200) as usize,
+        before_id,
+    )
+    .map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------- tests

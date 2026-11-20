@@ -47,6 +47,17 @@ export function ChatPane() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [showToBottom, setShowToBottom] = useState(false);
 
+  // —— 分页回放状态（refs：不参与渲染，避免 onScroll 高频重渲） ——
+  const PAGE_SIZE = 30;
+  const SCROLL_TOP_TRIGGER = 80;
+  const oldestIdRef = useRef<number | null>(null); // 已加载最旧一行的 db id（游标）
+  const hasMoreRef = useRef(true);
+  const loadingRef = useRef(false);
+  /** 前插历史页时记录 (height, top)，渲染后按差值复位，视口不跳动。 */
+  const restoreRef = useRef<{ prevHeight: number; prevTop: number } | null>(null);
+  /** 首次有内容时直接跳到底部（prefill 后 nearBottom 条件会误判停在顶部）。 */
+  const jumpedRef = useRef(false);
+
   const stick = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -60,31 +71,77 @@ export function ChatPane() {
     setShowToBottom(!nearBottom(el) && el.scrollHeight > el.clientHeight);
   }
 
-  // 消息变化（含流式 appendText）时贴底
+  // 消息变化时的滚动策略：前插历史页 → 按差值复位；首次有内容 → 跳到最新；
+  // 其余（新消息 / 流式）→ 原有贴底逻辑。
   useEffect(() => {
-    stick();
+    const el = scrollRef.current;
+    if (!el || messages.length === 0) return;
+    if (restoreRef.current) {
+      const { prevHeight, prevTop } = restoreRef.current;
+      restoreRef.current = null;
+      el.scrollTop = el.scrollHeight - prevHeight + prevTop;
+      syncToBottom();
+    } else if (!jumpedRef.current) {
+      jumpedRef.current = true;
+      el.scrollTop = el.scrollHeight;
+      syncToBottom();
+    } else {
+      stick();
+    }
   }, [messages, stick]);
+
+  // 向上分页：滚近顶部时拉更早的一页（游标 = 已加载最旧的 db id）。
+  const loadOlder = useCallback(async () => {
+    if (!inTauri || loadingRef.current || !hasMoreRef.current) return;
+    const before = oldestIdRef.current;
+    if (before === null) return;
+    loadingRef.current = true;
+    try {
+      const rows = await dialogueHistory("default", PAGE_SIZE, before);
+      if (rows.length === 0) {
+        hasMoreRef.current = false;
+        return;
+      }
+      if (rows.length < PAGE_SIZE) hasMoreRef.current = false;
+      oldestIdRef.current = rows[0].id;
+      const el = scrollRef.current;
+      if (el) restoreRef.current = { prevHeight: el.scrollHeight, prevTop: el.scrollTop };
+      useChatStore.getState().prepend(bubblesFromHistory(rows));
+    } catch {
+      hasMoreRef.current = false; // 读不到更早的就到此为止，不打扰对话
+    } finally {
+      loadingRef.current = false;
+    }
+  }, []);
+
+  function onMessagesScroll() {
+    syncToBottom();
+    const el = scrollRef.current;
+    if (el && el.scrollTop <= SCROLL_TOP_TRIGGER) void loadOlder();
+  }
 
   // 进入对话页时聚焦输入框（旧 selectTab("chat")）
   useEffect(() => {
     scrollRef.current?.querySelector("textarea")?.focus({ preventScroll: true });
   }, []);
 
-  // 启动回放：拉最近 50 条（旧→新）灌入消息流。仅在流为空时执行——本次
-  // 启动已产生的消息优先；拉取失败静默降级（空态文案兜底）。跨启动一律以
-  // DB 为准，不做本地缓存。
+  // 启动回放：只拉第一页（30 条），其余滚到顶部再分页加载。仅在流为空时
+  // 执行——本次启动已产生的消息优先；拉取失败静默降级（空态文案兜底）。
+  // 跨启动一律以 DB 为准，不做本地缓存。
   useEffect(() => {
     if (!inTauri) return;
     let cancelled = false;
     void (async () => {
       try {
-        const rows = await dialogueHistory("default", 50);
+        const rows = await dialogueHistory("default", PAGE_SIZE);
         if (
           cancelled ||
           rows.length === 0 ||
           useChatStore.getState().messages.length > 0
         )
           return;
+        oldestIdRef.current = rows[0].id;
+        hasMoreRef.current = rows.length === PAGE_SIZE;
         useChatStore.getState().prefill(bubblesFromHistory(rows));
       } catch {
         // 历史读不到就当没聊过，不挡本次对话。
@@ -100,7 +157,7 @@ export function ChatPane() {
   return (
     <>
       <div className="chat-body">
-        <div className="messages" ref={scrollRef} onScroll={syncToBottom}>
+        <div className="messages" ref={scrollRef} onScroll={onMessagesScroll}>
           {empty && (
             <div className="empty">
               <p className="empty-title">还没聊过</p>

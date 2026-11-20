@@ -1600,23 +1600,25 @@ pub struct DialogueBubble {
 }
 
 /// Last `limit` dialogue rows for a session, oldest first. Proactive
-/// assistant rows are included (they live in the same events stream);
-/// non-dialogue rows and dropped user-only tails behave like
-/// `dialogue_history` (a user row with no reply still shows — the user did
-/// say it, and the next turn's model context pairs it or drops it there).
+/// assistant rows are included (they live in the same events stream).
+/// `before_id` is the pagination cursor for the chat page's scroll-up
+/// loading: only rows with `id < before_id` are returned, so successive
+/// pages tile the stream without overlap.
 pub fn dialogue_bubbles(
     conn: &Connection,
     session_id: &str,
     limit: usize,
+    before_id: Option<i64>,
 ) -> rusqlite::Result<Vec<DialogueBubble>> {
     let mut stmt = conn.prepare(
         "SELECT id, ts, role, content FROM events
          WHERE session_id = ?1 AND kind = 'dialogue'
            AND role IN ('user', 'assistant')
+           AND (?3 IS NULL OR id < ?3)
          ORDER BY id DESC LIMIT ?2",
     )?;
     let mut rows: Vec<DialogueBubble> = stmt
-        .query_map(params![session_id, limit as i64], |row| {
+        .query_map(params![session_id, limit as i64, before_id], |row| {
             Ok(DialogueBubble {
                 id: row.get(0)?,
                 ts: row.get(1)?,
@@ -1984,16 +1986,24 @@ mod tests {
         add_event_meta(&conn, "perception", "窗口打开", None, None).unwrap();
         add_event_meta(&conn, "dialogue", "别的会话", Some("user"), Some("other")).unwrap();
 
-        let rows = dialogue_bubbles(&conn, "default", 50).unwrap();
+        let rows = dialogue_bubbles(&conn, "default", 50, None).unwrap();
         assert_eq!(rows.len(), 3, "flat rows: proactive/reply-less kept, noise dropped");
         assert_eq!(rows[0].role, "user");
         assert_eq!(rows[0].content, "早上好");
         assert_eq!(rows[2].role, "user");
         assert!(rows[1].ts.contains("20"), "ts carried from events");
 
-        let capped = dialogue_bubbles(&conn, "default", 2).unwrap();
+        let capped = dialogue_bubbles(&conn, "default", 2, None).unwrap();
         assert_eq!(capped.len(), 2);
         assert_eq!(capped[0].content, "早。今天有雨。", "limit takes the newest, oldest first out");
+
+        // Pagination cursor: capped = [id2, id3]; page before id2 → only id1.
+        let page2 = dialogue_bubbles(&conn, "default", 2, Some(capped[0].id)).unwrap();
+        assert_eq!(page2.len(), 1);
+        assert_eq!(page2[0].content, "早上好", "cursor returns strictly older rows");
+        let page1_only = dialogue_bubbles(&conn, "default", 1, Some(rows[2].id)).unwrap();
+        assert_eq!(page1_only.len(), 1);
+        assert_eq!(page1_only[0].content, "早。今天有雨。", "cursor excludes itself and everything after");
     }
 
     #[test]
