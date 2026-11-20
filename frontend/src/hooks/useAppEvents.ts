@@ -46,12 +46,15 @@ export function useAppEvents() {
     useUiStore.getState().bumpWindowShown();
   });
 
-  // 主动搭话：插气泡 + 切到对话页（原 ChatPane proactive:message）
-  useTauriEvent<{ text: string }>("proactive:message", (p) => {
+  // 主动搭话：插气泡 + 切到对话页（原 ChatPane proactive:message）。
+  // turn_id（spec-s8）：气泡「查看详情」直达该回合的生成链路。
+  useTauriEvent<{ text: string; turn_id?: number }>("proactive:message", (p) => {
     useChatStore.getState().add({
       kind: "bot",
       text: p.text,
       proactive: true,
+      turnId: p.turn_id,
+      ts: new Date().toISOString(),
       note: "它自己开口的",
     });
     router.push("/");

@@ -10,6 +10,10 @@ import { useChatStore } from "@/lib/stores/chatStore";
 // inTauri 在 tauriInvoke 模块求值时固定，测试用 getter 开关模拟 Tauri 环境。
 const h = vi.hoisted(() => ({ tauri: true }));
 
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: vi.fn(), back: vi.fn() }),
+}));
+
 vi.mock("@/lib/tauriInvoke", () => ({
   get inTauri() {
     return h.tauri;

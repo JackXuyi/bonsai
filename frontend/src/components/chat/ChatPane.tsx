@@ -16,9 +16,10 @@ function nearBottom(el: HTMLElement) {
 }
 
 /** 把 DB 里的最近消息流映射成气泡：assistant 行若无前导 user 行即主动搭话；
- *  非今天的消息在徽标注里带日期（回放体感需要，实时流不需要）。 */
+ *  非今天的消息在徽标注里带日期（回放体感需要，实时流不需要）。
+ *  eventId / ts 透传（spec-s8）：操作条的时间显示与「查看详情」反查入口。 */
 function bubblesFromHistory(
-  rows: { ts: string; role: "user" | "assistant"; content: string }[]
+  rows: { id: number; ts: string; role: "user" | "assistant"; content: string }[]
 ): Omit<ChatMessage, "id">[] {
   const today = new Date().toDateString();
   const out: Omit<ChatMessage, "id">[] = [];
@@ -31,11 +32,11 @@ function bubblesFromHistory(
         : undefined;
     if (r.role === "user") {
       pendingUser = true;
-      out.push({ kind: "user", text: r.content, note });
+      out.push({ kind: "user", text: r.content, note, ts: r.ts, eventId: r.id });
     } else {
       const proactive = !pendingUser;
       pendingUser = false;
-      out.push({ kind: "bot", text: r.content, proactive, note });
+      out.push({ kind: "bot", text: r.content, proactive, note, ts: r.ts, eventId: r.id });
     }
   }
   return out;

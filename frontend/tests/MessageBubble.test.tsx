@@ -1,7 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { render } from "@testing-library/react";
 import { MessageBubble } from "@/components/chat/MessageBubble";
 import type { ChatMessage } from "@/lib/stores/chatStore";
+
+// 气泡内嵌操作条（spec-s8）用到 next/navigation 的 useRouter
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: vi.fn(), back: vi.fn() }),
+}));
 
 describe("MessageBubble", () => {
   it("user / bot 形态与 proactive 变体", () => {

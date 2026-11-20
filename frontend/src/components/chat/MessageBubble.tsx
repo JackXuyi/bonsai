@@ -4,6 +4,7 @@
 import type { ChatMessage } from "@/lib/stores/chatStore";
 import { PredictionCard } from "./PredictionCard";
 import { ReminderBubble } from "./ReminderBubble";
+import { MessageActions } from "./MessageActions";
 
 export function MessageBubble({
   message,
@@ -45,15 +46,19 @@ export function MessageBubble({
         : "";
 
   return (
-    <div className={`bubble ${isUser ? "user" : "bot"}${variant ? " " + variant : ""}`}>
-      <span className="body">{message.text}</span>
-      {message.streaming && <span className="caret" />}
-      {message.note ? (
-        <>
-          <br />
-          <span className="badge">{message.note}</span>
-        </>
-      ) : null}
-    </div>
+    <>
+      <div className={`bubble ${isUser ? "user" : "bot"}${variant ? " " + variant : ""}`}>
+        <span className="body">{message.text}</span>
+        {message.streaming && <span className="caret" />}
+        {message.note ? (
+          <>
+            <br />
+            <span className="badge">{message.note}</span>
+          </>
+        ) : null}
+      </div>
+      {/* 操作条（spec-s8）：时间 / 复制 / 查看详情；流式中不渲染 */}
+      {!message.streaming && <MessageActions message={message} />}
+    </>
   );
 }

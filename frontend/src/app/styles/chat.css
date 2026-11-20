@@ -142,6 +142,51 @@
   padding: 1px 6px;
 }
 
+/* 气泡底部操作条（spec-s8 S8-c）：时间常驻，复制/详情 hover 浮现。
+   紧跟气泡的相邻兄弟，D2 交互 = .bubble:hover + focus-within 恢复可见。 */
+.msg-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 82%;
+  margin-top: 3px;
+  padding: 0 4px;
+  font-size: 11px;
+  opacity: 0;
+  transition: opacity 0.16s ease;
+}
+
+.msg-actions.user {
+  align-self: flex-end;
+}
+
+.bubble:hover + .msg-actions,
+.msg-actions:hover,
+.msg-actions:focus-within {
+  opacity: 1;
+}
+
+.msg-time {
+  color: var(--faint);
+}
+
+.msg-act {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.msg-act:hover {
+  color: var(--accent-ink);
+}
+
+.msg-act.trace {
+  color: var(--accent);
+}
+
 .caret {
   display: inline-block;
   width: 2px;

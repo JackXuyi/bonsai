@@ -35,6 +35,8 @@ interface ChatState {
   appendText: (id: number, delta: string) => void;
   setText: (id: number, text: string) => void;
   setNote: (id: number, note: string) => void;
+  /** 局部补丁（spec-s8）：落库后回填 turnId / eventId / ts，不触发整条替换 */
+  patch: (id: number, partial: Partial<ChatMessage>) => void;
   /** 启动回放：整批灌入历史气泡（仅在消息流为空时由 ChatPane 调用） */
   prefill: (msgs: Omit<ChatMessage, "id">[]) => void;
   /** 向上分页：把更早的一页插到最前面（保持现有气泡 id 稳定） */
@@ -65,6 +67,10 @@ export const useChatStore = create<ChatState>((set) => ({
   setNote: (id, note) =>
     set((st) => ({
       messages: st.messages.map((m) => (m.id === id ? { ...m, note } : m)),
+    })),
+  patch: (id, partial) =>
+    set((st) => ({
+      messages: st.messages.map((m) => (m.id === id ? { ...m, ...partial } : m)),
     })),
   prefill: (msgs) => {
     const filled = msgs.map((m) => ({ ...m, id: ++seq }));

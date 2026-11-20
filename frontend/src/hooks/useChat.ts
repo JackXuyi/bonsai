@@ -31,7 +31,7 @@ export function useChat() {
       return;
     }
 
-    store.add({ kind: "user", text });
+    const userId = store.add({ kind: "user", text, ts: new Date().toISOString() });
     chattingRef.current = true;
     setChatting(true);
     const typingId = store.add({ kind: "typing", text: "" });
@@ -44,20 +44,26 @@ export function useChat() {
       if (!msg?.delta) return;
       if (bubbleId === null) {
         store.remove(typingId);
-        bubbleId = store.add({ kind: "bot", text: "", streaming: true });
+        bubbleId = store.add({ kind: "bot", text: "", streaming: true, ts: new Date().toISOString() });
       }
       store.appendText(bubbleId, msg.delta);
     };
 
     try {
       const outcome = await dialogueChatStream(text, SESSION_ID, onDelta);
+      const finishedAt = new Date().toISOString();
       if (bubbleId === null) {
         // No deltas at all (fallback line / dead model) — render whole reply.
         store.remove(typingId);
-        bubbleId = store.add({ kind: "bot", text: "" });
+        bubbleId = store.add({ kind: "bot", text: "", ts: finishedAt });
       }
       store.setText(bubbleId, outcome.reply);
       store.setNote(bubbleId, noteFor(outcome));
+      // Trace linkage (spec-s8): both sides of the turn link to the trace page.
+      if (outcome.turn_id) {
+        store.patch(bubbleId, { turnId: outcome.turn_id });
+        store.patch(userId, { turnId: outcome.turn_id });
+      }
       // Speaking counts as "being talked to": flash the greeted face.
       facePreview("greeted").catch(() => {});
     } catch (err) {
