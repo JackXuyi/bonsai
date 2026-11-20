@@ -38,6 +38,7 @@ pub struct AskFirstGate { /* emit 事件 + 等待结果的通道骨架 */ }  // 
 2. 审计落库：三级全链路后 tool_calls 行数/字段正确（1）→ `pipeline_three_rounds_full_chain_is_audited`、`execute_audited_records_ok_and_failure_status`
 3. denied 路径：gate=Deny → 不执行、outcome=denied、对话正常收尾（1）→ `pipeline_unknown_candidate_dropped_and_denied_call_templates`
 4. 失败路径：execute Err → outcome=error、result_status=mcp_timeout（1）→ `execute_audited_records_ok_and_failure_status`
+4b. inputSchema 严格校验（plan §3.3）：required 缺失 / 类型错 / 非对象 → 拒载并落 `bad_args:…`，provider 不被调用；合法参数（含未知多余字段）放行（1）→ `execute_audited_validates_args_before_gate`、`validate_args_covers_required_types_and_unreadable_schema`
 5. params_summary 脱敏：含 `Bearer x` 的参数 → `••••`（1）→ `execute_audited_records_ok_and_failure_status`、`audit_rows_round_trip_masked`
 6. tool_call_records：倒序 + limit（1）→ `tool_call_records_newest_first_with_limit`
 7. 审批握手：无 UI 直接 Deny、id 不匹配不消耗槽位、重复回执无效（1）→ `approval_broker_handshake`

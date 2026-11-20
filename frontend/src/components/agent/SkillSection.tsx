@@ -45,7 +45,7 @@ export function SkillSection() {
       {rows.length === 0 ? (
         <p className="hint-line">
           把技能包放进应用数据目录的 skills/&lt;id&gt;/（SKILL.md ≤8KB + references/*.md ≤4KB×5），
-          点「重新扫描」即可看到。
+          刷新本页即可看到（列表每次实时扫描，无需手动导入）。
         </p>
       ) : (
         <div className="agent-list">

@@ -224,6 +224,50 @@ pub fn parse_tool_decision(reply: &str) -> Result<ToolDecision, ()> {
     }
 }
 
+/// Minimal JSON-Schema subset check (plan §3.3 round 2: strict validation
+/// before the gate). Covers the subset MCP servers actually declare —
+/// top-level `type: object`, `properties` with primitive types, `required`.
+/// Unknown extra fields pass (servers vary widely); an unparseable schema
+/// also passes (we cannot validate what we cannot read — execution errors
+/// stay the backstop). Returns `bad_args:…` so the audit records the reason.
+pub fn validate_args(schema: &str, args: &serde_json::Value) -> Result<(), String> {
+    let Ok(schema) = serde_json::from_str::<serde_json::Value>(schema) else {
+        return Ok(());
+    };
+    if schema.get("type").and_then(|t| t.as_str()) != Some("object") {
+        return Ok(()); // only object schemas are checked; anything else → trust the server
+    }
+    let Some(obj) = args.as_object() else {
+        return Err("bad_args:not-an-object".into());
+    };
+    if let Some(required) = schema.get("required").and_then(|r| r.as_array()) {
+        for name in required.iter().filter_map(|v| v.as_str()) {
+            if !obj.contains_key(name) {
+                return Err(format!("bad_args:missing:{name}"));
+            }
+        }
+    }
+    if let Some(props) = schema.get("properties").and_then(|p| p.as_object()) {
+        for (name, spec) in props {
+            let Some(value) = obj.get(name) else { continue };
+            let declared = spec.get("type").and_then(|t| t.as_str());
+            let ok = match declared {
+                Some("string") => value.is_string(),
+                Some("boolean") => value.is_boolean(),
+                Some("number") => value.is_number(),
+                Some("integer") => value.is_i64() || value.is_u64(),
+                Some("array") => value.is_array(),
+                Some("object") => value.is_object(),
+                _ => true, // unknown/absent type → trust the server
+            };
+            if !ok {
+                return Err(format!("bad_args:type:{}", name));
+            }
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------- tests
 
 #[cfg(test)]
@@ -238,6 +282,36 @@ mod tests {
             kind,
             remote: false,
         }
+    }
+
+    #[test]
+    fn validate_args_covers_required_types_and_unreadable_schema() {
+        let schema = r#"{"type":"object","properties":{"city":{"type":"string"},"days":{"type":"integer"},"flag":{"type":"boolean"}},"required":["city"]}"#;
+
+        // readable schema: required missing / wrong type rejected.
+        assert_eq!(
+            validate_args(schema, &serde_json::json!({"days": 1})).unwrap_err(),
+            "bad_args:missing:city"
+        );
+        assert_eq!(
+            validate_args(schema, &serde_json::json!({"city": "杭州", "flag": "yes"})).unwrap_err(),
+            "bad_args:type:flag"
+        );
+        assert_eq!(
+            validate_args(schema, &serde_json::json!({"city": "杭州", "days": 1.5})).unwrap_err(),
+            "bad_args:type:days"
+        );
+        // valid: all types match, extra unknown field tolerated.
+        assert!(validate_args(
+            schema,
+            &serde_json::json!({"city": "杭州", "days": 3, "flag": true, "extra": [1]})
+        )
+        .is_ok());
+
+        // unreadable / non-object schema → pass-through (execution is the backstop).
+        assert!(validate_args("not json", &serde_json::json!({})).is_ok());
+        assert!(validate_args("{}", &serde_json::json!({"anything": 1})).is_ok());
+        assert!(validate_args(r#"{"type":"array"}"#, &serde_json::json!("x")).is_ok());
     }
 
     #[test]

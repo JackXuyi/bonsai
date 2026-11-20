@@ -12,4 +12,4 @@
 
 上游方案：`docs/zh/plan-agent-mcp-skill.md`（v0.4，D1–D12 全部拍板；实施记录与偏差见其 §8）。
 
-验收口径：所有 `真机：` 前缀项必须在 `.app`（非 CI）环境跑一遍才算关闭本方案；其余项均已由 `cargo test`（278 测）/ `vitest`（70 测）/ `tsc` / `next build` 覆盖。
+验收口径：所有 `真机：` 前缀项必须在 `.app`（非 CI）环境跑一遍才算关闭本方案；其余项均已由 `cargo test`（281 测）/ `vitest`（70 测）/ `tsc` / `next build` 覆盖。

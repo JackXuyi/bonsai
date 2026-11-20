@@ -21,6 +21,20 @@ pub fn now_iso() -> String {
     })
 }
 
+/// Current instant in the machine's local timezone, or the pinned override
+/// converted to local. Everything user-visible (env segment, day keys,
+/// reminder windows) must go through this — raw `Local::now()` re-introduces
+/// the date-drift flake that `proactive_spoke_today` already hit once.
+pub fn now_local() -> chrono::DateTime<chrono::Local> {
+    let fixed = OVERRIDE.with(|cell| cell.borrow().clone());
+    match fixed {
+        Some(iso) => chrono::DateTime::parse_from_rfc3339(&iso)
+            .map(|t| t.with_timezone(&chrono::Local))
+            .unwrap_or_else(|_| chrono::Local::now()),
+        None => chrono::Local::now(),
+    }
+}
+
 /// Pin the clock on the current thread (test only). Returns a guard that
 /// clears the pin on drop.
 #[cfg(test)]

@@ -391,7 +391,31 @@ pub fn execute_audited(
     let (_idx, provider, descriptor) =
         find_owner(kit, name).ok_or_else(|| "unknown_tool".to_string())?;
     let args_summary = crate::agent_tools::clip_chars(&mask_secrets(&args.to_string()), 200);
+    log::debug!(
+        "agent_tool_call: tool={} kind={} args={} trace={}",
+        name,
+        descriptor.kind.as_str(),
+        args_summary,
+        kit.trace_ref()
+    );
+    // Strict-args validation (plan §3.3): parameter validation BEFORE the
+    // gate — garbage from a small model never reaches approval or execution.
     let started = std::time::Instant::now();
+    if let Err(reason) = crate::agent_tools::validate_args(&descriptor.detail, &args) {
+        db::log_agent_tool_call(
+            conn,
+            descriptor.kind.as_str(),
+            &descriptor.name,
+            "error",
+            &reason,
+            Some(&args_summary),
+            Some(&kit.trace_ref()),
+            descriptor.remote,
+            Some(started.elapsed().as_millis() as i64),
+        )
+        .ok();
+        return Err(reason);
+    }
     let call = ToolCall { name: name.to_string(), args };
     let decision = kit.gate.check(&call, &descriptor.name, descriptor.remote);
     if decision == ApprovalDecision::Deny {
@@ -1111,6 +1135,48 @@ mod tests {
         let rec = &db::tool_call_records(&conn, 10).unwrap()[0];
         assert_eq!(rec.outcome, "error");
         assert_eq!(rec.result_status.as_deref(), Some("mcp_timeout"));
+    }
+
+    #[test]
+    fn execute_audited_validates_args_before_gate() {
+        // plan §3.3: strict inputSchema check BEFORE the approval gate —
+        // a small model's hallucinated args never reach execution, and the
+        // audit row records the exact reason.
+        let conn = mem();
+        let schema = r#"{"type":"object","properties":{"city":{"type":"string"},"days":{"type":"integer"}},"required":["city"]}"#;
+        let mut provider = crate::mcp::MockMcpProvider::with_tool("weather", "查天气", schema);
+        provider.replies.insert("weather".into(), "杭州多云 18 度".into());
+        let kit = AgentKit {
+            providers: vec![Box::new(provider)],
+            gate: Box::new(crate::agent_tools::AutoAllowGate),
+            prompt_trace: Mutex::new(Vec::new()),
+        };
+
+        // missing required → rejected, provider never called.
+        let err =
+            execute_audited(&conn, &kit, "weather", serde_json::json!({"days": 3})).unwrap_err();
+        assert_eq!(err, "bad_args:missing:city");
+
+        // wrong type → rejected.
+        let err = execute_audited(&conn, &kit, "weather", serde_json::json!({"city": "杭州", "days": "三天"}))
+            .unwrap_err();
+        assert_eq!(err, "bad_args:type:days");
+
+        // not an object → rejected.
+        let err = execute_audited(&conn, &kit, "weather", serde_json::json!("杭州")).unwrap_err();
+        assert_eq!(err, "bad_args:not-an-object");
+
+        // valid args (incl. unknown extra field) → passes, executes.
+        let out = execute_audited(&conn, &kit, "weather", serde_json::json!({"city": "杭州", "unit": "c"})).unwrap();
+        assert_eq!(out.summary, "杭州多云 18 度");
+
+        // audit: only the rejected rows carry bad_args; the good one auto_allowed.
+        let recs = db::tool_call_records(&conn, 10).unwrap();
+        let bad = recs.iter().filter(|r| r.result_status.as_deref().unwrap_or("").starts_with("bad_args"));
+        assert_eq!(bad.count(), 3);
+        let good = &recs[0];
+        assert_eq!(good.result_status.as_deref(), Some("auto_allowed"));
+        assert_eq!(good.outcome, "ok");
     }
 
     #[test]
