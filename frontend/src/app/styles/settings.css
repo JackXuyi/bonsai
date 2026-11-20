@@ -298,7 +298,9 @@
 }
 
 .mconfirm-box {
-  width: 250px;
+  /* 弹窗统一宽度底线：必须大于 500px（2026-11-20 用户要求） */
+  width: 520px;
+  max-width: 92vw;
   padding: 14px;
   border: 1px solid var(--line);
   border-radius: 13px;
@@ -439,7 +441,7 @@
 /* ── 表单弹窗（添加 / 编辑云端模型）────────────────────────── */
 
 .mconfirm-box.form {
-  width: 290px;
+  width: 560px;
   display: flex;
   flex-direction: column;
   gap: 7px;
