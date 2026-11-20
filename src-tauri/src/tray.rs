@@ -12,8 +12,16 @@
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    App, AppHandle, Manager, WebviewUrl, WebviewWindowBuilder,
+    App, AppHandle, Manager, PhysicalSize, Size, WebviewUrl, WebviewWindowBuilder,
 };
+
+/// Default face window size (logical px): width = 520×3, height 960 (1080p).
+const DEFAULT_SIZE: (f64, f64) = (1560.0, 960.0);
+/// Floor for drag-resize: below this the tab layout starts to collapse.
+const MIN_SIZE: (f64, f64) = (520.0, 480.0);
+/// settings key holding the last user-chosen size, "WIDTHxHEIGHT" in
+/// physical px (what `inner_size()` reports, DPI-independent round-trip).
+const SIZE_SETTING: &str = "window_size_px";
 
 pub fn setup(app: &mut App) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "Show bonsai", true, None::<&str>)?;
@@ -42,7 +50,12 @@ pub fn setup(app: &mut App) -> tauri::Result<()> {
                 show_main_window(app);
             }
             "hide" => hide_main_window(app),
-            "quit" => app.exit(0),
+            "quit" => {
+                // Last chance to remember the size: the window may still be
+                // open when the user quits from the tray.
+                persist_window_size(app);
+                app.exit(0);
+            }
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
@@ -81,19 +94,75 @@ pub fn show_main_window(app: &AppHandle) {
     } else {
         let _ = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
             .title("bonsai")
-            .inner_size(1560.0, 960.0) // 宽 = 520×3，高 960（适配 1080p 屏）
-            .resizable(false)
+            .inner_size(DEFAULT_SIZE.0, DEFAULT_SIZE.1)
+            // User-resizable now; the saved size is restored below.
+            .resizable(true)
+            .min_inner_size(MIN_SIZE.0, MIN_SIZE.1)
             .build();
+        if let (Some(win), Some((w, h))) =
+            (app.get_webview_window("main"), saved_window_size(app))
+        {
+            // Physical px: the stored size round-trips exactly regardless of
+            // the display's scale factor.
+            let _ = win.set_size(Size::Physical(PhysicalSize::new(w, h)));
+        }
     }
 }
 
 /// Closing the window means "run in the background": hide it and drop the Dock
 /// icon so only the menu-bar tray remains. The process keeps running.
 pub fn hide_main_window(app: &AppHandle) {
+    persist_window_size(app);
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.hide();
     }
     set_dock_visible(app, false);
+}
+
+/// Save the current window size (physical px) into the settings table so the
+/// next window-open restores what the user dragged it to. Silent best-effort:
+/// a locked DB or a missing window must never break hide/quit.
+fn persist_window_size(app: &AppHandle) {
+    let Some(win) = app.get_webview_window("main") else {
+        return;
+    };
+    let Ok(size) = win.inner_size() else {
+        return;
+    };
+    if let Some(store) = app.try_state::<crate::memory::MemoryStore>() {
+        if let Ok(conn) = store.inner().0.lock() {
+            let _ = crate::memory::db::set_setting(
+                &conn,
+                SIZE_SETTING,
+                &format_size_setting(size.width, size.height),
+            );
+        }
+    }
+}
+
+/// Restore target from the settings table, if any.
+fn saved_window_size(app: &AppHandle) -> Option<(u32, u32)> {
+    let store = app.try_state::<crate::memory::MemoryStore>()?;
+    let conn = store.inner().0.lock().ok()?;
+    let raw = crate::memory::db::get_setting(&conn, SIZE_SETTING).ok()??;
+    parse_size_setting(&raw)
+}
+
+/// "WIDTHxHEIGHT" — the canonical format for the size setting.
+fn format_size_setting(width: u32, height: u32) -> String {
+    format!("{width}x{height}")
+}
+
+fn parse_size_setting(raw: &str) -> Option<(u32, u32)> {
+    let (w, h) = raw.split_once('x')?;
+    let w = w.trim().parse::<u32>().ok()?;
+    let h = h.trim().parse::<u32>().ok()?;
+    // Reject nonsense (zero / absurd) so a corrupt setting falls back to
+    // the default instead of a 1×1 window.
+    if w == 0 || h == 0 || w > 20_000 || h > 20_000 {
+        return None;
+    }
+    Some((w, h))
 }
 
 /// Toggle the Dock tile / Cmd-Tab entry. No-op off macOS, where the Dock does
@@ -110,3 +179,27 @@ pub fn set_dock_visible(app: &AppHandle, visible: bool) {
 
 #[cfg(not(target_os = "macos"))]
 pub fn set_dock_visible(_app: &AppHandle, _visible: bool) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn size_setting_round_trips() {
+        let raw = format_size_setting(1560, 960);
+        assert_eq!(raw, "1560x960");
+        assert_eq!(parse_size_setting(&raw), Some((1560, 960)));
+    }
+
+    #[test]
+    fn size_setting_rejects_garbage() {
+        assert_eq!(parse_size_setting(""), None);
+        assert_eq!(parse_size_setting("1560"), None);
+        assert_eq!(parse_size_setting("axb"), None);
+        assert_eq!(parse_size_setting("1560 x"), None);
+        assert_eq!(parse_size_setting("0x960"), None);
+        assert_eq!(parse_size_setting("999999x960"), None);
+        // Whitespace around numbers is tolerated.
+        assert_eq!(parse_size_setting(" 1560 x 960 "), Some((1560, 960)));
+    }
+}
