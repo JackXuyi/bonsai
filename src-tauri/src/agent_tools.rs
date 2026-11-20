@@ -20,6 +20,9 @@ use serde::Deserialize;
 pub enum ToolKind {
     Mcp,
     Skill,
+    /// Built-in, local-only capabilities shipped with the binary (first one:
+    /// memory_search). Never remote; audited under the `builtin` kind.
+    Builtin,
 }
 
 impl ToolKind {
@@ -27,6 +30,7 @@ impl ToolKind {
         match self {
             ToolKind::Mcp => "mcp",
             ToolKind::Skill => "skill",
+            ToolKind::Builtin => "builtin",
         }
     }
 }
@@ -59,8 +63,18 @@ pub struct ToolOutput {
 
 pub trait ToolProvider: Send + Sync {
     fn descriptors(&self) -> Vec<ToolDescriptor>;
-    /// Skills answer `Err("unsupported")` — they are prompt-only (D4).
+    /// Skills and other prompt-only kinds answer `Err("unsupported")` (D4).
     fn execute(&self, call: &ToolCall) -> Result<ToolOutput, String>;
+    /// Built-in tools that need the memory store override this; the chat
+    /// turn already holds the connection when it executes a call. Default:
+    /// conn-less execution, so every existing provider is untouched.
+    fn execute_with_conn(
+        &self,
+        _conn: &rusqlite::Connection,
+        call: &ToolCall,
+    ) -> Result<ToolOutput, String> {
+        self.execute(call)
+    }
 }
 
 // ---------------------------------------------------------------- approval

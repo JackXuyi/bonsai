@@ -141,6 +141,15 @@ fn agent_pipeline(
 ) -> (String, Option<String>, bool) {
     use crate::agent_tools::{name_catalog, parse_candidates, parse_tool_decision, ToolDecision, ToolKind};
 
+    // The `DialogueOutcome.tool` label, prefixed by the tool's kind so the
+    // frontend can tell MCP calls (`mcp:x`) from built-ins (`builtin:x`).
+    let tool_label = |kit: &crate::mcp_admin::AgentKit, name: &str| -> Option<String> {
+        kit.catalog()
+            .into_iter()
+            .find(|d| d.name == name)
+            .map(|d| format!("{}:{}", d.kind.as_str(), name))
+    };
+
     let catalog = kit.catalog();
     kit.trace(format!("level0:{}", name_catalog(&catalog)));
     let sys0 = format!(
@@ -206,6 +215,12 @@ fn agent_pipeline(
             ToolKind::Mcp => {
                 detail.push_str(&format!("\n- 【工具】{}：{}\n输入参数：{}", d.name, d.summary, d.detail))
             }
+            ToolKind::Builtin => {
+                detail.push_str(&format!(
+                    "\n- 【内置工具】{}：{}\n输入参数：{}",
+                    d.name, d.summary, d.detail
+                ))
+            }
         }
     }
     let sys1 = format!(
@@ -246,10 +261,11 @@ fn agent_pipeline(
         }
         Ok(ToolDecision::Call { name, args }) => {
             kit.trace(format!("level2:call:{name}"));
+            let label = tool_label(kit, &name);
             match crate::mcp_admin::execute_audited(conn, kit, &name, args) {
                 Err(e) => {
                     let why = if e == "denied" { "需要你确认，这次先没有执行" } else { "没能执行成功" };
-                    (format!("（工具 {name} {why}。）"), Some(format!("mcp:{name}")), false)
+                    (format!("（工具 {name} {why}。）"), label, false)
                 }
                 Ok(out) => {
                     // ---- pass 3: result-summary round (streaming lives here)
@@ -267,11 +283,11 @@ fn agent_pipeline(
                     if raw3.trim().is_empty() {
                         (
                             format!("（{name} 跑完了，但盆栽没组织好语言——结果：{}）", out.summary),
-                            Some(format!("mcp:{name}")),
+                            label,
                             true,
                         )
                     } else {
-                        (raw3, Some(format!("mcp:{name}")), true)
+                        (raw3, label, true)
                     }
                 }
             }
@@ -578,7 +594,7 @@ pub fn dialogue_chat(
     let mut backend = crate::persona::backend().map_err(|e| e.to_string())?;
     let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
     crate::onboarding::ensure_not_minor(&conn)?;
-    let mut kit = crate::mcp_admin::build_agent_kit(&conn, agent.inner());
+    let mut kit = crate::mcp_admin::build_agent_kit(&conn, agent.inner(), &user_text);
     chat_turn_with_kit(
         &conn,
         backend.as_mut(),
@@ -613,7 +629,7 @@ pub fn dialogue_chat_stream(
     let mut backend = crate::persona::backend().map_err(|e| e.to_string())?;
     let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
     crate::onboarding::ensure_not_minor(&conn)?;
-    let mut kit = crate::mcp_admin::build_agent_kit(&conn, agent.inner());
+    let mut kit = crate::mcp_admin::build_agent_kit(&conn, agent.inner(), &user_text);
     let mut emit = |delta: &str| {
         let _ = on_delta.send(serde_json::json!({ "delta": delta }));
     };
@@ -1161,5 +1177,70 @@ mod tests {
         let records = db::tool_call_records(&conn, 10).unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].outcome, "denied");
+    }
+
+    // ---- built-in memory_search (plan-agent P3)
+
+    fn memory_kit() -> crate::mcp_admin::AgentKit {
+        crate::mcp_admin::AgentKit {
+            providers: vec![Box::new(crate::memory_search::MemorySearchProvider)],
+            gate: Box::new(crate::agent_tools::AutoAllowGate),
+            prompt_trace: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The screenshot regression: "总结一下我 18 号说了啥" must be answered
+    /// from the event log (via memory_search), not from thin air.
+    #[test]
+    fn builtin_memory_search_full_chain_is_audited_and_labeled() {
+        let _g = crate::memory::clock::pinned("2026-11-20T07:00:00Z");
+        let conn = mem();
+        conn.execute(
+            "INSERT INTO events (ts, kind, content, role, session_id)
+             VALUES ('2026-11-18T01:00:00+00:00', 'dialogue', '聊了报销流程怎么走', 'user', 's1')",
+            [],
+        )
+        .unwrap();
+        let c = card();
+        let mut backend = SeqBackend::new(&[
+            r#"{"candidates": ["memory_search"]}"#,
+            r#"{"tool": "memory_search", "args": {"query": "18号说了啥"}}"#,
+            "18 号那天聊了报销流程怎么走，找谁审批。",
+        ]);
+        let mut kit = memory_kit();
+        let out = chat_turn_with_kit(
+            &conn, &mut backend, &c, "s1", "总结一下我18号说了啥", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit,
+        )
+        .unwrap();
+        assert!(out.reply.contains("报销"));
+        assert_eq!(out.tool.as_deref(), Some("builtin:memory_search"));
+        // Audit row: kind=builtin, status auto_allowed (local read, no gate).
+        let records = db::tool_call_records(&conn, 10).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].tool, "builtin");
+        assert_eq!(records[0].action, "memory_search");
+        assert_eq!(records[0].result_status.as_deref(), Some("auto_allowed"));
+        assert!(records[0].params_summary.as_deref().unwrap_or("").contains("18号"));
+    }
+
+    /// Offering is signal-gated: plain chat keeps the legacy kit-free path
+    /// (no extra model round), recall questions get the tool in the catalog.
+    #[test]
+    fn kit_gates_memory_tool_by_recall_signal() {
+        let conn = mem();
+        let state = crate::mcp_admin::AgentState {
+            manager: crate::mcp::McpManager::default(),
+            skills_dir: std::env::temp_dir(),
+            approvals: std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()),
+            app: None,
+        };
+        assert!(
+            !crate::mcp_admin::build_agent_kit(&conn, &state, "我今天好累").has_capabilities(),
+            "plain chat must not grow a catalog"
+        );
+        let kit = crate::mcp_admin::build_agent_kit(&conn, &state, "总结一下我18号说了啥");
+        assert!(kit.has_capabilities());
+        assert!(kit.catalog().iter().any(|d| d.name == "memory_search"));
     }
 }

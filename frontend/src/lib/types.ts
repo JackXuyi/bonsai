@@ -132,7 +132,7 @@ export interface DialogueFilter {
 export interface DialogueOutcome {
   reply: string;
   crisis?: boolean;
-  /** None | "agenda_today"… | "mcp:<tool>" | "skill:<name>"（spec-s3） */
+  /** None | "agenda_today"… | "mcp:<tool>" | "skill:<name>" | "builtin:memory_search"（spec-s3 + P3 内置工具） */
   tool?: string | null;
   model_used?: boolean;
   filter?: DialogueFilter;

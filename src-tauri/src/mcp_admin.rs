@@ -448,7 +448,7 @@ pub fn execute_audited(
         .ok();
         return Err("denied".into());
     }
-    let result = provider.execute(&call);
+    let result = provider.execute_with_conn(conn, &call);
     let duration = Some(started.elapsed().as_millis() as i64);
     match result {
         Ok(out) => {
@@ -495,8 +495,18 @@ pub fn execute_audited(
 
 /// Build the turn's kit from managed state + settings. Cost: one SQL read
 /// per turn (settings + enabled servers); live clients come from the pool.
-pub fn build_agent_kit(conn: &Connection, state: &AgentState) -> AgentKit {
+///
+/// `user_text` gates the built-in memory_search tool: it is offered only
+/// when the utterance carries a recall signal (date words / recall verbs,
+/// see memory_search::might_recall). Without the signal — and with no
+/// MCP/skill capabilities — the kit stays empty and the turn keeps the
+/// legacy single-round chat path.
+pub fn build_agent_kit(conn: &Connection, state: &AgentState, user_text: &str) -> AgentKit {
     let mut providers: Vec<Box<dyn ToolProvider>> = Vec::new();
+
+    if crate::memory_search::might_recall(user_text) {
+        providers.push(Box::new(crate::memory_search::MemorySearchProvider));
+    }
 
     // Skills first (prompt-only), then MCP tools — catalog order is stable
     // either way (sorted by name in AgentKit::catalog).
@@ -1234,7 +1244,7 @@ pub(crate) mod tests {
         )
         .unwrap();
 
-        let kit = build_agent_kit(&conn, &state);
+        let kit = build_agent_kit(&conn, &state, "今天有什么会");
         assert!(kit.has_capabilities());
         let err = execute_audited(&conn, &kit, "weather", serde_json::json!({})).unwrap_err();
         assert_eq!(err, "denied");

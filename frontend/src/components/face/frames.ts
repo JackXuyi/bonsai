@@ -191,6 +191,7 @@ export function noteFor(outcome: {
     const t = String(outcome.tool);
     if (t.startsWith("mcp:")) return `🔧 经 ${t.slice(4)} 调用`;
     if (t.startsWith("skill:")) return `🔧 经 ${t.slice(6)} 回答`;
+    if (t.startsWith("builtin:")) return "🔧 翻了翻记忆";
     return "日程 · 直接查的日历";
   }
   const notes: string[] = [];

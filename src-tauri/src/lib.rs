@@ -26,6 +26,7 @@ pub mod mcp;
 pub mod mcp_admin;
 pub mod mcp_discover;
 pub mod memory;
+pub mod memory_search;
 pub mod morph;
 pub mod onboarding;
 pub mod perception;
