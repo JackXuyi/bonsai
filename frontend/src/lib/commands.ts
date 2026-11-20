@@ -11,6 +11,7 @@ import type {
   CloudTestReport,
   ConsolidateResult,
   DialogueOutcome,
+  DialogueBubble,
   GrowthStatus,
   LlmConfigView,
   McpSaveInput,
@@ -60,6 +61,10 @@ export const dialogueChatStream = (
     sessionId,
     onDelta,
   });
+
+/** 对话页启动回放：最近消息流平铺气泡（旧→新），bot 主动消息也在内。 */
+export const dialogueHistory = (sessionId: string, limit?: number) =>
+  call<DialogueBubble[]>("dialogue_history", { sessionId, limit });
 export const dialogueProactiveNow = () => call<string>("dialogue_proactive_now");
 
 // ---------- prediction ----------

@@ -1588,6 +1588,47 @@ pub fn dialogue_history(
     Ok(out)
 }
 
+/// One dialogue row, flat, for the chat page's startup replay (spec: 对话页
+/// 回放最近消息流). Deliberately NOT the paired `Turn` shape — the UI wants
+/// every user/assistant row as its own bubble, including proactive ones.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DialogueBubble {
+    pub id: i64,
+    pub ts: String,
+    pub role: String, // 'user' | 'assistant'
+    pub content: String,
+}
+
+/// Last `limit` dialogue rows for a session, oldest first. Proactive
+/// assistant rows are included (they live in the same events stream);
+/// non-dialogue rows and dropped user-only tails behave like
+/// `dialogue_history` (a user row with no reply still shows — the user did
+/// say it, and the next turn's model context pairs it or drops it there).
+pub fn dialogue_bubbles(
+    conn: &Connection,
+    session_id: &str,
+    limit: usize,
+) -> rusqlite::Result<Vec<DialogueBubble>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, ts, role, content FROM events
+         WHERE session_id = ?1 AND kind = 'dialogue'
+           AND role IN ('user', 'assistant')
+         ORDER BY id DESC LIMIT ?2",
+    )?;
+    let mut rows: Vec<DialogueBubble> = stmt
+        .query_map(params![session_id, limit as i64], |row| {
+            Ok(DialogueBubble {
+                id: row.get(0)?,
+                ts: row.get(1)?,
+                role: row.get(2)?,
+                content: row.get(3)?,
+            })
+        })?
+        .collect::<Result<_, _>>()?;
+    rows.reverse(); // oldest first
+    Ok(rows)
+}
+
 /// Facts whose ts is older than `iso_cutoff` and confidence below `max_conf`.
 /// Used by stage ⑤ deletion (defensive: rule-extracted facts stay ≥ 0.5,
 /// so this currently only sweeps legacy/manual low-confidence entries).
@@ -1931,6 +1972,28 @@ mod tests {
         let capped = tool_call_records(&conn, 2).unwrap();
         assert_eq!(capped.len(), 2);
         assert_eq!(capped[0].action, "tool3");
+    }
+
+    #[test]
+    fn dialogue_bubbles_flat_ordered_and_session_scoped() {
+        let conn = mem();
+        add_event_meta(&conn, "dialogue", "早上好", Some("user"), Some("default")).unwrap();
+        add_event_meta(&conn, "dialogue", "早。今天有雨。", Some("assistant"), Some("default")).unwrap();
+        add_event_meta(&conn, "dialogue", "明天呢？", Some("user"), Some("default")).unwrap();
+        // noise: non-dialogue + other session — must be excluded.
+        add_event_meta(&conn, "perception", "窗口打开", None, None).unwrap();
+        add_event_meta(&conn, "dialogue", "别的会话", Some("user"), Some("other")).unwrap();
+
+        let rows = dialogue_bubbles(&conn, "default", 50).unwrap();
+        assert_eq!(rows.len(), 3, "flat rows: proactive/reply-less kept, noise dropped");
+        assert_eq!(rows[0].role, "user");
+        assert_eq!(rows[0].content, "早上好");
+        assert_eq!(rows[2].role, "user");
+        assert!(rows[1].ts.contains("20"), "ts carried from events");
+
+        let capped = dialogue_bubbles(&conn, "default", 2).unwrap();
+        assert_eq!(capped.len(), 2);
+        assert_eq!(capped[0].content, "早。今天有雨。", "limit takes the newest, oldest first out");
     }
 
     #[test]

@@ -232,6 +232,7 @@ pub fn run() {
             dialogue::dialogue_chat,
             dialogue::dialogue_chat_stream,
             dialogue::dialogue_proactive_now,
+            dialogue::dialogue_history,
             report::daily_report,
             llm_admin::llm_config_get,
             llm_admin::llm_config_set_active,

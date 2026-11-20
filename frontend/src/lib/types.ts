@@ -138,6 +138,14 @@ export interface DialogueOutcome {
   filter?: DialogueFilter;
 }
 
+/** 对话页启动回放的单条消息（events 表 kind=dialogue 平铺行，旧→新）。 */
+export interface DialogueBubble {
+  id: number;
+  ts: string;
+  role: "user" | "assistant";
+  content: string;
+}
+
 // ── prediction（predict.rs）───────────────────────────────────
 export interface PredictionAskedPayload {
   id: number;
