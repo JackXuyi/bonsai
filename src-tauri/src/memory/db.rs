@@ -1,4 +1,4 @@
-//! SQLite schema (v8) and primitives for the memory layer.
+//! SQLite schema (v9) and primitives for the memory layer.
 //!
 //! Plans: docs/zh/plan-memory.md §3–§4, docs/zh/plan-predict.md §3.4,
 //! docs/zh/plan-morph.md §3.2, docs/zh/plan-onboarding.md §3.1,
@@ -13,11 +13,11 @@
 //!   Art. 16). `forget_event` / `forget_session` / `forget_all`.
 
 use chrono::Timelike;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use super::clock;
 
-pub(crate) const SCHEMA_VERSION: i64 = 8;
+pub(crate) const SCHEMA_VERSION: i64 = 9;
 
 /// Test-only: materialise the full schema on a bare in-memory connection.
 /// Other modules' tests build their own `Connection::open_in_memory()` and
@@ -252,6 +252,45 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
     tool_cache_at TEXT,
     created_at    TEXT NOT NULL
 );
+
+-- Turn trace (spec-s8): how one reply was produced. Sidecar record —
+-- NEVER part of ACTIVITY_KINDS and never feeds morph/relationship/growth:
+-- tracing our own work must not count as "being talked to".
+-- D1 (2026-11-20): prompts/outputs stored FULL TEXT, no pruning, no TTL —
+-- the trace is a debugging & trust product; truncating it destroys the
+-- evidence. Storage cost is accepted on local SQLite.
+CREATE TABLE IF NOT EXISTS turn_trace (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id         TEXT NOT NULL,
+    user_event_id      INTEGER,        -- events.id of the user side (NULL for proactive)
+    assistant_event_id INTEGER,        -- events.id of the assistant side
+    kind               TEXT NOT NULL,  -- 'model' | 'tool' | 'crisis' | 'proactive'
+    model_used         INTEGER NOT NULL DEFAULT 0,
+    tool_label         TEXT,           -- 'builtin:x' | 'mcp:x' | 'skill:x' | 'calendar:action'
+    filter_report      TEXT,           -- JSON: {"unconditional_affirmation","hedged","explicit"}
+    duration_ms        INTEGER,
+    ts                 TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_turn_trace_user ON turn_trace(user_event_id);
+CREATE INDEX IF NOT EXISTS idx_turn_trace_asst ON turn_trace(assistant_event_id);
+
+-- One row per pipeline step inside a turn (spec-s8 §3.2). seq orders the
+-- timeline; step_kind drives the frontend's node coloring.
+CREATE TABLE IF NOT EXISTS trace_steps (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    turn_id     INTEGER NOT NULL REFERENCES turn_trace(id) ON DELETE CASCADE,
+    seq         INTEGER NOT NULL,
+    step_kind   TEXT NOT NULL,   -- crisis_check|tool_intent|llm_round|tool_call|json_retry|prose_retry|filter
+    title       TEXT NOT NULL,   -- display heading (Chinese, user-facing)
+    prompt      TEXT,            -- llm_round: full system prompt of THIS round (D1: unclipped)
+    output      TEXT,            -- llm_round: raw model output; tool_call: reply text / error
+    args_json   TEXT,            -- tool_call: args JSON verbatim
+    summary     TEXT,            -- tool_call: ToolOutput.summary
+    outcome     TEXT,            -- ok|denied|error|hit|miss|pass|answered|direct|none
+    duration_ms INTEGER,
+    ts          TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_trace_steps_turn ON trace_steps(turn_id, seq);
 
 -- TODO(vector): vector index for hybrid retrieval (embeddings + time decay).
 -- No embedding column yet — schema migration waits for the sqlite-vec vs
@@ -1631,6 +1670,182 @@ pub fn dialogue_bubbles(
     Ok(rows)
 }
 
+// ---------------------------------------------------------------- turn trace (spec-s8)
+
+/// One pipeline step, as the dialogue layer collects it in memory.
+#[derive(Debug, Clone)]
+pub struct TraceStepDraft {
+    pub step_kind: String,
+    pub title: String,
+    pub prompt: Option<String>,
+    pub output: Option<String>,
+    pub args_json: Option<String>,
+    pub summary: Option<String>,
+    pub outcome: Option<String>,
+    pub duration_ms: Option<i64>,
+}
+
+/// A whole turn's trace, persisted atomically (turn row + all steps).
+#[derive(Debug, Clone)]
+pub struct TraceTurnDraft {
+    pub session_id: String,
+    pub kind: String,
+    pub model_used: bool,
+    pub tool_label: Option<String>,
+    pub filter_report: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub steps: Vec<TraceStepDraft>,
+}
+
+/// One step as the UI reads it.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TraceStepRow {
+    pub seq: i64,
+    pub step_kind: String,
+    pub title: String,
+    pub prompt: Option<String>,
+    pub output: Option<String>,
+    pub args_json: Option<String>,
+    pub summary: Option<String>,
+    pub outcome: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub ts: String,
+}
+
+/// One turn (master row + ordered steps) as the UI reads it.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnTraceRow {
+    pub id: i64,
+    pub session_id: String,
+    pub user_event_id: Option<i64>,
+    pub assistant_event_id: Option<i64>,
+    pub kind: String,
+    pub model_used: bool,
+    pub tool_label: Option<String>,
+    pub filter_report: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub ts: String,
+    pub steps: Vec<TraceStepRow>,
+}
+
+/// Persist a finished turn: master row + all steps in ONE transaction so a
+/// crash mid-write can never leave a master row without its steps. Returns
+/// the turn id. Must be called in the SAME lock scope that inserted the
+/// user/assistant dialogue events (spec-s8 §3.2).
+pub fn trace_turn_persist(
+    conn: &Connection,
+    turn: &TraceTurnDraft,
+    user_event_id: Option<i64>,
+    assistant_event_id: Option<i64>,
+) -> rusqlite::Result<i64> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "INSERT INTO turn_trace
+           (session_id, user_event_id, assistant_event_id, kind, model_used,
+            tool_label, filter_report, duration_ms, ts)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            turn.session_id,
+            user_event_id,
+            assistant_event_id,
+            turn.kind,
+            turn.model_used as i64,
+            turn.tool_label,
+            turn.filter_report,
+            turn.duration_ms,
+            clock::now_iso(),
+        ],
+    )?;
+    let turn_id = tx.last_insert_rowid();
+    for (i, step) in turn.steps.iter().enumerate() {
+        tx.execute(
+            "INSERT INTO trace_steps
+               (turn_id, seq, step_kind, title, prompt, output, args_json, summary, outcome, duration_ms, ts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                turn_id,
+                (i + 1) as i64,
+                step.step_kind,
+                step.title,
+                step.prompt,
+                step.output,
+                step.args_json,
+                step.summary,
+                step.outcome,
+                step.duration_ms,
+                clock::now_iso(),
+            ],
+        )?;
+    }
+    tx.commit()?;
+    Ok(turn_id)
+}
+
+/// Full trace of one turn (None = turn id unknown — pre-trace message).
+pub fn turn_trace_get(conn: &Connection, turn_id: i64) -> rusqlite::Result<Option<TurnTraceRow>> {
+    let turn = conn
+        .query_row(
+            "SELECT id, session_id, user_event_id, assistant_event_id, kind,
+                    model_used, tool_label, filter_report, duration_ms, ts
+             FROM turn_trace WHERE id = ?1",
+            params![turn_id],
+            |r| {
+                Ok(TurnTraceRow {
+                    id: r.get(0)?,
+                    session_id: r.get(1)?,
+                    user_event_id: r.get(2)?,
+                    assistant_event_id: r.get(3)?,
+                    kind: r.get(4)?,
+                    model_used: r.get::<_, i64>(5)? != 0,
+                    tool_label: r.get(6)?,
+                    filter_report: r.get(7)?,
+                    duration_ms: r.get(8)?,
+                    ts: r.get(9)?,
+                    steps: Vec::new(),
+                })
+            },
+        )
+        .optional()?;
+    let Some(mut turn) = turn else { return Ok(None) };
+    let mut stmt = conn.prepare(
+        "SELECT seq, step_kind, title, prompt, output, args_json, summary,
+                outcome, duration_ms, ts
+         FROM trace_steps WHERE turn_id = ?1 ORDER BY seq ASC",
+    )?;
+    turn.steps = stmt
+        .query_map(params![turn_id], |r| {
+            Ok(TraceStepRow {
+                seq: r.get(0)?,
+                step_kind: r.get(1)?,
+                title: r.get(2)?,
+                prompt: r.get(3)?,
+                output: r.get(4)?,
+                args_json: r.get(5)?,
+                summary: r.get(6)?,
+                outcome: r.get(7)?,
+                duration_ms: r.get(8)?,
+                ts: r.get(9)?,
+            })
+        })?
+        .collect::<Result<_, _>>()?;
+    Ok(Some(turn))
+}
+
+/// Reverse lookup: which turn produced this dialogue event (either side).
+/// Returns None for pre-trace messages.
+pub fn turn_trace_find_by_event(conn: &Connection, event_id: i64) -> rusqlite::Result<Option<i64>> {
+    conn.query_row(
+        "SELECT id FROM turn_trace
+         WHERE user_event_id = ?1 OR assistant_event_id = ?1
+         ORDER BY id DESC LIMIT 1",
+        params![event_id],
+        |r| r.get(0),
+    )
+    .optional()
+}
+
 /// Facts whose ts is older than `iso_cutoff` and confidence below `max_conf`.
 /// Used by stage ⑤ deletion (defensive: rule-extracted facts stay ≥ 0.5,
 /// so this currently only sweeps legacy/manual low-confidence entries).
@@ -2295,5 +2510,90 @@ mod tests {
         forget_all(&conn).unwrap();
         assert!(tool_calls_recent(&conn, 5).unwrap().is_empty());
         assert!(calendar_last_fetch(&conn).unwrap().is_none());
+    }
+
+    #[test]
+    fn v9_creates_trace_tables() {
+        let conn = mem();
+        // Fresh schema carries the v9 tables; migrate on a legacy v1 db too.
+        let legacy = Connection::open_in_memory().unwrap();
+        legacy
+            .execute_batch(
+                "CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL,
+                     kind TEXT NOT NULL, content TEXT NOT NULL);
+                 CREATE TABLE facts (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL,
+                     content TEXT NOT NULL, source_event_id INTEGER, invalid_at TEXT);
+                 CREATE TABLE boundaries (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     content TEXT NOT NULL)",
+            )
+            .unwrap();
+        migrate(&legacy).unwrap();
+        assert_eq!(user_version(&legacy).unwrap(), SCHEMA_VERSION);
+        let n: i64 = legacy
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table'
+                 AND name IN ('turn_trace','trace_steps')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 2, "migrated db must carry both trace tables");
+    }
+
+    #[test]
+    fn trace_turn_persist_get_and_find_by_event_roundtrip() {
+        let conn = mem();
+        let draft = TraceTurnDraft {
+            session_id: "s1".into(),
+            kind: "model".into(),
+            model_used: true,
+            tool_label: Some("builtin:memory_search".into()),
+            filter_report: Some(r#"{"explicit":false,"hedged":false}"#.into()),
+            duration_ms: Some(1234),
+            steps: vec![
+                TraceStepDraft {
+                    step_kind: "crisis_check".into(),
+                    title: "危机拦截检查".into(),
+                    prompt: None,
+                    output: None,
+                    args_json: None,
+                    summary: None,
+                    outcome: Some("miss".into()),
+                    duration_ms: None,
+                },
+                TraceStepDraft {
+                    step_kind: "llm_round".into(),
+                    title: "直接对话".into(),
+                    prompt: Some("SYS".into()),
+                    output: Some("REPLY".into()),
+                    args_json: None,
+                    summary: None,
+                    outcome: Some("answered".into()),
+                    duration_ms: Some(900),
+                },
+            ],
+        };
+        let uid = add_event(&conn, "dialogue", "user text").unwrap();
+        let aid = add_event(&conn, "dialogue", "assistant reply").unwrap();
+        let turn_id = trace_turn_persist(&conn, &draft, Some(uid), Some(aid)).unwrap();
+
+        // Full readback: master + ordered steps.
+        let trace = turn_trace_get(&conn, turn_id).unwrap().expect("turn exists");
+        assert_eq!(trace.kind, "model");
+        assert!(trace.model_used);
+        assert_eq!(trace.user_event_id, Some(uid));
+        assert_eq!(trace.assistant_event_id, Some(aid));
+        assert_eq!(trace.steps.len(), 2);
+        assert_eq!(trace.steps[0].seq, 1);
+        assert_eq!(trace.steps[0].step_kind, "crisis_check");
+        assert_eq!(trace.steps[1].seq, 2);
+        assert_eq!(trace.steps[1].prompt.as_deref(), Some("SYS"));
+
+        // Both sides of the dialogue resolve to the same turn; a stranger id
+        // resolves to nothing.
+        assert_eq!(turn_trace_find_by_event(&conn, uid).unwrap(), Some(turn_id));
+        assert_eq!(turn_trace_find_by_event(&conn, aid).unwrap(), Some(turn_id));
+        assert_eq!(turn_trace_find_by_event(&conn, 999_999).unwrap(), None);
+        assert!(turn_trace_get(&conn, 999_999).unwrap().is_none());
     }
 }

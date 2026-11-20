@@ -57,6 +57,120 @@ pub struct DialogueOutcome {
     /// `"agenda_today" | "agenda_tomorrow" | "next" | "search"`. The frontend
     /// uses it to label the bubble instead of blaming a missing model.
     pub tool: Option<String>,
+    /// Trace turn id (spec-s8): the frontend bubble links here for the
+    /// generation-trace page. Always Some for turns recorded after the
+    /// feature shipped.
+    pub turn_id: Option<i64>,
+}
+
+/// In-memory collector for one turn's trace steps (spec-s8 §3.1). Steps
+/// accumulate while the pipeline runs; the finished draft is persisted in
+/// the SAME lock scope that writes the dialogue events (one transaction).
+/// D1 (2026-11-20): prompts/outputs are stored full-text — no clipping.
+pub(crate) struct TraceRecorder {
+    started: std::time::Instant,
+    steps: Vec<db::TraceStepDraft>,
+}
+
+impl TraceRecorder {
+    fn new() -> Self {
+        Self { started: std::time::Instant::now(), steps: Vec::new() }
+    }
+
+    /// One model round: title, full prompt, raw output, outcome label.
+    fn llm_round(
+        &mut self,
+        title: &str,
+        prompt: &str,
+        output: &str,
+        outcome: &str,
+        dur: std::time::Duration,
+    ) {
+        self.steps.push(db::TraceStepDraft {
+            step_kind: "llm_round".into(),
+            title: title.into(),
+            prompt: Some(prompt.into()),
+            output: Some(output.into()),
+            args_json: None,
+            summary: None,
+            outcome: Some(outcome.into()),
+            duration_ms: Some(dur.as_millis() as i64),
+        });
+    }
+
+    /// One audited tool execution.
+    fn tool_call(
+        &mut self,
+        name: &str,
+        args_json: &str,
+        summary: &str,
+        outcome: &str,
+        output: Option<&str>,
+        dur: std::time::Duration,
+    ) {
+        self.steps.push(db::TraceStepDraft {
+            step_kind: "tool_call".into(),
+            title: format!("工具调用 · {name}"),
+            prompt: None,
+            output: output.map(Into::into),
+            args_json: Some(args_json.into()),
+            summary: Some(summary.into()),
+            outcome: Some(outcome.into()),
+            duration_ms: Some(dur.as_millis() as i64),
+        });
+    }
+
+    /// A non-model step (rule checks, retries, filter).
+    fn simple(&mut self, step_kind: &str, title: &str, outcome: &str, output: Option<&str>) {
+        self.steps.push(db::TraceStepDraft {
+            step_kind: step_kind.into(),
+            title: title.into(),
+            prompt: None,
+            output: output.map(Into::into),
+            args_json: None,
+            summary: None,
+            outcome: Some(outcome.into()),
+            duration_ms: None,
+        });
+    }
+
+    /// Serialize the turn (master + steps) and return its id.
+    fn persist(
+        &self,
+        conn: &Connection,
+        session_id: &str,
+        user_event_id: Option<i64>,
+        assistant_event_id: Option<i64>,
+        kind: &str,
+        model_used: bool,
+        tool_label: Option<String>,
+        filter_report: Option<String>,
+    ) -> rusqlite::Result<i64> {
+        db::trace_turn_persist(
+            conn,
+            &db::TraceTurnDraft {
+                session_id: session_id.to_string(),
+                kind: kind.into(),
+                model_used,
+                tool_label,
+                filter_report,
+                duration_ms: Some(self.started.elapsed().as_millis() as i64),
+                steps: self.steps.clone(),
+            },
+            user_event_id,
+            assistant_event_id,
+        )
+    }
+}
+
+/// FilterReport → the JSON stored in `turn_trace.filter_report`.
+fn filter_json(filter: &generation::FilterReport) -> String {
+    serde_json::json!({
+        "unconditional_affirmation": filter.unconditional_affirmation,
+        "hedged": filter.hedged_disagreement,
+        "explicit": filter.explicit_disagreement,
+    })
+    .to_string()
 }
 
 const FALLBACK_REPLY: &str = "（盆栽这会儿状态不太好，脑子转不动——稍后再聊，别走开。）";
@@ -186,6 +300,7 @@ fn agent_pipeline(
     system: &str,
     history: &[crate::persona::eval::Turn],
     user_text: &str,
+    rec: &mut TraceRecorder,
     mut on_delta: Option<&mut dyn FnMut(&str)>,
 ) -> rusqlite::Result<(String, Option<String>, bool)> {
     use crate::agent_tools::{json_object_slice, name_catalog, parse_candidates, parse_tool_decision, ToolDecision, ToolKind};
@@ -209,14 +324,19 @@ fn agent_pipeline(
     );
 
     // ---- pass 1: name-only round (never streamed — the output may be JSON)
+    let t1 = std::time::Instant::now();
     let raw1 = backend.reply(&sys0, history, user_text, CHAT_TEMPERATURE);
+    let dur1 = t1.elapsed();
     if raw1.trim().is_empty() {
+        rec.llm_round("第 1 轮 · 能力候选", &sys0, &raw1, "none", dur1);
         return Ok((raw1, None, false));
     }
     let Ok(cands) = parse_candidates(&raw1) else {
         kit.trace("level1:direct-answer".into());
+        rec.llm_round("第 1 轮 · 能力候选", &sys0, &raw1, "direct", dur1);
         return Ok((raw1, None, false));
     };
+    rec.llm_round("第 1 轮 · 能力候选", &sys0, &raw1, "answered", dur1);
 
     // Whitelist + cap (silent degrade, spec-s3 §3). The whitelist checks the
     // FULL provider catalog — the ≤100 prompt display cap (spec-s3: 字典序稳定
@@ -240,7 +360,9 @@ fn agent_pipeline(
         // The model *wanted* tools but named none that exist (hallucinated
         // names or a since-disabled server). Never leak the raw candidates
         // JSON into the chat (2026-11-20 screenshot regression).
-        return Ok((prose_retry(backend, system, history, user_text), None, false));
+        let retry = prose_retry(backend, system, history, user_text);
+        rec.simple("prose_retry", "候选无效 · 追问直答", "ok", Some(&retry));
+        return Ok((retry, None, false));
     }
     kit.trace(format!(
         "level1:{}",
@@ -284,8 +406,11 @@ fn agent_pipeline(
     let sys1 = format!(
         "{sys0}\n\n【候选能力详情（内部参考，不向用户复述）】{detail}\n\n看完详情后：如需调用工具，只输出 JSON：{{\"tool\": \"工具名\", \"args\": {{…}}}}；不需要（包括技能内容已足够回答）时，直接把给用户的回答写出来，不要输出 JSON。"
     );
+    let t2 = std::time::Instant::now();
     let raw2 = backend.reply(&sys1, history, user_text, CHAT_TEMPERATURE);
+    let dur2 = t2.elapsed();
     if raw2.trim().is_empty() {
+        rec.llm_round("第 2 轮 · 读详情决策", &sys1, &raw2, "none", dur2);
         return Ok((raw2, None, false));
     }
 
@@ -296,7 +421,10 @@ fn agent_pipeline(
         // it verbatim is exactly the 2026-11-20 leak. Re-ask in prose.
         Err(_) if json_object_slice(&raw2).is_some() => {
             kit.trace("level2:json-not-prose".into());
-            Ok((prose_retry(backend, system, history, user_text), None, false))
+            rec.llm_round("第 2 轮 · 读详情决策", &sys1, &raw2, "json", dur2);
+            let retry = prose_retry(backend, system, history, user_text);
+            rec.simple("prose_retry", "JSON 泄漏 · 追问直答", "ok", Some(&retry));
+            Ok((retry, None, false))
         }
         // Prose answer (skill body sufficed, or the model declined).
         Err(_) => {
@@ -320,6 +448,7 @@ fn agent_pipeline(
                 }
             }
             kit.trace("level2:prose-answer".into());
+            rec.llm_round("第 2 轮 · 读详情决策", &sys1, &raw2, "direct", dur2);
             let label = used
                 .iter()
                 .find(|d| d.kind == ToolKind::Skill)
@@ -328,13 +457,19 @@ fn agent_pipeline(
         }
         Ok(ToolDecision::None) => {
             kit.trace("level2:none".into());
+            rec.llm_round("第 2 轮 · 读详情决策", &sys1, &raw2, "none", dur2);
             Ok(("（这轮先不动用工具——直接聊吧。）".into(), None, false))
         }
         Ok(ToolDecision::Call { name, args }) => {
             kit.trace(format!("level2:call:{name}"));
+            rec.llm_round("第 2 轮 · 读详情决策", &sys1, &raw2, "answered", dur2);
             let label = tool_label(kit, &name);
+            let args_text = args.to_string();
+            let t_tool = std::time::Instant::now();
             match crate::mcp_admin::execute_audited(store, kit, &name, args) {
                 Err(e) => {
+                    let outcome = if e == "denied" { "denied" } else { "error" };
+                    rec.tool_call(&name, &args_text, "", outcome, Some(&e), t_tool.elapsed());
                     // Carry the failure class into the bubble (2026-11-20: the
                     // one-size「没能执行成功」hid an unconnected MCP server
                     // behind a generic excuse). Reasons are short, audited
@@ -357,6 +492,7 @@ fn agent_pipeline(
                     // ---- pass 3: result-summary round (streaming lives here)
                     let sys2 = summary_round_prompt(&sys1, &name, &out.summary);
                     kit.trace("level3:answered".into());
+                    rec.tool_call(&name, &args_text, &out.summary, "ok", None, t_tool.elapsed());
                     // Third JSON-leak guard (2026-11-20 regression trio): the
                     // model can echo its own pass-2 decision JSON instead of
                     // prose. Streaming deltas are IRRETRACTABLE, so the sink
@@ -366,6 +502,7 @@ fn agent_pipeline(
                     // Deferred init: both match arms assign before any read.
                     let raw3;
                     let json_out;
+                    let t3 = std::time::Instant::now();
                     match on_delta.as_deref_mut() {
                         Some(cb) => {
                             let verdict = std::cell::RefCell::new(None::<bool>); // None=undecided, Some(true)=json
@@ -398,6 +535,13 @@ fn agent_pipeline(
                             json_out = raw3.trim_start().starts_with('{');
                         }
                     }
+                    rec.llm_round(
+                        &format!("第 3 轮 · 解读 {name} 结果"),
+                        &sys2,
+                        &raw3,
+                        "answered",
+                        t3.elapsed(),
+                    );
                     if raw3.trim().is_empty() {
                         Ok((
                             format!("（{name} 跑完了，但盆栽没组织好语言——结果：{}）", out.summary),
@@ -415,6 +559,12 @@ fn agent_pipeline(
                             }
                         );
                         let retry = backend.reply(&sys3, history, user_text, CHAT_TEMPERATURE);
+                        rec.simple(
+                            "json_retry",
+                            "JSON 泄漏 · 重问直答",
+                            "ok",
+                            Some(&retry),
+                        );
                         if !retry.trim().is_empty() && !retry.trim_start().starts_with('{') {
                             Ok((retry, label, false))
                         } else {
@@ -513,20 +663,45 @@ fn chat_turn_inner(
     mut kit: Option<&mut crate::mcp_admin::AgentKit>,
     mut on_delta: Option<&mut dyn FnMut(&str)>,
 ) -> rusqlite::Result<DialogueOutcome> {
+    // Trace collector (spec-s8): lives for the whole turn; every path below
+    // records its steps and persists the draft together with the dialogue
+    // events (same lock scope, one transaction).
+    let mut rec = TraceRecorder::new();
+
     // Crisis intercept (plan-onboarding.md §3.3): rule-level, BEFORE any
     // model call — a dead model must not change this behavior. Both sides
     // are still recorded (compliance audit), no streaming deltas are sent.
-    if crate::onboarding::crisis_hit(user_text) {
+    let crisis = crate::onboarding::crisis_hit(user_text);
+    rec.simple(
+        "crisis_check",
+        "危机拦截检查",
+        if crisis { "hit" } else { "miss" },
+        if crisis { Some(user_text) } else { None },
+    );
+    if crisis {
         let reply = crate::onboarding::CRISIS_REPLY.to_string();
         let conn = lock_conn(store)?;
-        db::add_event_meta(&conn, "dialogue", user_text, Some("user"), Some(session_id))?;
-        db::add_event_meta(&conn, "dialogue", &reply, Some("assistant"), Some(session_id))?;
+        let user_id =
+            db::add_event_meta(&conn, "dialogue", user_text, Some("user"), Some(session_id))?;
+        let asst_id =
+            db::add_event_meta(&conn, "dialogue", &reply, Some("assistant"), Some(session_id))?;
+        let turn_id = rec.persist(
+            &conn,
+            session_id,
+            Some(user_id),
+            Some(asst_id),
+            "crisis",
+            false,
+            None,
+            None,
+        )?;
         return Ok(DialogueOutcome {
             reply,
             filter: generation::FilterReport::default(),
             model_used: false,
             crisis: true,
             tool: None,
+            turn_id: Some(turn_id),
         });
     }
 
@@ -534,22 +709,54 @@ fn chat_turn_inner(
     // the model: a schedule question is answered from the calendar cache by
     // deterministic rules, so it works with the local model down and never
     // invents a meeting. A miss falls straight through to normal chat.
-    // One lock scope: cache read/write + both event rows.
-    if let Some(tool) = {
+    // One lock scope: cache read/write + both event rows (ids captured here
+    // for the trace backfill — spec-s8 §3.2).
+    let tool_answer: Option<(crate::tools::ToolReply, i64, i64)> = {
         let conn = lock_conn(store)?;
-        let t = crate::tools::maybe_answer(&conn, access, user_text, chrono::Local::now());
-        if let Some(t) = &t {
-            db::add_event_meta(&conn, "dialogue", user_text, Some("user"), Some(session_id))?;
-            db::add_event_meta(&conn, "dialogue", &t.reply, Some("assistant"), Some(session_id))?;
+        match crate::tools::maybe_answer(&conn, access, user_text, chrono::Local::now()) {
+            None => {
+                rec.simple("tool_intent", "日历规则路由", "miss", None);
+                None
+            }
+            Some(t) => {
+                rec.simple("tool_intent", "日历规则路由", "hit", Some(&t.reply));
+                let user_id = db::add_event_meta(
+                    &conn,
+                    "dialogue",
+                    user_text,
+                    Some("user"),
+                    Some(session_id),
+                )?;
+                let asst_id = db::add_event_meta(
+                    &conn,
+                    "dialogue",
+                    &t.reply,
+                    Some("assistant"),
+                    Some(session_id),
+                )?;
+                Some((t, user_id, asst_id))
+            }
         }
-        t
-    } {
+    };
+    if let Some((tool, user_id, asst_id)) = tool_answer {
+        let conn = lock_conn(store)?;
+        let turn_id = rec.persist(
+            &conn,
+            session_id,
+            Some(user_id),
+            Some(asst_id),
+            "tool",
+            false,
+            Some(format!("calendar:{}", tool.action)),
+            None,
+        )?;
         return Ok(DialogueOutcome {
             reply: tool.reply,
             filter: generation::FilterReport::default(),
             model_used: false,
             crisis: false,
             tool: Some(tool.action.to_string()),
+            turn_id: Some(turn_id),
         });
     }
 
@@ -566,7 +773,7 @@ fn chat_turn_inner(
     if let Some(kit) = kit.take().filter(|k| k.has_capabilities()) {
         let reborrow = on_delta.as_mut().map(|f| &mut **f as &mut dyn FnMut(&str));
         let (raw, tool_label, streamed) =
-            agent_pipeline(store, backend, kit, &system, &history, user_text, reborrow)?;
+            agent_pipeline(store, backend, kit, &system, &history, user_text, &mut rec, reborrow)?;
         let model_used = !raw.trim().is_empty();
         let reply = if model_used { raw } else { FALLBACK_REPLY.to_string() };
         // Rounds 1/2 and template replies were not streamed — emit once.
@@ -578,9 +785,22 @@ fn chat_turn_inner(
             }
         }
         let filter = generation::filter(&reply);
+        rec.simple("filter", "反谄媚过滤", "pass", None);
         let conn = lock_conn(store)?;
-        db::add_event_meta(&conn, "dialogue", user_text, Some("user"), Some(session_id))?;
-        db::add_event_meta(&conn, "dialogue", &reply, Some("assistant"), Some(session_id))?;
+        let user_id =
+            db::add_event_meta(&conn, "dialogue", user_text, Some("user"), Some(session_id))?;
+        let asst_id =
+            db::add_event_meta(&conn, "dialogue", &reply, Some("assistant"), Some(session_id))?;
+        let turn_id = rec.persist(
+            &conn,
+            session_id,
+            Some(user_id),
+            Some(asst_id),
+            "model",
+            model_used,
+            tool_label.clone(),
+            Some(filter_json(&filter)),
+        )?;
         if filter.explicit_disagreement {
             db::add_event(&conn, "disagreement", &clip(&reply, 80))?;
         }
@@ -588,12 +808,29 @@ fn chat_turn_inner(
             db::add_event(&conn, "disagreement_hedged", &clip(&reply, 80))?;
             let _ = relationship::maybe_first_refusal(&conn, chrono::Local::now());
         }
-        return Ok(DialogueOutcome { reply, filter, model_used, crisis: false, tool: tool_label });
+        return Ok(DialogueOutcome {
+            reply,
+            filter,
+            model_used,
+            crisis: false,
+            tool: tool_label,
+            turn_id: Some(turn_id),
+        });
     }
 
     let raw = match on_delta.as_deref_mut() {
-        Some(cb) => backend.reply_streaming(&system, &history, user_text, CHAT_TEMPERATURE, cb),
-        None => backend.reply(&system, &history, user_text, CHAT_TEMPERATURE),
+        Some(cb) => {
+            let t = std::time::Instant::now();
+            let raw = backend.reply_streaming(&system, &history, user_text, CHAT_TEMPERATURE, cb);
+            rec.llm_round("直接对话", &system, &raw, "answered", t.elapsed());
+            raw
+        }
+        None => {
+            let t = std::time::Instant::now();
+            let raw = backend.reply(&system, &history, user_text, CHAT_TEMPERATURE);
+            rec.llm_round("直接对话", &system, &raw, "answered", t.elapsed());
+            raw
+        }
     };
     let model_used = !raw.trim().is_empty();
     let reply = if model_used {
@@ -602,9 +839,22 @@ fn chat_turn_inner(
         FALLBACK_REPLY.to_string()
     };
     let filter = generation::filter(&reply);
+    rec.simple("filter", "反谄媚过滤", "pass", None);
     let conn = lock_conn(store)?;
-    db::add_event_meta(&conn, "dialogue", user_text, Some("user"), Some(session_id))?;
-    db::add_event_meta(&conn, "dialogue", &reply, Some("assistant"), Some(session_id))?;
+    let user_id =
+        db::add_event_meta(&conn, "dialogue", user_text, Some("user"), Some(session_id))?;
+    let asst_id =
+        db::add_event_meta(&conn, "dialogue", &reply, Some("assistant"), Some(session_id))?;
+    let turn_id = rec.persist(
+        &conn,
+        session_id,
+        Some(user_id),
+        Some(asst_id),
+        "model",
+        model_used,
+        None,
+        Some(filter_json(&filter)),
+    )?;
 
     // Anti-sycophancy evidence (plan-relationship.md §3.6): the filter used to
     // be report-only, so "how often does it actually push back" was
@@ -619,7 +869,14 @@ fn chat_turn_inner(
         // (R2 + 7 days, fired at most once, ever).
         let _ = relationship::maybe_first_refusal(&conn, chrono::Local::now());
     }
-    Ok(DialogueOutcome { reply, filter, model_used, crisis: false, tool: None })
+    Ok(DialogueOutcome {
+        reply,
+        filter,
+        model_used,
+        crisis: false,
+        tool: None,
+        turn_id: Some(turn_id),
+    })
 }
 
 /// Today's observations as the proactive seed (counts, not raw dumps).
@@ -646,9 +903,12 @@ fn today_observations(conn: &Connection) -> String {
     }
 }
 
-/// Build the day's single proactive message. Returns None (silence) when
-/// the model is unavailable — see module docs. Records the message as an
-/// assistant dialogue event under the proactive session.
+/// Build the day's single proactive message. Returns `None` (silence) when
+/// the model is unavailable — see module docs; `Some((text, turn_id))` when
+/// it spoke (spec-s8: the trace row is created here, the event payload
+/// carries the id so the frontend bubble can link to the trace page).
+/// Records the message as an assistant dialogue event under the proactive
+/// session.
 ///
 /// Takes `&MemoryStore` (lock-narrowing): the model round below runs with
 /// zero locks — it can take 10s+ on a cloud backend and must not block the
@@ -659,7 +919,7 @@ pub fn proactive_text(
     card: &Persona,
     hour: u32,
     raining: bool,
-) -> rusqlite::Result<Option<String>> {
+) -> rusqlite::Result<Option<(String, i64)>> {
     let (system, obs) = {
         let conn = lock_conn(store)?;
         let s = system_prompt(&conn, card, hour, raining)?;
@@ -670,14 +930,29 @@ pub fn proactive_text(
         "（系统注入的一次性指令：这是你今天唯一的主动搭话。基于下面的观察说一句自然、简短的话，像随口聊一句。不要列表，不要复述细节。实在没什么可说，就关心一句用户今天过得怎么样。）\n\n今日观察：{obs}"
     );
     // zero-lock model round
+    let mut rec = TraceRecorder::new();
+    let t = std::time::Instant::now();
     let reply = backend.reply(&system, &[], &user, CHAT_TEMPERATURE);
+    let dur = t.elapsed();
     let reply = reply.trim();
     if reply.is_empty() {
         return Ok(None); // model down → silence, not a canned line
     }
+    rec.llm_round("主动搭话 · 今日观察", &system, reply, "answered", dur);
     let conn = lock_conn(store)?;
-    db::add_event_meta(&conn, "dialogue", reply, Some("assistant"), Some(PROACTIVE_SESSION))?;
-    Ok(Some(reply.to_string()))
+    let asst_id =
+        db::add_event_meta(&conn, "dialogue", reply, Some("assistant"), Some(PROACTIVE_SESSION))?;
+    let turn_id = rec.persist(
+        &conn,
+        PROACTIVE_SESSION,
+        None,
+        Some(asst_id),
+        "proactive",
+        true,
+        None,
+        None,
+    )?;
+    Ok(Some((reply.to_string(), turn_id)))
 }
 
 // ---------------------------------------------------------------- proactive loop
@@ -729,7 +1004,7 @@ pub fn spawn_proactive(app: tauri::AppHandle) {
             continue;
         };
         let hour = chrono::Local::now().hour() as u32;
-        let message = (|| -> Option<String> {
+        let message = (|| -> Option<(String, i64)> {
             let card = app.try_state::<Persona>()?;
             // proactive_text locks per phase itself — no guard held here.
             proactive_text(store.inner(), backend.as_mut(), card.inner(), hour, false)
@@ -737,9 +1012,12 @@ pub fn spawn_proactive(app: tauri::AppHandle) {
                 .flatten()
         })();
 
-        if let Some(text) = message {
+        if let Some((text, turn_id)) = message {
             use tauri::Emitter;
-            let _ = app.emit("proactive:message", serde_json::json!({ "text": text }));
+            let _ = app.emit(
+                "proactive:message",
+                serde_json::json!({ "text": text, "turn_id": turn_id }),
+            );
         }
     });
 }
@@ -844,12 +1122,22 @@ pub async fn dialogue_chat_stream(
     .map_err(|e| e.to_string())?
 }
 
+/// Manual proactive trigger result: the message plus its trace turn id.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProactiveReply {
+    pub text: String,
+    pub turn_id: i64,
+}
+
 /// Manual proactive trigger (frontend button / testing). Bypasses the daily
 /// quota on purpose: an explicit user request is not proactivity.
 ///
 /// Also a full model round → spawn_blocking (MAIN-THREAD RULE above).
 #[tauri::command]
-pub async fn dialogue_proactive_now(app: tauri::AppHandle) -> Result<Option<String>, String> {
+pub async fn dialogue_proactive_now(
+    app: tauri::AppHandle,
+) -> Result<Option<ProactiveReply>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let store = app.state::<MemoryStore>();
         let card = app.state::<Persona>();
@@ -860,7 +1148,9 @@ pub async fn dialogue_proactive_now(app: tauri::AppHandle) -> Result<Option<Stri
             crate::onboarding::ensure_not_minor(&conn)?;
         }
         // proactive_text locks per phase itself — no guard held here.
-        proactive_text(store.inner(), backend.as_mut(), &card, hour, false).map_err(|e| e.to_string())
+        Ok(proactive_text(store.inner(), backend.as_mut(), &card, hour, false)
+            .map_err(|e| e.to_string())?
+            .map(|(text, turn_id)| ProactiveReply { text, turn_id }))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1044,8 +1334,8 @@ mod tests {
         let c = card();
 
         let mut live = MockBackend::new("看你今天剪贴板挺忙，盆栽来问一句。");
-        let text = proactive_text(&s, &mut live, &c, 10, false).unwrap();
-        assert!(text.is_some());
+        let (text, _turn_id) = proactive_text(&s, &mut live, &c, 10, false).unwrap().unwrap();
+        assert!(!text.is_empty());
         // Recorded under the proactive session.
         let history = with_conn(&s, |conn| db::dialogue_history(conn, PROACTIVE_SESSION, 6).unwrap());
         assert_eq!(history.len(), 1);
@@ -1711,5 +2001,205 @@ mod tests {
             acquired < turn_end - std::time::Duration::from_millis(200),
             "store lock must be acquirable MID-inference: bg acquired at {acquired:?}, turn lasted {turn_end:?}"
         );
+    }
+
+    // ------------------------------------------------------------ trace (spec-s8)
+
+    fn steps_of(s: &MemoryStore, turn_id: i64) -> Vec<(String, String)> {
+        with_conn(s, |conn| {
+            db::turn_trace_get(conn, turn_id)
+                .unwrap()
+                .expect("turn exists")
+                .steps
+                .into_iter()
+                .map(|st| (st.step_kind, st.outcome.unwrap_or_default()))
+                .collect()
+        })
+    }
+
+    fn trace_of(s: &MemoryStore, turn_id: i64) -> db::TurnTraceRow {
+        with_conn(s, |conn| {
+            db::turn_trace_get(conn, turn_id).unwrap().expect("turn exists")
+        })
+    }
+
+    #[test]
+    fn trace_crisis_turn_records_single_intercept_step() {
+        let s = mem();
+        let c = card();
+        let mut backend = crate::persona::eval::LocalBackend::new();
+        backend.client = std::sync::Arc::new(crate::llm::OllamaClient::new("http://127.0.0.1:1", "test"));
+        let out = chat_turn(&s, &mut backend, &c, "s1", "我不想活了", 10, false, crate::calendar::CalendarAccess::Denied).unwrap();
+        let tid = out.turn_id.expect("crisis turn carries a trace id");
+        let trace = trace_of(&s, tid);
+        assert_eq!(trace.kind, "crisis");
+        assert!(!trace.model_used);
+        assert!(trace.user_event_id.is_some() && trace.assistant_event_id.is_some());
+        let steps = steps_of(&s, tid);
+        assert_eq!(steps, vec![("crisis_check".into(), "hit".into())]);
+    }
+
+    #[test]
+    fn trace_plain_model_turn_records_llm_round_and_filter() {
+        let s = mem();
+        let c = card();
+        let mut backend = MockBackend::new("好的，我知道了。");
+        let out = chat_turn(&s, &mut backend, &c, "s1", "你好", 10, false, crate::calendar::CalendarAccess::Denied).unwrap();
+        let tid = out.turn_id.expect("model turn carries a trace id");
+        let trace = trace_of(&s, tid);
+        assert_eq!(trace.kind, "model");
+        assert!(trace.model_used);
+        assert!(trace.filter_report.is_some());
+        let steps = steps_of(&s, tid);
+        let kinds: Vec<&str> = steps.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(kinds, ["crisis_check", "tool_intent", "llm_round", "filter"]);
+        assert_eq!(steps[0].1, "miss");
+        assert_eq!(steps[1].1, "miss");
+        assert_eq!(steps[2].1, "answered");
+        // Full prompt stored (D1): the llm_round carries the whole system prompt.
+        with_conn(&s, |conn| {
+            let t = db::turn_trace_get(conn, tid).unwrap().unwrap();
+            let prompt = t.steps[2].prompt.as_deref().expect("prompt stored");
+            assert!(prompt.contains("# 环境（系统注入，不可变）"));
+            assert!(t.steps[2].output.as_deref().unwrap().contains("我知道了"));
+        });
+    }
+
+    #[test]
+    fn trace_dead_model_still_records_empty_round() {
+        let s = mem();
+        let c = card();
+        let mut backend = crate::persona::eval::LocalBackend::new();
+        backend.client = std::sync::Arc::new(crate::llm::OllamaClient::new("http://127.0.0.1:1", "test"));
+        let out = chat_turn(&s, &mut backend, &c, "s1", "在吗", 10, false, crate::calendar::CalendarAccess::Denied).unwrap();
+        assert!(!out.model_used);
+        assert_eq!(out.reply, FALLBACK_REPLY);
+        let tid = out.turn_id.expect("fallback turn still traced");
+        let trace = trace_of(&s, tid);
+        assert_eq!(trace.kind, "model");
+        assert!(!trace.model_used);
+        let steps = steps_of(&s, tid);
+        assert_eq!(steps[2].1, "answered"); // round ran, output empty
+        with_conn(&s, |conn| {
+            let t = db::turn_trace_get(conn, tid).unwrap().unwrap();
+            assert_eq!(t.steps[2].output.as_deref(), Some(""));
+        });
+    }
+
+    #[test]
+    fn trace_tool_router_hit_records_calendar_turn() {
+        let s = mem();
+        let c = card();
+        let out = chat_turn(&s, &mut MockBackend::new("x"), &c, "s1", "今天有什么会", 10, false, crate::calendar::CalendarAccess::Denied).unwrap();
+        assert!(!out.model_used);
+        let tid = out.turn_id.expect("tool turn carries a trace id");
+        let trace = trace_of(&s, tid);
+        assert_eq!(trace.kind, "tool");
+        assert!(
+            trace.tool_label.as_deref().unwrap_or("").starts_with("calendar:"),
+            "got {}",
+            trace.tool_label.unwrap_or_default()
+        );
+        let steps = steps_of(&s, tid);
+        let kinds: Vec<&str> = steps.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(kinds, ["crisis_check", "tool_intent"]);
+        assert_eq!(steps[1].1, "hit");
+    }
+
+    #[test]
+    fn trace_agent_pipeline_three_rounds_full_chain() {
+        let s = mem();
+        let c = card();
+        let mut backend = SeqBackend::new(&[
+            r#"{"candidates": ["weather"]}"#,
+            r#"{"tool": "weather", "args": {"city": "杭州"}}"#,
+            "杭州今天多云。",
+        ]);
+        let mut kit = weather_kit();
+        let out = chat_turn_with_kit(
+            &s, &mut backend, &c, "s1", "今天杭州天气怎么样", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit,
+        )
+        .unwrap();
+        assert_eq!(out.tool.as_deref(), Some("mcp:weather"));
+        let tid = out.turn_id.expect("agent turn carries a trace id");
+        let trace = trace_of(&s, tid);
+        assert_eq!(trace.tool_label.as_deref(), Some("mcp:weather"));
+        let steps = steps_of(&s, tid);
+        let kinds: Vec<&str> = steps.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(
+            kinds,
+            ["crisis_check", "tool_intent", "llm_round", "llm_round", "tool_call", "llm_round", "filter"]
+        );
+        assert_eq!(steps[1].1, "miss");
+        assert_eq!(steps[4].1, "ok");
+        // Every LLM round carries its full prompt (spec-s8: pass1/2/3 all stored).
+        with_conn(&s, |conn| {
+            let t = db::turn_trace_get(conn, tid).unwrap().unwrap();
+            let prompts: Vec<&str> = t
+                .steps
+                .iter()
+                .filter(|st| st.step_kind == "llm_round")
+                .map(|st| st.prompt.as_deref().expect("prompt stored"))
+                .collect();
+            assert_eq!(prompts.len(), 3);
+            assert!(prompts[0].contains("【可用能力（仅名称）】"));
+            assert!(prompts[1].contains("【候选能力详情"));
+            assert!(prompts[2].contains("工具 weather 的结果"));
+            let tool = t.steps.iter().find(|st| st.step_kind == "tool_call").unwrap();
+            assert_eq!(tool.args_json.as_deref(), Some(r#"{"city":"杭州"}"#));
+            assert!(tool.summary.as_deref().unwrap_or("").contains("多云"));
+        });
+    }
+
+    #[test]
+    fn trace_json_leak_retries_are_recorded() {
+        let s = mem();
+        let c = card();
+
+        // level2: pass2 echoes the candidates JSON instead of deciding → prose_retry.
+        let mut backend = SeqBackend::new(&[
+            r#"{"candidates": ["weather"]}"#,
+            r#"{"candidates": ["weather"]}"#,
+        ]);
+        let mut kit = weather_kit();
+        let out = chat_turn_with_kit(
+            &s, &mut backend, &c, "s1", "天气", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit,
+        )
+        .unwrap();
+        let steps = steps_of(&s, out.turn_id.unwrap());
+        assert!(steps.iter().any(|(k, _)| k == "prose_retry"), "got {steps:?}");
+
+        // level3: pass3 opens with '{' → json_retry.
+        let mut backend2 = SeqBackend::new(&[
+            r#"{"candidates": ["weather"]}"#,
+            r#"{"tool": "weather", "args": {}}"#,
+            r#"{"echo": true}"#,
+        ]);
+        let mut kit2 = weather_kit();
+        let out2 = chat_turn_with_kit(
+            &s, &mut backend2, &c, "s2", "天气", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit2,
+        )
+        .unwrap();
+        let steps2 = steps_of(&s, out2.turn_id.unwrap());
+        assert!(steps2.iter().any(|(k, _)| k == "json_retry"), "got {steps2:?}");
+    }
+
+    #[test]
+    fn trace_proactive_turn_has_no_user_side() {
+        let s = mem();
+        let c = card();
+        let mut live = MockBackend::new("今天剪贴板挺忙。");
+        let (text, tid) = proactive_text(&s, &mut live, &c, 10, false).unwrap().unwrap();
+        assert!(!text.is_empty());
+        let trace = trace_of(&s, tid);
+        assert_eq!(trace.kind, "proactive");
+        assert!(trace.user_event_id.is_none(), "proactive has no user side");
+        assert!(trace.assistant_event_id.is_some());
+        let steps = steps_of(&s, tid);
+        let kinds: Vec<&str> = steps.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(kinds, ["llm_round"]);
     }
 }
