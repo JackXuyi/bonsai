@@ -31,7 +31,12 @@ export function BoundaryCard({ active }: { active: boolean }) {
     if (active) load();
   }, [active, load]);
 
-  const list = rows ?? (inTauri ? [] : DEMO.map((c, i) => ({ id: -1 - i, content: c })));
+  // 同 PageHeader：inTauri 在预渲染期是 false，水合期可能是 true，
+  // DEMO 数据必须等挂载后再上，否则预渲染 HTML（空列表）和首帧不一致。
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+
+  const list = rows ?? (mounted && !inTauri ? DEMO.map((c, i) => ({ id: -1 - i, content: c })) : []);
 
   async function del(id: number) {
     try {
