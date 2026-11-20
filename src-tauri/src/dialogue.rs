@@ -182,7 +182,15 @@ fn agent_pipeline(
     }
     if selected.is_empty() {
         kit.trace("level1:no-valid-candidate".into());
-        return (raw1, None, false);
+        // The model *wanted* tools but named none that exist (hallucinated
+        // names or a since-disabled server). Never leak the raw candidates
+        // JSON into the chat (2026-11-20 screenshot regression): re-ask once
+        // with the catalog stripped so the turn still lands as prose.
+        let sys_retry = format!(
+            "{system}\n\n（这个问题没有匹配到任何可用工具，请直接用自然语言回答用户；不要输出 JSON，不要提工具。）"
+        );
+        let raw_retry = backend.reply(&sys_retry, history, user_text, CHAT_TEMPERATURE);
+        return (raw_retry, None, false);
     }
     kit.trace(format!(
         "level1:{}",
@@ -1242,5 +1250,28 @@ mod tests {
         let kit = crate::mcp_admin::build_agent_kit(&conn, &state, "总结一下我18号说了啥");
         assert!(kit.has_capabilities());
         assert!(kit.catalog().iter().any(|d| d.name == "memory_search"));
+    }
+
+    /// Screenshot regression (2026-11-20): the model answered with a raw
+    /// `{"candidates": …}` JSON when every name it hallucinated was dropped
+    /// by the whitelist. The turn must land as prose, never as JSON.
+    #[test]
+    fn hallucinated_candidates_never_leak_json_into_the_chat() {
+        let conn = mem();
+        let c = card();
+        let mut kit = weather_kit();
+        let mut backend = SeqBackend::new(&[
+            r#"{"candidates": ["getHardwareInfo", "getBatteryInfo", "getCpuUsage"]}"#,
+            "设备状态这块我查不了，也不会编。",
+        ]);
+        let out = chat_turn_with_kit(
+            &conn, &mut backend, &c, "s1", "当前设备的状态", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit,
+        )
+        .unwrap();
+        assert_eq!(out.reply, "设备状态这块我查不了，也不会编。");
+        assert_eq!(out.tool, None);
+        assert!(!out.reply.contains("candidates"));
+        assert!(kit.trace_ref().contains("level1:no-valid-candidate"));
     }
 }
