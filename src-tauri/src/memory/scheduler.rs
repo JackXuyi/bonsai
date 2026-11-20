@@ -102,12 +102,17 @@ pub fn spawn(app: AppHandle) {
 
 fn tick(app: &AppHandle) -> Result<(), String> {
     let store = app.state::<MemoryStore>();
-    let mut conn = store.0.lock().map_err(|e| e.to_string())?;
-
     let now_local = chrono::Local::now();
     let today = now_local.date_naive();
-    let last = last_run_date(&conn).map_err(|e| e.to_string())?;
-    let age = hours_since_last_run(&conn);
+
+    // Short lock: the trigger decision needs two small reads only.
+    let (last, age) = {
+        let conn = store.0.lock().map_err(|e| e.to_string())?;
+        (
+            last_run_date(&conn).map_err(|e| e.to_string())?,
+            hours_since_last_run(&conn),
+        )
+    };
 
     let Some(trigger) = decide_trigger(now_local.hour(), today, last, age) else {
         return Ok(());
@@ -138,9 +143,11 @@ fn tick(app: &AppHandle) -> Result<(), String> {
         window_end: &window_end,
     };
 
-    let report = consolidate::run_with_local_or_rules(&mut conn, &opts)
+    // Store-backed entry: the extraction's LLM round runs with ZERO locks
+    // (2026-11-20 lock-narrowing) — no guard is held here, so a catchup
+    // consolidation can never freeze chat turns racing for the store.
+    let report = consolidate::run_with_local_or_rules(&store, &opts)
         .map_err(|e| format!("consolidate run failed: {e}"))?;
-    drop(conn);
 
     // Growth-narrative hook: the frontend can surface "it thought about
     // yesterday" from this event (plan §6).

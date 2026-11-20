@@ -53,23 +53,68 @@ pub struct Options<'a> {
     pub window_end: &'a str,
 }
 
-/// Run one consolidation pass.
+/// Run one consolidation pass (direct-connection form: tests + eval
+/// harness). Phase-split so the extractor's model round runs conn-less:
+///   read (short) → extract (NO lock/tx) → write (one tx).
+/// On a write-phase error the transaction rolls back: events stay
+/// unconsumed, the next run re-extracts (double idempotency preserved).
 pub fn run(
     conn: &mut Connection,
     extractor: &dyn FactExtractor,
     opts: &Options,
 ) -> rusqlite::Result<Report> {
-    let tx = conn.transaction()?;
-    let report = run_in_tx(&tx, extractor, opts)?;
-    tx.commit()?;
-    Ok(report) // on Err above, tx drops → rollback: events stay unconsumed
+    let (events, user_events, blocked, facts) = read_phase(conn, opts)?;
+    let mut report = report_skeleton(opts, events.len(), blocked);
+    let candidates = if events.is_empty() {
+        Vec::new()
+    } else {
+        extractor.extract(&SessionDigest { user_utterances: &user_events, active_facts: &facts })
+    };
+    report.extracted = candidates.len();
+    write_phase(conn, &mut report, &candidates)?;
+    Ok(report)
 }
 
-fn run_in_tx(
-    conn: &Connection,
+/// Store-backed form (scheduler tick / manual command): the store lock is
+/// held ONLY for the read and write phases — the extractor's LLM calls
+/// (seconds to minutes) run with ZERO locks, so a catchup consolidation can
+/// never freeze chat turns (2026-11-20 lock-narrowing, M-C).
+pub fn run_with_store(
+    store: &super::MemoryStore,
     extractor: &dyn FactExtractor,
     opts: &Options,
 ) -> rusqlite::Result<Report> {
+    let (events, user_events, blocked, facts) = {
+        let conn = lock_store(store)?;
+        read_phase(&conn, opts)?
+    };
+    let mut report = report_skeleton(opts, events.len(), blocked);
+    let candidates = if events.is_empty() {
+        Vec::new()
+    } else {
+        extractor.extract(&SessionDigest { user_utterances: &user_events, active_facts: &facts })
+    };
+    report.extracted = candidates.len();
+    let mut conn = lock_store(store)?;
+    write_phase(&mut conn, &mut report, &candidates)?;
+    Ok(report)
+}
+
+fn lock_store(store: &super::MemoryStore) -> rusqlite::Result<std::sync::MutexGuard<'_, Connection>> {
+    store.0.lock().map_err(|_| {
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(1),
+            Some("memory store mutex poisoned".into()),
+        )
+    })
+}
+
+/// Phase 1: read everything the run needs as OWNED data, so the lock can be
+/// released before extraction.
+fn read_phase(
+    conn: &Connection,
+    opts: &Options,
+) -> rusqlite::Result<(Vec<db::EventRow>, Vec<db::EventRow>, usize, Vec<db::ActiveFact>)> {
     // Window events (unconsumed only — the second idempotency leg).
     let events = db::unconsumed_events(conn, opts.window_start, opts.window_end)?;
 
@@ -92,11 +137,16 @@ fn run_in_tx(
         .cloned()
         .collect();
 
-    let mut report = Report {
+    let facts = db::active_facts(conn)?;
+    Ok((events, user_events, blocked, facts))
+}
+
+fn report_skeleton(opts: &Options, events_in_window: usize, blocked: usize) -> Report {
+    Report {
         trigger: opts.trigger.to_string(),
         window_start: opts.window_start.to_string(),
         window_end: opts.window_end.to_string(),
-        events_in_window: events.len(),
+        events_in_window,
         extracted: 0,
         merged: 0,
         contradicted: 0,
@@ -104,26 +154,28 @@ fn run_in_tx(
         blocked,
         deleted: 0,
         consumed: 0,
-    };
-
-    if !events.is_empty() {
-        let active_facts = db::active_facts(conn)?;
-        let candidates = extractor.extract(&SessionDigest {
-            user_utterances: &user_events,
-            active_facts: &active_facts,
-        });
-        report.extracted = candidates.len();
-        apply_candidates(conn, &candidates, &mut report)?;
     }
+}
 
+/// Phase 3: one transaction — apply candidates, deletion sweep, mark
+/// consumed, audit row. `report` must be pre-filled (skeleton + extracted).
+fn write_phase(
+    conn: &mut Connection,
+    report: &mut Report,
+    candidates: &[CandidateFact],
+) -> rusqlite::Result<()> {
+    let tx = conn.transaction()?;
+    if !candidates.is_empty() {
+        apply_candidates(&tx, candidates, report)?;
+    }
     // Deletion sweep runs every pass, window or not (defensive hygiene).
-    report.deleted = delete_stale(conn)?;
-
+    report.deleted = delete_stale(&tx)?;
     // Finish: mark consumed (only within the window — never touches events
     // outside it) and write the audit row.
-    report.consumed = db::mark_events_consumed(conn, opts.window_start, opts.window_end)?;
-    write_audit(conn, &report)?;
-    Ok(report)
+    report.consumed = db::mark_events_consumed(&tx, &report.window_start, &report.window_end)?;
+    write_audit(&tx, report)?;
+    tx.commit()?; // on Err above, tx drops → rollback: events stay unconsumed
+    Ok(())
 }
 
 /// Stages ③④⑤ applied to the candidate list, in event order.
@@ -250,14 +302,18 @@ pub fn run_with_rules(conn: &mut Connection, opts: &Options) -> rusqlite::Result
 /// Model-first entry (plan §5.2): use `LocalExtractor` when the local LLM
 /// is reachable, fall back to rules otherwise. One cheap probe decides —
 /// a dead server must never cost the pipeline its guarantees.
-pub fn run_with_local_or_rules(conn: &mut Connection, opts: &Options) -> rusqlite::Result<Report> {
+/// Store-backed: locks per phase (see `run_with_store`).
+pub fn run_with_local_or_rules(
+    store: &super::MemoryStore,
+    opts: &Options,
+) -> rusqlite::Result<Report> {
     let local = super::extract::LocalExtractor::new();
     if local.client.is_up() {
         log::info!("consolidate: model leg = LocalExtractor ({})", local.client.label());
-        run(conn, &local, opts)
+        run_with_store(store, &local, opts)
     } else {
         log::info!("consolidate: local LLM unreachable, falling back to RuleExtractor");
-        run_with_rules(conn, opts)
+        run_with_store(store, &RuleExtractor, opts)
     }
 }
 
@@ -447,5 +503,62 @@ mod tests {
         let audits: i64 =
             conn.query_row("SELECT COUNT(*) FROM consolidate_runs", [], |r| r.get(0)).unwrap();
         assert_eq!(audits, 0);
+    }
+
+    /// An extractor that fakes a slow model round.
+    struct SlowExtractor {
+        ms: u64,
+    }
+    impl FactExtractor for SlowExtractor {
+        fn extract(&self, _d: &SessionDigest) -> Vec<CandidateFact> {
+            std::thread::sleep(std::time::Duration::from_millis(self.ms));
+            Vec::new()
+        }
+    }
+
+    /// M-C regression: the extraction's model round must run with ZERO store
+    /// locks — a catchup consolidate over minutes of events used to freeze
+    /// every chat turn racing for the store.
+    #[test]
+    fn consolidate_extraction_holds_no_store_lock() {
+        use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+        static SEQ3: AtomicU32 = AtomicU32::new(0);
+        let dir = std::env::temp_dir().join("bonsai-consolidate-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = std::sync::Arc::new(super::super::MemoryStore::open(
+            &dir.join(format!("lk-{}-{}.sqlite3", std::process::id(), SEQ3.fetch_add(1, AtomicOrdering::SeqCst))),
+        )
+        .unwrap());
+
+        // Seed one event so the run has a window to read.
+        {
+            let conn = store.0.lock().unwrap();
+            let _guard = clock::pinned("2026-11-18T12:00:00Z");
+            db::add_event_meta(&conn, "chat", "我喜欢雨天", Some("user"), Some("s1")).unwrap();
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel::<std::time::Instant>();
+        let bg = store.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            loop {
+                if let Ok(conn) = bg.0.try_lock() {
+                    let _ = db::add_event(&conn, "face_state", "bg-marker");
+                    let _ = tx.send(std::time::Instant::now());
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        });
+        let start = std::time::Instant::now();
+        let opts = Options { trigger: "manual", window_start: START, window_end: END };
+        let report = run_with_store(&store, &SlowExtractor { ms: 800 }, &opts).unwrap();
+        assert_eq!(report.events_in_window, 1);
+        let turn_end = start.elapsed();
+        let acquired = rx.recv().unwrap() - start;
+        assert!(
+            acquired < turn_end - std::time::Duration::from_millis(200),
+            "store lock must be acquirable MID-extraction: bg acquired at {acquired:?}, run lasted {turn_end:?}"
+        );
     }
 }

@@ -77,10 +77,10 @@ pub fn search(
 /// in `scheduler::spawn`.
 #[tauri::command]
 pub fn consolidate(state: tauri::State<'_, MemoryStore>) -> Result<consolidate::Report, String> {
-    let mut conn = state.inner().0.lock().map_err(|e| e.to_string())?;
     let window_end = clock::now_iso();
+    // Store-backed entry: extraction runs with zero locks held.
     consolidate::run_with_local_or_rules(
-        &mut conn,
+        state.inner(),
         &consolidate::Options {
             trigger: "manual",
             window_start: "1970-01-01T00:00:00Z",
