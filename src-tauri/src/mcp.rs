@@ -83,7 +83,10 @@ pub struct McpClient {
 
 impl McpClient {
     pub fn connect(t: &McpTransport) -> Result<McpClient, String> {
-        // Transport construction is sync; only the handshake needs a timeout.
+        // 子进程 spawn 必须发生在 tokio runtime 上下文内：rmcp 的
+        // TokioChildProcess::new 会立即 spawn（需要活跃 reactor）。本函数跑在
+        // Tauri 同步命令线程（主线程）上，直接 new 会 panic → abort（整库崩溃，
+        // 2026-11-20 实测：点「启用 MCP」即闪退）。因此 transport 构建挪进 block_on。
         match t {
             McpTransport::Stdio { command, args, env } => {
                 let mut cmd = tokio::process::Command::new(command);
@@ -91,13 +94,14 @@ impl McpClient {
                 for (k, v) in env {
                     cmd.env(k, v);
                 }
-                let transport = TokioChildProcess::new(cmd)
-                    .map_err(|e| format!("{ERR_UNREACHABLE}: {e}"))?;
-                let service = tauri::async_runtime::block_on(async {
-                    tokio::time::timeout(CONNECT_TIMEOUT, client_info().serve(transport)).await
-                })
-                .map_err(|_| ERR_TIMEOUT.to_string())?
-                .map_err(|e| format!("{ERR_UNREACHABLE}: {e}"))?;
+                let service = tauri::async_runtime::block_on(async move {
+                    let transport = TokioChildProcess::new(cmd)
+                        .map_err(|e| format!("{ERR_UNREACHABLE}: {e}"))?;
+                    match tokio::time::timeout(CONNECT_TIMEOUT, client_info().serve(transport)).await {
+                        Ok(res) => res.map_err(|e| format!("{ERR_UNREACHABLE}: {e}")),
+                        Err(_) => Err(ERR_TIMEOUT.to_string()),
+                    }
+                })?;
                 Ok(McpClient { service })
             }
             McpTransport::Http { url, headers } => {
@@ -285,6 +289,22 @@ impl ToolProvider for MockMcpProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connect_outside_runtime_returns_err_not_panic() {
+        // 回归（2026-11-20 崩溃）：TokioChildProcess::new 曾在 tokio runtime
+        // 上下文外 spawn 子进程 → panic → abort（点「启用」即闪退）。
+        // 修复后：spawn 在 block_on 内进行，失败必须是干净的 Err。
+        let t = McpTransport::from_row("stdio", Some("/bin/echo"), r#"["hi"]"#, None, "{}", "{}").unwrap();
+        let err = match McpClient::connect(&t) {
+            Err(e) => e,
+            Ok(_) => panic!("expected connect failure, got live client"),
+        };
+        assert!(
+            err.starts_with(ERR_UNREACHABLE) || err == ERR_TIMEOUT,
+            "unexpected error: {err}"
+        );
+    }
 
     #[test]
     fn transport_from_row_validates_fields() {
