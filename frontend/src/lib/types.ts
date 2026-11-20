@@ -132,7 +132,8 @@ export interface DialogueFilter {
 export interface DialogueOutcome {
   reply: string;
   crisis?: boolean;
-  tool?: boolean;
+  /** None | "agenda_today"… | "mcp:<tool>" | "skill:<name>"（spec-s3） */
+  tool?: string | null;
   model_used?: boolean;
   filter?: DialogueFilter;
 }
@@ -320,3 +321,59 @@ export interface PersonaSnapshot {
 
 // ── debug 日志（debug.rs，spec-m4 §4B）──────────────────────────
 export type LogFile = "app_log" | "sidecar_log";
+
+// ── agent（mcp_admin.rs / skill.rs / agent_tools.rs，spec-s2/s5/s4）──────
+export interface ToolDescriptor {
+  name: string;
+  summary: string;
+  detail: string;
+  kind: "mcp" | "skill";
+  remote: boolean;
+}
+
+export interface McpServerRow {
+  id: string;
+  name: string;
+  transport: "stdio" | "http";
+  command?: string | null;
+  args: string[];
+  url?: string | null;
+  headers: [string, string][];
+  env: [string, string][];
+  enabled: boolean;
+  toolCount: number;
+  toolCacheAt?: string | null;
+}
+
+export interface SkillView {
+  id: string;
+  name: string;
+  description: string;
+  enabled: boolean;
+  valid: boolean;
+  errorCode?: string | null;
+}
+
+export interface ToolCallRecord {
+  id: number;
+  ts: string;
+  tool: string;
+  action: string;
+  outcome: string;
+  resultStatus?: string | null;
+  paramsSummary?: string | null;
+  promptTrace?: string | null;
+  remote: boolean;
+  durationMs?: number | null;
+}
+
+export interface McpSaveInput {
+  id?: string;
+  name: string;
+  transport: "stdio" | "http";
+  command?: string | null;
+  args?: string[];
+  url?: string | null;
+  headers?: [string, string][];
+  env?: [string, string][];
+}

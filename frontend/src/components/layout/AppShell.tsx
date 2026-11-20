@@ -6,6 +6,7 @@ import { Sidebar } from "@/components/layout/Sidebar";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { OnboardingFlow } from "@/components/onboarding/OnboardingFlow";
 import { ToastHost } from "@/components/ToastHost";
+import { ApprovalCard } from "@/components/agent/ApprovalCard";
 import { useEffect } from "react";
 import { useAppEvents } from "@/hooks/useAppEvents";
 import { useTabShortcuts } from "@/hooks/useTabShortcuts";
@@ -29,6 +30,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       </div>
       <OnboardingFlow />
       <ToastHost />
+      <ApprovalCard />
     </main>
   );
 }

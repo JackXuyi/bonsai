@@ -1,6 +1,6 @@
 "use client";
 
-// 工具页：动作按钮 + 感知/日历/边界/关系/人格卡 + 结果卡。
+// 工具页：动作按钮 + 感知/日历/边界/关系/人格卡 + 调用记录卡 + 结果卡。
 import { useState } from "react";
 import { ActionRow } from "./ActionRow";
 import { PersonaCard } from "./PersonaCard";
@@ -10,6 +10,7 @@ import { BoundaryCard } from "./BoundaryCard";
 import { RelationshipCard } from "./RelationshipCard";
 import { ToolResult } from "./ToolResult";
 import { ReportDialog } from "./ReportDialog";
+import { ToolCallRecords } from "@/components/agent/ToolCallRecords";
 
 export function ToolsPane() {
   const [report, setReport] = useState<{ open: boolean; md: string | null }>({
@@ -29,6 +30,7 @@ export function ToolsPane() {
       <CalendarCard active />
       <BoundaryCard active />
       <RelationshipCard />
+      <ToolCallRecords />
       <ToolResult />
       <ReportDialog
         open={report.open}

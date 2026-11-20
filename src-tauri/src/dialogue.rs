@@ -109,6 +109,173 @@ fn system_prompt(
     ))
 }
 
+/// Environment prefix (spec-s3 §2, D6): time / timezone / language before
+/// the L1 constitution. `now` is taken at the call site; language comes
+/// from settings with a fixed default.
+fn env_prefix(conn: &Connection) -> String {
+    let language = db::get_setting(conn, "language")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "简体中文".to_string());
+    crate::persona::prompt::env_segment(chrono::Local::now(), &language)
+}
+
+// ---------------------------------------------------------------- agent pipeline
+
+/// The three-stage progressive disclosure pipeline (spec-s3 §3). Activated
+/// ONLY when the kit has capabilities — with none, the turn is untouched
+/// (legacy behavior, all existing tests ride that path).
+///
+/// Returns (reply, tool_label, streamed). Never returns an empty reply
+/// without the caller knowing: an empty model output at any round comes
+/// back as-is and the caller applies FALLBACK_REPLY.
+#[allow(clippy::too_many_lines)]
+fn agent_pipeline(
+    conn: &Connection,
+    backend: &mut dyn DialogueBackend,
+    kit: &mut crate::mcp_admin::AgentKit,
+    system: &str,
+    history: &[crate::persona::eval::Turn],
+    user_text: &str,
+    mut on_delta: Option<&mut dyn FnMut(&str)>,
+) -> (String, Option<String>, bool) {
+    use crate::agent_tools::{name_catalog, parse_candidates, parse_tool_decision, ToolDecision, ToolKind};
+
+    let catalog = kit.catalog();
+    kit.trace(format!("level0:{}", name_catalog(&catalog)));
+    let sys0 = format!(
+        "{system}\n\n【可用能力（仅名称）】{}\n需要用某个能力时，只输出 JSON：{{\"candidates\": [\"名称\", …]}}（最多 5 个，不要解释）。不需要任何能力时，直接正常回答用户。",
+        name_catalog(&catalog)
+    );
+
+    // ---- pass 1: name-only round (never streamed — the output may be JSON)
+    let raw1 = backend.reply(&sys0, history, user_text, CHAT_TEMPERATURE);
+    if raw1.trim().is_empty() {
+        return (raw1, None, false);
+    }
+    let Ok(cands) = parse_candidates(&raw1) else {
+        kit.trace("level1:direct-answer".into());
+        return (raw1, None, false);
+    };
+
+    // Whitelist + cap (silent degrade, spec-s3 §3).
+    let mut selected: Vec<crate::agent_tools::ToolDescriptor> = Vec::new();
+    for c in cands {
+        if selected.len() >= 5 {
+            break;
+        }
+        let Some(d) = catalog.iter().find(|d| d.name == c) else {
+            continue; // unknown name → dropped
+        };
+        if !selected.iter().any(|s| s.name == d.name) {
+            selected.push(d.clone());
+        }
+    }
+    if selected.is_empty() {
+        kit.trace("level1:no-valid-candidate".into());
+        return (raw1, None, false);
+    }
+    kit.trace(format!(
+        "level1:{}",
+        selected.iter().map(|d| d.name.as_str()).collect::<Vec<_>>().join(",")
+    ));
+
+    // ---- pass 2: full description / skill body round
+    // Budget: at most SIMULTANEOUS_SKILLS full bodies per turn (spec-s5 §3).
+    // Extra skills stay selectable but their bodies are not injected, and they
+    // are not counted as "used" in the audit.
+    let mut skill_budget = crate::skill::SIMULTANEOUS_SKILLS;
+    let mut used: Vec<crate::agent_tools::ToolDescriptor> = Vec::new();
+    let mut detail = String::new();
+    for d in &selected {
+        if d.kind == ToolKind::Skill {
+            if skill_budget == 0 {
+                kit.trace(format!("level1:skill-budget-drop:{}", d.name));
+                continue;
+            }
+            skill_budget -= 1;
+        }
+        used.push(d.clone());
+        match d.kind {
+            ToolKind::Skill => {
+                detail.push_str(&format!("\n- 【技能】{}：{}\n正文：{}", d.name, d.summary, d.detail))
+            }
+            ToolKind::Mcp => {
+                detail.push_str(&format!("\n- 【工具】{}：{}\n输入参数：{}", d.name, d.summary, d.detail))
+            }
+        }
+    }
+    let sys1 = format!(
+        "{sys0}\n\n【候选能力详情（内部参考，不向用户复述）】{detail}\n\n看完详情后：如需调用工具，只输出 JSON：{{\"tool\": \"工具名\", \"args\": {{…}}}}；不需要（包括技能内容已足够回答）时，直接把给用户的回答写出来，不要输出 JSON。"
+    );
+    let raw2 = backend.reply(&sys1, history, user_text, CHAT_TEMPERATURE);
+    if raw2.trim().is_empty() {
+        return (raw2, None, false);
+    }
+
+    match parse_tool_decision(&raw2) {
+        // Prose answer (skill body sufficed, or the model declined).
+        Err(_) => {
+            for d in used.iter().filter(|d| d.kind == ToolKind::Skill) {
+                db::log_agent_tool_call(
+                    conn,
+                    "skill",
+                    &d.name,
+                    "ok",
+                    "answered",
+                    None,
+                    Some(&kit.trace_ref()),
+                    false,
+                    None,
+                )
+                .ok();
+            }
+            kit.trace("level2:prose-answer".into());
+            let label = used
+                .iter()
+                .find(|d| d.kind == ToolKind::Skill)
+                .map(|d| format!("skill:{}", d.name));
+            (raw2, label, false)
+        }
+        Ok(ToolDecision::None) => {
+            kit.trace("level2:none".into());
+            ("（这轮先不动用工具——直接聊吧。）".into(), None, false)
+        }
+        Ok(ToolDecision::Call { name, args }) => {
+            kit.trace(format!("level2:call:{name}"));
+            match crate::mcp_admin::execute_audited(conn, kit, &name, args) {
+                Err(e) => {
+                    let why = if e == "denied" { "需要你确认，这次先没有执行" } else { "没能执行成功" };
+                    (format!("（工具 {name} {why}。）"), Some(format!("mcp:{name}")), false)
+                }
+                Ok(out) => {
+                    // ---- pass 3: result-summary round (streaming lives here)
+                    let sys2 = format!(
+                        "{sys1}\n\n【工具 {name} 的结果摘要】\n{}\n\n请基于摘要简短回答用户；不要复述摘要全文，不要编造摘要之外的信息。",
+                        out.summary
+                    );
+                    kit.trace("level3:answered".into());
+                    let raw3 = match on_delta.as_deref_mut() {
+                        Some(cb) => {
+                            backend.reply_streaming(&sys2, history, user_text, CHAT_TEMPERATURE, cb)
+                        }
+                        None => backend.reply(&sys2, history, user_text, CHAT_TEMPERATURE),
+                    };
+                    if raw3.trim().is_empty() {
+                        (
+                            format!("（{name} 跑完了，但盆栽没组织好语言——结果：{}）", out.summary),
+                            Some(format!("mcp:{name}")),
+                            true,
+                        )
+                    } else {
+                        (raw3, Some(format!("mcp:{name}")), true)
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// One user-initiated chat turn: render → backend → filter → record.
 /// Always produces a reply (fallback line when the model is down).
 pub fn chat_turn(
@@ -121,7 +288,23 @@ pub fn chat_turn(
     raining: bool,
     access: crate::calendar::CalendarAccess,
 ) -> rusqlite::Result<DialogueOutcome> {
-    chat_turn_inner(conn, backend, card, session_id, user_text, hour, raining, access, None)
+    chat_turn_inner(conn, backend, card, session_id, user_text, hour, raining, access, None, None)
+}
+
+/// Same turn, with the agent pipeline (spec-s3): three-stage progressive
+/// tool/skill selection runs only when the kit carries capabilities.
+pub fn chat_turn_with_kit(
+    conn: &Connection,
+    backend: &mut dyn DialogueBackend,
+    card: &Persona,
+    session_id: &str,
+    user_text: &str,
+    hour: u32,
+    raining: bool,
+    access: crate::calendar::CalendarAccess,
+    kit: &mut crate::mcp_admin::AgentKit,
+) -> rusqlite::Result<DialogueOutcome> {
+    chat_turn_inner(conn, backend, card, session_id, user_text, hour, raining, access, Some(kit), None)
 }
 
 /// Same turn with incremental delivery: every model chunk goes to `on_delta`
@@ -137,7 +320,24 @@ pub fn chat_turn_streaming(
     access: crate::calendar::CalendarAccess,
     on_delta: &mut dyn FnMut(&str),
 ) -> rusqlite::Result<DialogueOutcome> {
-    chat_turn_inner(conn, backend, card, session_id, user_text, hour, raining, access, Some(on_delta))
+    chat_turn_inner(conn, backend, card, session_id, user_text, hour, raining, access, None, Some(on_delta))
+}
+
+/// Streaming + agent pipeline: deltas fire on the final round only
+/// (spec-s3 deviation note — the selection rounds may be JSON).
+pub fn chat_turn_streaming_with_kit(
+    conn: &Connection,
+    backend: &mut dyn DialogueBackend,
+    card: &Persona,
+    session_id: &str,
+    user_text: &str,
+    hour: u32,
+    raining: bool,
+    access: crate::calendar::CalendarAccess,
+    kit: &mut crate::mcp_admin::AgentKit,
+    on_delta: &mut dyn FnMut(&str),
+) -> rusqlite::Result<DialogueOutcome> {
+    chat_turn_inner(conn, backend, card, session_id, user_text, hour, raining, access, Some(kit), Some(on_delta))
 }
 
 fn chat_turn_inner(
@@ -149,6 +349,7 @@ fn chat_turn_inner(
     hour: u32,
     raining: bool,
     access: crate::calendar::CalendarAccess,
+    mut kit: Option<&mut crate::mcp_admin::AgentKit>,
     mut on_delta: Option<&mut dyn FnMut(&str)>,
 ) -> rusqlite::Result<DialogueOutcome> {
     // Crisis intercept (plan-onboarding.md §3.3): rule-level, BEFORE any
@@ -183,8 +384,38 @@ fn chat_turn_inner(
         });
     }
 
-    let system = system_prompt(conn, card, hour, raining)?;
+    let system = format!("{}{}", env_prefix(conn), system_prompt(conn, card, hour, raining)?);
     let history = db::dialogue_history(conn, session_id, MAX_HISTORY_TURNS)?;
+
+    // Agent pipeline (spec-s3): only when capabilities exist. Anything it
+    // returns is final for the turn — record both sides, filter, out.
+    if let Some(kit) = kit.take().filter(|k| k.has_capabilities()) {
+        let reborrow = on_delta.as_mut().map(|f| &mut **f as &mut dyn FnMut(&str));
+        let (raw, tool_label, streamed) =
+            agent_pipeline(conn, backend, kit, &system, &history, user_text, reborrow);
+        let model_used = !raw.trim().is_empty();
+        let reply = if model_used { raw } else { FALLBACK_REPLY.to_string() };
+        // Rounds 1/2 and template replies were not streamed — emit once.
+        if !streamed {
+            if let Some(cb) = on_delta.as_mut() {
+                if model_used && reply != FALLBACK_REPLY {
+                    cb(&reply);
+                }
+            }
+        }
+        let filter = generation::filter(&reply);
+        db::add_event_meta(conn, "dialogue", user_text, Some("user"), Some(session_id))?;
+        db::add_event_meta(conn, "dialogue", &reply, Some("assistant"), Some(session_id))?;
+        if filter.explicit_disagreement {
+            db::add_event(conn, "disagreement", &clip(&reply, 80))?;
+        }
+        if filter.hedged_disagreement {
+            db::add_event(conn, "disagreement_hedged", &clip(&reply, 80))?;
+            let _ = relationship::maybe_first_refusal(conn, chrono::Local::now());
+        }
+        return Ok(DialogueOutcome { reply, filter, model_used, crisis: false, tool: tool_label });
+    }
+
     let raw = match on_delta.as_deref_mut() {
         Some(cb) => backend.reply_streaming(&system, &history, user_text, CHAT_TEMPERATURE, cb),
         None => backend.reply(&system, &history, user_text, CHAT_TEMPERATURE),
@@ -334,6 +565,7 @@ pub fn dialogue_chat(
     store: tauri::State<'_, MemoryStore>,
     card: tauri::State<'_, Persona>,
     calendar: tauri::State<'_, crate::calendar::CalendarState>,
+    agent: tauri::State<'_, crate::mcp_admin::AgentState>,
     user_text: String,
     session_id: Option<String>,
     raining: Option<bool>,
@@ -343,7 +575,8 @@ pub fn dialogue_chat(
     let mut backend = crate::persona::backend().map_err(|e| e.to_string())?;
     let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
     crate::onboarding::ensure_not_minor(&conn)?;
-    chat_turn(
+    let mut kit = crate::mcp_admin::build_agent_kit(&conn, agent.inner());
+    chat_turn_with_kit(
         &conn,
         backend.as_mut(),
         &card,
@@ -352,6 +585,7 @@ pub fn dialogue_chat(
         hour,
         raining.unwrap_or(false),
         calendar.inner().source().access(),
+        &mut kit,
     )
     .map_err(|e| e.to_string())
 }
@@ -365,6 +599,7 @@ pub fn dialogue_chat_stream(
     store: tauri::State<'_, MemoryStore>,
     card: tauri::State<'_, Persona>,
     calendar: tauri::State<'_, crate::calendar::CalendarState>,
+    agent: tauri::State<'_, crate::mcp_admin::AgentState>,
     user_text: String,
     session_id: Option<String>,
     raining: Option<bool>,
@@ -375,10 +610,11 @@ pub fn dialogue_chat_stream(
     let mut backend = crate::persona::backend().map_err(|e| e.to_string())?;
     let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
     crate::onboarding::ensure_not_minor(&conn)?;
+    let mut kit = crate::mcp_admin::build_agent_kit(&conn, agent.inner());
     let mut emit = |delta: &str| {
         let _ = on_delta.send(serde_json::json!({ "delta": delta }));
     };
-    chat_turn_streaming(
+    chat_turn_streaming_with_kit(
         &conn,
         backend.as_mut(),
         &card,
@@ -387,6 +623,7 @@ pub fn dialogue_chat_stream(
         hour,
         raining.unwrap_or(false),
         calendar.inner().source().access(),
+        &mut kit,
         &mut emit,
     )
     .map_err(|e| e.to_string())
@@ -596,5 +833,295 @@ mod tests {
         assert_eq!(mood_str(FaceState::Greeted), "被搭话");
         assert_eq!(mood_str(FaceState::Displeased), "不高兴");
         assert_eq!(mood_str(FaceState::Thinking), "思考");
+    }
+
+    // ---- agent pipeline (spec-s3)
+
+    /// Call-order backend: pops one scripted reply per call.
+    struct SeqBackend {
+        script: std::collections::VecDeque<String>,
+    }
+    impl SeqBackend {
+        fn new(replies: &[&str]) -> Self {
+            SeqBackend { script: replies.iter().map(|s| s.to_string()).collect() }
+        }
+    }
+    impl DialogueBackend for SeqBackend {
+        fn reply(&mut self, _system: &str, _history: &[crate::persona::eval::Turn], _user: &str, _t: f64) -> String {
+            self.script.pop_front().unwrap_or_default()
+        }
+    }
+
+    fn weather_kit() -> crate::mcp_admin::AgentKit {
+        let mut p = crate::mcp::MockMcpProvider::with_tool("weather", "查天气", r#"{"type":"object"}"#);
+        p.replies.insert("weather".into(), "杭州今天多云 18 度".into());
+        crate::mcp_admin::AgentKit {
+            providers: vec![Box::new(p)],
+            gate: Box::new(crate::agent_tools::AutoAllowGate),
+            prompt_trace: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Captures the system prompt handed to the model (injection regressions).
+    struct SpyBackend {
+        reply: String,
+        seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+    impl DialogueBackend for SpyBackend {
+        fn reply(&mut self, system: &str, _h: &[crate::persona::eval::Turn], _u: &str, _t: f64) -> String {
+            self.seen.lock().unwrap().push(system.to_string());
+            self.reply.clone()
+        }
+    }
+
+    #[test]
+    fn capability_section_appears_only_when_tools_exist() {
+        let conn = mem();
+        let c = card();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        // No capabilities → env segment yes (D6), capability catalog no.
+        let mut plain = SpyBackend { reply: "好".into(), seen: seen.clone() };
+        chat_turn(
+            &conn, &mut plain, &c, "s1", "在吗", 10, false,
+            crate::calendar::CalendarAccess::Denied,
+        )
+        .unwrap();
+        let sys0 = seen.lock().unwrap()[0].clone();
+        assert!(sys0.contains("# 环境（系统注入，不可变）"), "env always injected");
+        assert!(!sys0.contains("【可用能力"), "no catalog without tools");
+
+        // With a kit → level-0 catalog is present in the first round.
+        let seen2 = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut withed = SpyBackend { reply: "我不需要工具。".into(), seen: seen2.clone() };
+        let mut kit = weather_kit();
+        chat_turn_with_kit(
+            &conn, &mut withed, &c, "s2", "在吗", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit,
+        )
+        .unwrap();
+        let sys1 = seen2.lock().unwrap()[0].clone();
+        assert!(sys1.contains("【可用能力（仅名称）】"), "catalog injected");
+        assert!(sys1.contains("weather"));
+        assert!(!sys1.contains("查天气"), "level 0 carries names only, no summaries");
+    }
+
+    #[test]
+    fn env_prefix_carries_time_and_language() {
+        let conn = mem();
+        let p = env_prefix(&conn);
+        assert!(p.contains("# 环境（系统注入，不可变）"));
+        assert!(p.contains("语言：简体中文"));
+        assert!(p.contains("UTC+"));
+    }
+
+    #[test]
+    fn pipeline_three_rounds_full_chain_is_audited() {
+        let conn = mem();
+        let c = card();
+        let mut backend = SeqBackend::new(&[
+            r#"{"candidates": ["weather"]}"#,
+            r#"{"tool": "weather", "args": {"city": "杭州"}}"#,
+            "杭州今天多云，18 度，出门带件外套。",
+        ]);
+        let mut kit = weather_kit();
+        let out = chat_turn_with_kit(
+            &conn, &mut backend, &c, "s1", "今天杭州天气怎么样", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit,
+        )
+        .unwrap();
+        assert!(out.model_used);
+        assert_eq!(out.tool.as_deref(), Some("mcp:weather"));
+        assert!(out.reply.contains("多云"));
+        // Audit row: ok / auto_allowed with a trace reference.
+        let records = db::tool_call_records(&conn, 10).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].tool, "mcp");
+        assert_eq!(records[0].result_status.as_deref(), Some("auto_allowed"));
+        assert!(records[0].params_summary.as_deref().unwrap_or("").contains("杭州"));
+    }
+
+    /// Spec-s7 §1/§3: the kit must never jump the queue — crisis and the
+    /// calendar rule router both sit *before* the pipeline, so an enabled
+    /// skill/tool can't change compliance or steal an existing intent.
+    #[test]
+    fn kit_never_preempts_crisis_or_calendar_routing() {
+        let conn = mem();
+        let c = card();
+        let mut kit = weather_kit();
+        let mut skill_kit = crate::mcp_admin::AgentKit {
+            providers: vec![Box::new(crate::skill::SkillProvider {
+                packs: vec![crate::skill::SkillPack {
+                    id: "gmp".into(),
+                    name: "GMP 助手".into(),
+                    description: "doc help".into(),
+                    body: "按 SOP 回答".into(),
+                    refs: Vec::new(),
+                    dir: std::path::PathBuf::from("/tmp/none"),
+                }],
+            })],
+            gate: Box::new(crate::agent_tools::AutoAllowGate),
+            prompt_trace: std::sync::Mutex::new(Vec::new()),
+        };
+
+        // Crisis text with a skill enabled → still the fixed resource card,
+        // no model call, no tool round, no audit row.
+        let mut backend = SeqBackend::new(&[]);
+        let out = chat_turn_with_kit(
+            &conn, &mut backend, &c, "s1", "我最近有点不想活了", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut skill_kit,
+        )
+        .unwrap();
+        assert!(out.crisis);
+        assert!(!out.model_used);
+        assert_eq!(out.reply, crate::onboarding::CRISIS_REPLY);
+
+        // Schedule question with a tool enabled → rule router answers, the
+        // pipeline stays out (Denied access ⇒ honest "not permitted" reply).
+        let mut backend2 = SeqBackend::new(&[]);
+        let out2 = chat_turn_with_kit(
+            &conn, &mut backend2, &c, "s1", "今天有什么会", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit,
+        )
+        .unwrap();
+        assert!(!out2.model_used);
+        assert!(out2.tool.is_some(), "rule router owns schedule questions");
+        assert_ne!(out2.tool.as_deref(), Some("mcp:weather"));
+        // Only the calendar router's own audit row exists — no mcp/skill row.
+        let rows = db::tool_call_records(&conn, 10).unwrap();
+        assert!(rows.iter().all(|r| r.tool == "calendar"), "unexpected: {rows:?}");
+    }
+
+    #[test]
+    fn pipeline_skill_body_answers_without_execution() {
+        let conn = mem();
+        let c = card();
+        let pack = crate::skill::SkillPack {
+            id: "gmp-qa".into(),
+            name: "GMP 助手".into(),
+            description: "GMP 规范问答".into(),
+            body: "回答 GMP 问题时引用条款编号。".into(),
+            refs: vec![],
+            dir: std::path::PathBuf::from("/tmp/x"),
+        };
+        let mut kit = crate::mcp_admin::AgentKit {
+            providers: vec![Box::new(crate::skill::SkillProvider { packs: vec![pack] })],
+            gate: Box::new(crate::agent_tools::AutoAllowGate),
+            prompt_trace: std::sync::Mutex::new(Vec::new()),
+        };
+        let mut backend = SeqBackend::new(&[
+            r#"{"candidates": ["GMP 助手"]}"#,
+            "根据 GMP 附件一第 37 条，洁净区压差应保持 10Pa 以上。",
+        ]);
+        let out = chat_turn_with_kit(
+            &conn, &mut backend, &c, "s1", "洁净区压差多少", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit,
+        )
+        .unwrap();
+        assert!(out.reply.contains("37 条"));
+        assert_eq!(out.tool.as_deref(), Some("skill:GMP 助手"));
+        let records = db::tool_call_records(&conn, 10).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].tool, "skill");
+        assert_eq!(records[0].result_status.as_deref(), Some("answered"));
+    }
+
+    #[test]
+    fn skill_budget_caps_injected_bodies_at_two() {
+        let conn = mem();
+        let c = card();
+        let pack = |id: &str| crate::skill::SkillPack {
+            id: id.into(),
+            name: format!("技能{id}"),
+            description: "d".into(),
+            body: "正文".into(),
+            refs: vec![],
+            dir: std::path::PathBuf::from("/tmp/x"),
+        };
+        let mut kit = crate::mcp_admin::AgentKit {
+            providers: vec![Box::new(crate::skill::SkillProvider {
+                packs: vec![pack("a"), pack("b"), pack("c")],
+            })],
+            gate: Box::new(crate::agent_tools::AutoAllowGate),
+            prompt_trace: std::sync::Mutex::new(Vec::new()),
+        };
+        let mut backend = SeqBackend::new(&[
+            r#"{"candidates": ["技能a", "技能b", "技能c"]}"#,
+            "直接用技能里的做法回答。",
+        ]);
+        let out = chat_turn_with_kit(
+            &conn, &mut backend, &c, "s1", "问个问题", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit,
+        )
+        .unwrap();
+        assert_eq!(out.tool.as_deref(), Some("skill:技能a"));
+        // Third body never entered the prompt → never counted as used.
+        let rows = db::tool_call_records(&conn, 10).unwrap();
+        assert_eq!(rows.len(), crate::skill::SIMULTANEOUS_SKILLS);
+        assert!(rows.iter().all(|r| r.action != "技能c"), "{rows:?}");
+    }
+
+    #[test]
+    fn pipeline_degrades_silently_on_garbage() {
+        let conn = mem();
+        let c = card();
+        let mut kit = weather_kit();
+        // Round 1: no candidates JSON → the reply IS the final answer,
+        // no audit rows, no extra rounds.
+        let mut backend = SeqBackend::new(&["我今天不需要工具，直接说：挺好。"]);
+        let out = chat_turn_with_kit(
+            &conn, &mut backend, &c, "s1", "在吗", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit,
+        )
+        .unwrap();
+        assert!(out.reply.contains("挺好"));
+        assert_eq!(out.tool, None);
+        assert!(db::tool_call_records(&conn, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn pipeline_empty_model_output_falls_back() {
+        let conn = mem();
+        let c = card();
+        let mut kit = weather_kit();
+        let mut backend = SeqBackend::new(&[""]); // model down at round 1
+        let out = chat_turn_with_kit(
+            &conn, &mut backend, &c, "s1", "在吗", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit,
+        )
+        .unwrap();
+        assert!(!out.model_used);
+        assert_eq!(out.reply, FALLBACK_REPLY);
+    }
+
+    #[test]
+    fn pipeline_unknown_candidate_dropped_and_denied_call_templates() {
+        let conn = mem();
+        let c = card();
+        // Unknown names filtered; the surviving tool then gets denied by the
+        // ask-first gate → template reply + denied audit row.
+        let mut kit = crate::mcp_admin::AgentKit {
+            providers: vec![Box::new(crate::mcp::MockMcpProvider::with_tool("weather", "查天气", "{}"))],
+            // No app handle in tests → the ask gate denies without waiting.
+            gate: Box::new(crate::mcp_admin::AskFirstGate::new(
+                std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()),
+                None,
+            )),
+            prompt_trace: std::sync::Mutex::new(Vec::new()),
+        };
+        let mut backend = SeqBackend::new(&[
+            r#"{"candidates": ["ghost_tool", "weather"]}"#,
+            r#"{"tool": "weather", "args": {}}"#,
+        ]);
+        let out = chat_turn_with_kit(
+            &conn, &mut backend, &c, "s1", "天气", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit,
+        )
+        .unwrap();
+        assert!(out.reply.contains("weather"));
+        assert_eq!(out.tool.as_deref(), Some("mcp:weather"));
+        let records = db::tool_call_records(&conn, 10).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].outcome, "denied");
     }
 }

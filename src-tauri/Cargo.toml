@@ -24,6 +24,17 @@ log = "0.4"
 simplelog = "0.12"
 ureq = { version = "2", features = ["json"] }
 arboard = "3"
+# Agent tool pipeline (plan-agent-mcp-skill.md §3): MCP client via the
+# official SDK. Tokio is already Tauri's runtime — no second runtime.
+tokio = { version = "1", features = ["macros", "time", "process"] }
+rmcp = { version = "3.11", features = [
+    "client",
+    "transport-child-process",
+    "transport-streamable-http-client-reqwest",
+] }
+# Version-locked to rmcp's streamable-http-client-reqwest backend.
+http = "1"
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 active-win-pos-rs = "0.9"

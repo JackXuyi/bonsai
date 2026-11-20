@@ -180,14 +180,19 @@ export function growthCaptionText(growth: GrowthStatus | null): string | null {
 /** dialogue outcome → 气泡徽注（旧 noteFor 原样平移）。 */
 export function noteFor(outcome: {
   crisis?: boolean;
-  tool?: boolean;
+  tool?: string | null;
   model_used?: boolean;
   filter?: { unconditional_affirmation?: boolean; hedged_disagreement?: boolean };
 }): string {
   if (outcome.crisis) return "危机资源 · 常规回复已拦截";
-  // Tool answers come from the calendar cache, not the model — labelling them
-  // "model unavailable" would be a lie.
-  if (outcome.tool) return "日程 · 直接查的日历";
+  // Tool answers: calendar answers come from the cache, mcp:/skill: labels
+  // mark agent-pipeline turns (spec-s6 §4) — never blame a missing model.
+  if (outcome.tool) {
+    const t = String(outcome.tool);
+    if (t.startsWith("mcp:")) return `🔧 经 ${t.slice(4)} 调用`;
+    if (t.startsWith("skill:")) return `🔧 经 ${t.slice(6)} 回答`;
+    return "日程 · 直接查的日历";
+  }
   const notes: string[] = [];
   if (!outcome.model_used) notes.push("本地模型未就绪");
   if (outcome.filter?.unconditional_affirmation)

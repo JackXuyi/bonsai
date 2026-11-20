@@ -10,6 +10,7 @@
 //! - L5 Generation:  local-LLM dialogue + anti-sycophancy filter (scaffold)
 //! - L6 Presentation: frontend in ../ui
 
+pub mod agent_tools;
 pub mod calendar;
 pub mod debug;
 pub mod decision;
@@ -21,6 +22,8 @@ pub mod llm_admin;
 pub mod llm_cloud;
 pub mod llm_models;
 pub mod llm_pull;
+pub mod mcp;
+pub mod mcp_admin;
 pub mod memory;
 pub mod morph;
 pub mod onboarding;
@@ -29,6 +32,7 @@ pub mod persona;
 pub mod predict;
 pub mod relationship;
 pub mod report;
+pub mod skill;
 pub mod tools;
 pub mod tray;
 
@@ -112,6 +116,18 @@ pub fn run() {
             // L3: persona card is plain text + state machine — model-independent.
             // Swapping models swaps only expression, not the being.
             app.manage(persona::load());
+
+            // Agent tool pipeline (plan-agent-mcp-skill.md): live MCP
+            // connections + the skills directory, managed once, shared by
+            // admin commands and the dialogue turn.
+            let skills_dir = db_path.parent().unwrap().join("skills");
+            std::fs::create_dir_all(&skills_dir)?;
+            app.manage(mcp_admin::AgentState {
+                manager: mcp::McpManager::default(),
+                skills_dir,
+                approvals: std::sync::Arc::new(mcp_admin::ApprovalBroker::default()),
+                app: Some(app.handle().clone()),
+            });
 
             // L4: decision-layer runtime state.
             app.manage(AppState {
@@ -228,6 +244,19 @@ pub fn run() {
             llm_cloud::llm_cloud_entry_save,
             llm_cloud::llm_cloud_entry_remove,
             llm_cloud::llm_cloud_test,
+            mcp_admin::mcp_server_list,
+            mcp_admin::mcp_server_save,
+            mcp_admin::mcp_server_remove,
+            mcp_admin::mcp_server_toggle,
+            mcp_admin::mcp_server_test,
+            mcp_admin::mcp_server_tools,
+            mcp_admin::skill_list,
+            mcp_admin::skill_toggle,
+            mcp_admin::skill_remove,
+            mcp_admin::tool_call_records,
+            mcp_admin::mcp_approval_reply,
+            mcp_admin::agent_approval_get,
+            mcp_admin::agent_approval_set,
         ])
         .build(tauri::generate_context!())
         .expect("error while running bonsai")
@@ -237,6 +266,9 @@ pub fn run() {
                 app.state::<llm::serve::ServerHandle>().stop();
                 // An in-flight `ollama pull` would otherwise outlive the app.
                 app.state::<llm_pull::PullState>().stop();
+                // Live MCP child processes / HTTP sessions: bounded shutdown,
+                // no orphans (spec-s1).
+                app.state::<mcp_admin::AgentState>().manager.shutdown_all();
             }
         });
 }

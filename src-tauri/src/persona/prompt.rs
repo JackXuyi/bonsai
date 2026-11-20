@@ -63,6 +63,34 @@ fn is_night(hour: u32) -> bool {
     hour >= 23 || hour < 7
 }
 
+/// Environment segment (spec-s3 §2, plan D6): time / timezone / language /
+/// platform, prepended BEFORE the L1 constitution. The instant comes from
+/// the caller — never `Local::now()` inside this fn, so tests can pin the
+/// clock (the proactive_spoke_today lesson).
+pub fn env_segment(now: chrono::DateTime<chrono::Local>, language: &str) -> String {
+    use chrono::Datelike;
+    let weekday = match now.weekday() {
+        chrono::Weekday::Mon => "周一",
+        chrono::Weekday::Tue => "周二",
+        chrono::Weekday::Wed => "周三",
+        chrono::Weekday::Thu => "周四",
+        chrono::Weekday::Fri => "周五",
+        chrono::Weekday::Sat => "周六",
+        chrono::Weekday::Sun => "周日",
+    };
+    // "+0800" → "UTC+08:00"
+    let z = now.format("%z").to_string();
+    let tz = format!("UTC{}:{}", &z[..3], &z[3..]);
+    format!(
+        "# 环境（系统注入，不可变）\n当前时间：{}（{}）· 时区 {} · 语言：{} · 平台：{}\n\n",
+        now.format("%Y-%m-%d %H:%M"),
+        weekday,
+        tz,
+        language,
+        std::env::consts::OS
+    )
+}
+
 pub fn render(card: &Persona, ctx: &PromptContext) -> String {
     let mut s = String::new();
 
@@ -238,5 +266,28 @@ mod tests {
         let rel = out.find("# 关系").unwrap();
         let l3 = out.find("# 当前状态").unwrap();
         assert!(l2 < rel && rel < l3);
+    }
+}
+
+// The env_segment tests live at the bottom of the file to keep the render
+// tests above untouched.
+#[cfg(test)]
+mod env_tests {
+    use super::env_segment;
+
+    #[test]
+    fn env_segment_renders_pinned_instant() {
+        use chrono::TimeZone;
+        let now = chrono::FixedOffset::east_opt(8 * 3600)
+            .unwrap()
+            .with_ymd_and_hms(2026, 11, 20, 11, 45, 0)
+            .unwrap()
+            .with_timezone(&chrono::Local);
+        let s = env_segment(now, "简体中文");
+        assert!(s.starts_with("# 环境（系统注入，不可变）"));
+        assert!(s.contains("2026-11-20 11:45（周五）"));
+        assert!(s.contains("语言：简体中文"));
+        assert!(s.contains("平台：macos") || s.contains("平台：windows") || s.contains("平台：linux"));
+        assert!(s.contains("UTC+08:00"));
     }
 }

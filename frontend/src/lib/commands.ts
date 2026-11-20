@@ -13,6 +13,8 @@ import type {
   DialogueOutcome,
   GrowthStatus,
   LlmConfigView,
+  McpSaveInput,
+  McpServerRow,
   OllamaModelRow,
   OnboardingAnswer,
   OnboardingStatus,
@@ -23,6 +25,9 @@ import type {
   PerceptionConfig,
   PerceptionStatus,
   RelationshipStatus,
+  SkillView,
+  ToolCallRecord,
+  ToolDescriptor,
 } from "./types";
 
 async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -145,3 +150,50 @@ export const personaSnapshot = () => call<PersonaSnapshot>("persona_snapshot");
 export const debugLogTail = (file: LogFile, lines?: number) =>
   call<string[]>("debug_log_tail", { file, lines });
 export const debugOpenLogDir = () => call<void>("debug_open_log_dir");
+
+// ---------- agent 工具管线（mcp_admin.rs，spec-s2/s4/s5）----------
+export const mcpServerList = () => call<McpServerRow[]>("mcp_server_list");
+export const mcpServerSave = (input: McpSaveInput) =>
+  call<string>("mcp_server_save", input as unknown as Record<string, unknown>);
+export const mcpServerRemove = (id: string) =>
+  call<void>("mcp_server_remove", { id });
+export const mcpServerToggle = (id: string, enable: boolean) =>
+  invokeWithTimeout<void>("mcp_server_toggle", { id, enable }, 30000);
+/** 连接测试 = 真 spawn + tools/list，超时放宽（stdio 冷启动可能十几秒）。 */
+export const mcpServerTest = (id: string) =>
+  invokeWithTimeout<number>("mcp_server_test", { id }, 30000);
+export const mcpServerTools = (id: string) =>
+  call<ToolDescriptor[]>("mcp_server_tools", { id });
+export const skillList = () => call<SkillView[]>("skill_list");
+export const skillToggle = (id: string, enable: boolean) =>
+  call<void>("skill_toggle", { id, enable });
+export const skillRemove = (id: string) =>
+  call<void>("skill_remove", { id });
+export const toolCallRecords = (limit?: number) =>
+  call<ToolCallRecord[]>("tool_call_records", { limit });
+
+/** 审批回执：返回 false 表示该请求已过期（30s 超时已拒绝或已答复过）。 */
+export const mcpApprovalReply = (id: number, allow: boolean) =>
+  call<boolean>("mcp_approval_reply", { id, allow });
+
+/** 工具调用确认模式：auto（默认放行）/ ask（每次询问）。 */
+export const agentApprovalGet = () => call<"auto" | "ask">("agent_approval_get");
+export const agentApprovalSet = (mode: "auto" | "ask") =>
+  call<void>("agent_approval_set", { mode });
+
+/** agent 错误码 → 用户能懂的一句话（humanizeLlmError 同风格）。 */
+export function humanizeAgentError(err: unknown): string {
+  const s = String(err);
+  if (s.includes("mcp_timeout")) return "工具连接超时了（60 秒没响应）";
+  if (s.includes("mcp_unreachable")) return "工具连不上：检查命令/地址是否正确";
+  if (s.includes("bad_url")) return "地址不对：要以 http:// 或 https:// 开头";
+  if (s.includes("bad_command")) return "要填可执行文件的路径";
+  if (s.includes("server_not_found")) return "这条配置已经不在了，刷新一下";
+  if (s.includes("skill_invalid")) return "技能包格式不对（缺 name/description）";
+  if (s.includes("skill_too_large")) return "技能包太大：SKILL.md ≤8KB，引用 ≤4KB×5";
+  if (s.includes("skill_injection")) return "技能包试图改写人格边界，已拒绝载入";
+  if (s.includes("bad_skill_id")) return "技能 ID 不合法";
+  if (s.includes("no_tool_cache")) return "还没拿到工具清单：先启用或测试连接";
+  if (s.includes("denied")) return "这次调用被拒绝了";
+  return s;
+}

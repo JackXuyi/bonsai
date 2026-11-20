@@ -1,4 +1,4 @@
-//! SQLite schema (v7) and primitives for the memory layer.
+//! SQLite schema (v8) and primitives for the memory layer.
 //!
 //! Plans: docs/zh/plan-memory.md §3–§4, docs/zh/plan-predict.md §3.4,
 //! docs/zh/plan-morph.md §3.2, docs/zh/plan-onboarding.md §3.1,
@@ -17,7 +17,7 @@ use rusqlite::{params, Connection};
 
 use super::clock;
 
-pub(crate) const SCHEMA_VERSION: i64 = 7;
+pub(crate) const SCHEMA_VERSION: i64 = 8;
 
 /// Test-only: materialise the full schema on a bare in-memory connection.
 /// Other modules' tests build their own `Connection::open_in_memory()` and
@@ -222,11 +222,35 @@ CREATE TABLE IF NOT EXISTS calendar_cache (
 CREATE TABLE IF NOT EXISTS tool_calls (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     ts          TEXT NOT NULL,
-    tool        TEXT NOT NULL,     -- 'calendar' | 'mail'
-    action      TEXT NOT NULL,     -- 'agenda' | 'next' | 'search' | 'remind' | 'digest'
+    tool        TEXT NOT NULL,     -- 'calendar' | 'mail' | 'mcp' | 'skill'
+    action      TEXT NOT NULL,     -- 'agenda' | 'next' | 'search' | 'remind' | 'digest' | <descriptor name>
     outcome     TEXT NOT NULL,     -- 'ok' | 'denied' | 'unavailable' | 'error'
     detail      TEXT,              -- counts / latency, never content
-    duration_ms INTEGER
+    duration_ms INTEGER,
+    -- agent-pipeline audit columns (spec-s4; v7→v8 upgrades get them via
+    -- add_column_if_missing — fresh DBs get them here).
+    params_summary TEXT,
+    result_status  TEXT,
+    prompt_trace   TEXT,
+    remote         INTEGER DEFAULT 0
+);
+
+-- MCP servers (plan-agent-mcp-skill.md §3.2, spec-s2). Secrets in
+-- headers_json/env_json are plaintext at rest (local SQLite, same policy as
+-- cloud keys); every read path handed to the frontend must mask them.
+CREATE TABLE IF NOT EXISTS mcp_servers (
+    id            TEXT PRIMARY KEY,
+    name          TEXT NOT NULL,
+    transport     TEXT NOT NULL DEFAULT 'stdio',  -- 'stdio' | 'http'
+    command       TEXT,                           -- stdio: executable path (NULL for http)
+    args_json     TEXT NOT NULL DEFAULT '[]',
+    url           TEXT,                           -- http: remote endpoint (NULL for stdio)
+    headers_json  TEXT NOT NULL DEFAULT '{}',
+    env_json      TEXT NOT NULL DEFAULT '{}',
+    enabled       INTEGER NOT NULL DEFAULT 0,     -- new servers start disabled (RK-04)
+    tool_cache    TEXT,
+    tool_cache_at TEXT,
+    created_at    TEXT NOT NULL
 );
 
 -- TODO(vector): vector index for hybrid retrieval (embeddings + time decay).
@@ -288,8 +312,13 @@ pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         add_column_if_missing(conn, "facts", "importance", "INTEGER NOT NULL DEFAULT 3")?;
         add_column_if_missing(conn, "boundaries", "source_fact_id", "INTEGER REFERENCES facts(id)")?;
         // SCHEMA uses IF NOT EXISTS everywhere, so re-running it only adds
-        // missing tables (consolidate_runs) and indexes.
+        // missing tables (consolidate_runs, mcp_servers) and indexes.
         conn.execute_batch(SCHEMA)?;
+        // v7 → v8: audit columns for the agent tool pipeline (spec-s2).
+        add_column_if_missing(conn, "tool_calls", "params_summary", "TEXT")?;
+        add_column_if_missing(conn, "tool_calls", "result_status", "TEXT")?;
+        add_column_if_missing(conn, "tool_calls", "prompt_trace", "TEXT")?;
+        add_column_if_missing(conn, "tool_calls", "remote", "INTEGER DEFAULT 0")?;
     }
 
     set_user_version(conn, SCHEMA_VERSION)?;
@@ -1336,6 +1365,80 @@ pub fn log_tool_call(
     Ok(())
 }
 
+/// Agent-pipeline audit row (spec-s4): masked params summary + fine-grained
+/// result status + a prompt-trace reference + remote flag. Content secrets
+/// must already be masked by the caller — this fn never un-masks.
+#[allow(clippy::too_many_arguments)]
+pub fn log_agent_tool_call(
+    conn: &Connection,
+    tool: &str,
+    action: &str,
+    outcome: &str,
+    result_status: &str,
+    params_summary: Option<&str>,
+    prompt_trace: Option<&str>,
+    remote: bool,
+    duration_ms: Option<i64>,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO tool_calls
+           (ts, tool, action, outcome, result_status, params_summary, prompt_trace, remote, duration_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            clock::now_iso(),
+            tool,
+            action,
+            outcome,
+            result_status,
+            params_summary,
+            prompt_trace,
+            remote as i64,
+            duration_ms
+        ],
+    )?;
+    Ok(())
+}
+
+/// One audit row as the UI reads it (spec-s6 tool-call records card).
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolCallRecord {
+    pub id: i64,
+    pub ts: String,
+    pub tool: String,
+    pub action: String,
+    pub outcome: String,
+    pub result_status: Option<String>,
+    pub params_summary: Option<String>,
+    pub prompt_trace: Option<String>,
+    pub remote: bool,
+    pub duration_ms: Option<i64>,
+}
+
+/// Recent audit rows, newest first.
+pub fn tool_call_records(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<ToolCallRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, ts, tool, action, outcome, result_status, params_summary,
+                prompt_trace, COALESCE(remote, 0), duration_ms
+         FROM tool_calls ORDER BY id DESC LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(params![limit], |r| {
+        Ok(ToolCallRecord {
+            id: r.get(0)?,
+            ts: r.get(1)?,
+            tool: r.get(2)?,
+            action: r.get(3)?,
+            outcome: r.get(4)?,
+            result_status: r.get(5)?,
+            params_summary: r.get(6)?,
+            prompt_trace: r.get(7)?,
+            remote: r.get::<_, i64>(8)? != 0,
+            duration_ms: r.get(9)?,
+        })
+    })?;
+    rows.collect()
+}
+
 /// `(ok_count, total_count)` for one tool on a local day window.
 pub fn tool_calls_summary(
     conn: &Connection,
@@ -1744,6 +1847,90 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].content, "legacy row");
         migrate(&conn).unwrap();
+    }
+
+    #[test]
+    fn v7_database_upgrades_to_v8_idempotently() {
+        // v7-era shape: tool_calls exists WITHOUT the agent audit columns and
+        // mcp_servers does not exist yet (spec-s2 §1).
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL,
+                 kind TEXT NOT NULL, content TEXT NOT NULL, role TEXT, session_id TEXT,
+                 consumed INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE facts (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL,
+                 content TEXT NOT NULL, source_event_id INTEGER,
+                 confidence REAL NOT NULL DEFAULT 0.6,
+                 importance INTEGER NOT NULL DEFAULT 3, invalid_at TEXT);
+             CREATE TABLE preferences (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL,
+                 category TEXT NOT NULL, content TEXT NOT NULL,
+                 confidence REAL NOT NULL DEFAULT 0.5, invalid_at TEXT);
+             CREATE TABLE boundaries (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL,
+                 content TEXT NOT NULL, source_fact_id INTEGER);
+             CREATE TABLE tool_calls (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL,
+                 tool TEXT NOT NULL, action TEXT NOT NULL, outcome TEXT NOT NULL,
+                 detail TEXT, duration_ms INTEGER);
+             PRAGMA user_version = 7;",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO events (ts, kind, content) VALUES ('2026-11-10T00:00:00Z', 'chat', 'v7 row')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tool_calls (ts, tool, action, outcome)
+             VALUES ('2026-11-10T00:00:00Z', 'calendar', 'agenda', 'ok')",
+            [],
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
+
+        // New table appeared, legacy audit row survived with NULL defaults.
+        let servers: i64 = conn
+            .query_row("SELECT COUNT(*) FROM mcp_servers", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(servers, 0);
+        let records = tool_call_records(&conn, 10).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].action, "agenda");
+        assert!(records[0].params_summary.is_none());
+        assert!(!records[0].remote);
+        assert_eq!(all_events(&conn).len(), 1);
+
+        // Second run is a no-op — no duplicate columns, no data loss.
+        migrate(&conn).unwrap();
+        assert_eq!(all_events(&conn).len(), 1);
+        assert_eq!(tool_call_records(&conn, 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn tool_call_records_newest_first_with_limit() {
+        let conn = mem();
+        for n in 1..=3 {
+            log_agent_tool_call(
+                &conn,
+                "mcp",
+                &format!("tool{n}"),
+                "ok",
+                "auto_allowed",
+                None,
+                None,
+                false,
+                Some(n),
+            )
+            .unwrap();
+        }
+        let all = tool_call_records(&conn, 10).unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0].action, "tool3", "newest first");
+        assert_eq!(all[2].action, "tool1");
+
+        let capped = tool_call_records(&conn, 2).unwrap();
+        assert_eq!(capped.len(), 2);
+        assert_eq!(capped[0].action, "tool3");
     }
 
     #[test]

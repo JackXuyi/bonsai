@@ -13,3 +13,59 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* ── agent 能力卡（spec-s6：MCP / Skill / 调用记录）────────────── */
+.agent-card { margin-top: 12px; }
+.agent-card-head { display: flex; align-items: center; justify-content: space-between; }
+/* 审批模式开关（spec-s4/s6）：auto = 直接执行，ask = 每次弹卡 */
+.agent-approval { display: flex; align-items: center; gap: 8px; margin: 6px 0 2px; }
+.agent-approval .hint-line { margin: 0 auto 0 0; }
+.agent-list { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
+.agent-row {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 8px 10px; border: 1px solid var(--line, rgba(0,0,0,.08)); border-radius: 10px;
+}
+.agent-row[data-valid="false"] { opacity: .72; }
+.agent-row-main { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.agent-name { font-weight: 600; }
+.agent-transport {
+  font-size: 10px; padding: 1px 6px; border-radius: 999px;
+  background: rgba(123,199,60,.16); color: #4d7d22;
+}
+.agent-transport[data-transport="http"] { background: rgba(240,146,34,.16); color: #b3660f; }
+.agent-row-actions { display: flex; gap: 6px; align-items: center; }
+.agent-tools-hint { margin: 0; }
+.agent-invalid { font-size: 12px; color: #c0392b; }
+.agent-privacy {
+  margin: 8px 0; padding: 8px 10px; border-radius: 8px; font-size: 12px;
+  background: rgba(240,146,34,.12); color: #9a5a10;
+}
+.agent-transport-pick { display: flex; gap: 6px; }
+.agent-field { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; font-size: 12px; }
+.agent-field input { padding: 6px 8px; border: 1px solid var(--line, rgba(0,0,0,.12)); border-radius: 8px; }
+.agent-form .mconfirm-actions { margin-top: 12px; }
+.agent-record {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 6px 8px; border: none; background: none; text-align: left;
+  cursor: pointer; border-radius: 8px; font-size: 12px;
+}
+.agent-record:hover { background: rgba(0,0,0,.04); }
+.agent-record-ts { color: var(--ink-weak, #888); white-space: nowrap; }
+.agent-record-tool { font-weight: 600; }
+.agent-remote {
+  font-size: 10px; padding: 1px 6px; border-radius: 999px;
+  background: rgba(240,146,34,.16); color: #b3660f;
+}
+.agent-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.agent-dot.ok { background: #5aa32c; }
+.agent-dot.denied { background: #e6a23c; }
+.agent-dot.error { background: #c0392b; }
+.agent-record-detail {
+  padding: 6px 10px; font-size: 12px; border-left: 2px solid var(--line, rgba(0,0,0,.1));
+  margin: 0 0 6px 10px; white-space: pre-wrap; word-break: break-all;
+}
+.agent-args {
+  margin: 8px 0; padding: 8px; font-size: 11px; border-radius: 8px;
+  background: rgba(0,0,0,.05); max-height: 120px; overflow: auto;
+  white-space: pre-wrap; word-break: break-all;
+}
