@@ -11,11 +11,16 @@
 //! - L6 Presentation: frontend in ../ui
 
 pub mod calendar;
+pub mod debug;
 pub mod decision;
 pub mod dialogue;
 pub mod face;
 pub mod generation;
 pub mod llm;
+pub mod llm_admin;
+pub mod llm_cloud;
+pub mod llm_models;
+pub mod llm_pull;
 pub mod memory;
 pub mod morph;
 pub mod onboarding;
@@ -47,6 +52,18 @@ pub fn run() {
             Some(vec![]),
         ))
         .setup(|app| {
+            // Debug logs (spec-m4 §4B): init the logger FIRST so everything
+            // after this line lands in app_log_dir/bonsai.log. (The spec
+            // wanted pre-setup init, but the log dir needs the path resolver
+            // that only exists inside setup; nothing before this logs.)
+            if let Err(e) = debug::init(
+                &app.path()
+                    .app_log_dir()
+                    .unwrap_or_else(|_| std::env::temp_dir()),
+            ) {
+                eprintln!("logger init failed: {e}");
+            }
+
             // Boot to tray: start as a menu-bar resident, no Dock icon. The Dock
             // tile appears only while the face window is on screen
             // (see tray::show_main_window).
@@ -64,6 +81,16 @@ pub fn run() {
             }
             let store = MemoryStore::open(&db_path)?;
             app.manage(store);
+
+            // LLM config (spec-m1): UI settings win over env, survive restarts.
+            // Backfill BEFORE the sidecar starts so `llm:ready` names the
+            // configured model.
+            {
+                let store = app.state::<MemoryStore>();
+                let conn = store.0.lock().map_err(|e| e.to_string())?;
+                llm_admin::load_from_settings(&conn);
+            }
+            app.manage(llm_pull::PullState::default());
 
             // L1: perception — managed state (latest signals + collector with
             // primed downloads dedup) and the poll thread. Config is per-source
@@ -156,6 +183,10 @@ pub fn run() {
             memory::consolidate,
             memory::forget_session,
             memory::forget_all,
+            persona::snapshot::persona_snapshot,
+            debug::debug_log_tail,
+            debug::debug_open_log_dir,
+            memory::memory_overview,
             generation::scaffold_reply,
             face::face_current,
             face::face_poke,
@@ -186,6 +217,17 @@ pub fn run() {
             dialogue::dialogue_chat_stream,
             dialogue::dialogue_proactive_now,
             report::daily_report,
+            llm_admin::llm_config_get,
+            llm_admin::llm_config_set_active,
+            llm_models::llm_model_list_installed,
+            llm_models::llm_catalog,
+            llm_models::llm_model_remove,
+            llm_pull::llm_model_download,
+            llm_pull::llm_model_cancel,
+            llm_cloud::llm_cloud_entries_get,
+            llm_cloud::llm_cloud_entry_save,
+            llm_cloud::llm_cloud_entry_remove,
+            llm_cloud::llm_cloud_test,
         ])
         .build(tauri::generate_context!())
         .expect("error while running bonsai")
@@ -193,6 +235,8 @@ pub fn run() {
             // Take the bundled LLM server down with us — nothing may leak.
             if let tauri::RunEvent::Exit = event {
                 app.state::<llm::serve::ServerHandle>().stop();
+                // An in-flight `ollama pull` would otherwise outlive the app.
+                app.state::<llm_pull::PullState>().stop();
             }
         });
 }

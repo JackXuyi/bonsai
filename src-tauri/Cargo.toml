@@ -21,6 +21,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
 log = "0.4"
+simplelog = "0.12"
 ureq = { version = "2", features = ["json"] }
 arboard = "3"
 

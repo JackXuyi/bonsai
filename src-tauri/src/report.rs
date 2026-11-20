@@ -6,7 +6,7 @@
 use chrono::{Local, NaiveDate, TimeZone, Utc};
 use rusqlite::Connection;
 
-use crate::llm::{OllamaClient, Msg};
+use crate::llm::{ChatClient, Msg};
 use crate::memory::db;
 
 /// Local calendar day → UTC ISO window `[start, end)` matching the way
@@ -182,7 +182,7 @@ fn fallback_summary(d: &DayDigest) -> String {
 /// Ask the local model for the summary. Any failure → None (caller falls
 /// back to the rule-based line). One call, low temperature, short timeout.
 pub fn llm_summary(
-    client: &OllamaClient,
+    client: &dyn ChatClient,
     day: NaiveDate,
     d: &DayDigest,
     tomorrow: Option<&TomorrowAgenda>,
@@ -232,13 +232,13 @@ pub fn llm_summary(
 
 /// Full pipeline: collect → (optional) summarize → render → persist.
 /// Returns the markdown page.
-pub fn build(conn: &Connection, client: Option<&OllamaClient>, day: NaiveDate) -> String {
+pub fn build(conn: &Connection, client: Option<&dyn ChatClient>, day: NaiveDate) -> String {
     build_with_calendar(conn, client, day, None)
 }
 
 pub fn build_with_calendar(
     conn: &Connection,
-    client: Option<&OllamaClient>,
+    client: Option<&dyn ChatClient>,
     day: NaiveDate,
     tomorrow: Option<&TomorrowAgenda>,
 ) -> String {
@@ -291,9 +291,10 @@ pub fn daily_report(
     };
 
     let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
-    let client = OllamaClient::from_env();
+    // spec-m2: 日报跟随当前 provider（本地 sidecar 或已启用的云端条目）。
+    let client = crate::llm::current_client();
     let tomorrow = tomorrow_agenda(&conn, calendar.inner().source(), day);
-    let markdown = build_with_calendar(&conn, Some(&client), day, tomorrow.as_ref());
+    let markdown = build_with_calendar(&conn, Some(client.as_ref()), day, tomorrow.as_ref());
 
     // Persist next to the memory db, so past reports are browsable offline.
     let dir = app

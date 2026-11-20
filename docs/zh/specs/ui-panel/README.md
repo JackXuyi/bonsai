@@ -5,18 +5,18 @@
 
 | Spec | 里程碑 | 依赖 | 状态 |
 |---|---|---|---|
-| [spec-m0a-nextjs-migration.md](spec-m0a-nextjs-migration.md) | M0a 前端迁移 Next.js | 无 | 待实施 |
-| [spec-m0b-layout-shell.md](spec-m0b-layout-shell.md) | M0b 侧栏布局壳 | M0a | 待实施 |
-| [spec-m1-local-model.md](spec-m1-local-model.md) | M1 本地模型配置总线 + 下载 | M0b | 待实施 |
-| [spec-m2-cloud-model.md](spec-m2-cloud-model.md) | M2 云端配置清单 + ChatClient | M1 | 待实施 |
-| [spec-m2-1-claude.md](spec-m2-1-claude.md) | M2.1 Claude 客户端（可选） | M2 | 挂起 |
-| [spec-m3-memory-tab.md](spec-m3-memory-tab.md) | M3 记忆 tab | M0b（与 M1/M2 并行） | 待实施 |
+| [spec-m0a-nextjs-migration.md](spec-m0a-nextjs-migration.md) | M0a 前端迁移 Next.js | 无 | 已实施 |
+| [spec-m0b-layout-shell.md](spec-m0b-layout-shell.md) | M0b 侧栏布局壳 | M0a | 已实施 |
+| [spec-m1-local-model.md](spec-m1-local-model.md) | M1 本地模型配置总线 + 下载 | M0b | 已实施（待真机验收） |
+| [spec-m2-cloud-model.md](spec-m2-cloud-model.md) | M2 云端配置清单 + ChatClient | M1 | 已实施（待真机验收） |
+| [spec-m2-1-claude.md](spec-m2-1-claude.md) | M2.1 Claude 客户端（可选） | M2 | 已实施（待真机验收） |
+| [spec-m3-memory-tab.md](spec-m3-memory-tab.md) | M3 记忆 tab | M0b（与 M1/M2 并行） | 已实施（待真机验收） |
 | [spec-m4-persona-logs.md](spec-m4-persona-logs.md) | M4 人格卡片 + debug 日志 | M0b（与 M1/M2 并行） | 待实施 |
 | [spec-m5-acceptance.md](spec-m5-acceptance.md) | M5 真机验收 + 文档 | 全部 | 待实施 |
 
 ## §A 公共约定
 
-- **A1 语言与命名**：Rust 命令参数/返回一律 serde `#[serde(rename_all = "camelCase")]`，与前端 TS 类型对齐；TS 类型定义在 `frontend/src/types/`，字段与 Rust struct 一一对应，禁止前端自造第二份含义。
+- **A1 语言与命名**：Rust 命令参数/返回一律 serde `#[serde(rename_all = "camelCase")]`，与前端 TS 类型对齐；TS 类型定义在 `frontend/src/lib/types.ts`，字段与 Rust struct 一一对应，禁止前端自造第二份含义。
 - **A2 命令注册**：所有新命令加进 `lib.rs` 的 `invoke_handler`；命令函数体保持薄——纯逻辑下沉到可测函数，命令层只做取 State + 调用 + map_err。
 - **A3 设置读写**：复用 `memory::db::{get_setting, set_setting, remove_setting}`（schema v7 settings 表，key/value/updated_at），**全程不升 schema**。新 key 一律 `llm_` 前缀。
 - **A4 事件命名**：沿用现有点分风格（`llm:pull:progress`）；前端监听统一走 `lib/tauriListen.ts`，组件卸载必须 `safeUnlisten`。

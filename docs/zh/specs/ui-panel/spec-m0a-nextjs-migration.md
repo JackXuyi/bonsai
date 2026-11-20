@@ -115,14 +115,14 @@ module.exports = nextConfig;
 
 ## 8. 验收清单
 
-> 2026-11-19 实施完成。代码/构建/测试项已全部通过；真机项待用户验收。
+> 2026-11-19 实施完成。2026-11-20 真机验收通过，全部验收项已勾。
 
-- [ ] `pnpm app` 从 frontend 启动，8 项事件全部到达（手动触发验证）——**待真机**
+- [x] `pnpm app` 从 frontend 启动，8 项事件全部到达（手动触发验证）——真机验收通过（2026-11-20）
 - [x] 5 个 tab（迁移期仍 3 tab：对话/表情/工具）行为与旧版一致：静态导出 + 浏览器预览模式下已验证 onboarding 全流程、tab 切换、表情/形态演示按钮、三工具卡渲染；流式/事件类需真机复验
 - [x] 视觉对齐：静态导出逐 tab 截图核验（onboarding / 对话 / 表情 / 工具），布局与原版一致；360×432 真机截图对比待验收时补
 - [x] `cargo test` 163 全绿（162 原有 + 1 来自此前遗留的 onboarding camelCase 修复；本次迁移 `git diff src-tauri` 仅 tauri.conf.json build 段，Rust 代码零改动）
 - [x] `pnpm test` 15 测全绿（ime 3 / tauriInvoke 3 / tauriListen 2 / uiStore 2 / BonsaiFace 2 / MessageBubble 2 / commands smoke 1）；`next build` 产出 `out/`；eslint 零 error
-- [ ] 旧 `ui/` 已删除——**按 spec 约定待本验收通过后删除**（当前保留作回退与截图对比基准）
+- [x] 旧 `ui/` 已删除——验收通过后已删除（2026-11-20，含根 vite.config.js / dist / vite scripts 与依赖）
 
 ### 实施备注（环境坑，后续 milestone 必读）
 

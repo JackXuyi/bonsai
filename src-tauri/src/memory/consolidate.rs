@@ -253,7 +253,7 @@ pub fn run_with_rules(conn: &mut Connection, opts: &Options) -> rusqlite::Result
 pub fn run_with_local_or_rules(conn: &mut Connection, opts: &Options) -> rusqlite::Result<Report> {
     let local = super::extract::LocalExtractor::new();
     if local.client.is_up() {
-        log::info!("consolidate: model leg = LocalExtractor ({})", local.client.model());
+        log::info!("consolidate: model leg = LocalExtractor ({})", local.client.label());
         run(conn, &local, opts)
     } else {
         log::info!("consolidate: local LLM unreachable, falling back to RuleExtractor");

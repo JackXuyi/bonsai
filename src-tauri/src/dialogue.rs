@@ -512,7 +512,7 @@ mod tests {
         // LocalBackend with no server → empty reply (see eval.rs docs).
         let mut backend = crate::persona::eval::LocalBackend::new();
         // Point at a closed port for determinism.
-        backend.client = crate::llm::OllamaClient::new("http://127.0.0.1:1", "test");
+        backend.client = std::sync::Arc::new(crate::llm::OllamaClient::new("http://127.0.0.1:1", "test"));
         let out = chat_turn(&conn, &mut backend, &c, "s1", "在吗", 10, false, crate::calendar::CalendarAccess::Denied).unwrap();
         assert!(!out.model_used);
         assert_eq!(out.reply, FALLBACK_REPLY);
@@ -525,7 +525,7 @@ mod tests {
         // A dead backend proves no model call happened: the intercept is
         // rule-level and must work when the local LLM never came up.
         let mut backend = crate::persona::eval::LocalBackend::new();
-        backend.client = crate::llm::OllamaClient::new("http://127.0.0.1:1", "test");
+        backend.client = std::sync::Arc::new(crate::llm::OllamaClient::new("http://127.0.0.1:1", "test"));
         let out = chat_turn(&conn, &mut backend, &c, "s1", "说实话，我最近有点不想活了", 10, false, crate::calendar::CalendarAccess::Denied).unwrap();
         assert!(out.crisis);
         assert!(out.reply.contains("12356"), "reply must carry the hotline");
@@ -556,7 +556,7 @@ mod tests {
         assert_eq!(history.len(), 1);
 
         let mut dead = crate::persona::eval::LocalBackend::new();
-        dead.client = crate::llm::OllamaClient::new("http://127.0.0.1:1", "test");
+        dead.client = std::sync::Arc::new(crate::llm::OllamaClient::new("http://127.0.0.1:1", "test"));
         let text = proactive_text(&conn, &mut dead, &c, 10, false).unwrap();
         assert!(text.is_none(), "dead model → silence, not a canned line");
     }

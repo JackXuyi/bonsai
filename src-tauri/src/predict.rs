@@ -314,7 +314,7 @@ fn schedule_iteration(
         db::record_skip(conn, &date, "busy")?;
         return Ok(ScheduleOutcome::Skipped(Some("busy")));
     }
-    if db::proactive_spoke_today(conn)? {
+    if db::proactive_spoke_today(conn, now.date_naive())? {
         db::record_skip(conn, &date, "spoke_today")?;
         return Ok(ScheduleOutcome::Skipped(Some("spoke_today")));
     }

@@ -11,6 +11,7 @@ pub mod consolidate;
 pub mod db;
 pub mod eval;
 pub mod extract;
+pub mod overview;
 pub mod scheduler;
 
 use std::sync::Mutex;
@@ -101,4 +102,14 @@ pub fn forget_session(state: tauri::State<'_, MemoryStore>, session_id: String) 
 pub fn forget_all(state: tauri::State<'_, MemoryStore>) -> Result<(), String> {
     let conn = state.inner().0.lock().map_err(|e| e.to_string())?;
     db::forget_all(&conn).map_err(|e| e.to_string())
+}
+
+/// 记忆页总览（spec-m3）：只读快照，`limit` 缺省 20、上限 100。
+#[tauri::command]
+pub fn memory_overview(
+    state: tauri::State<'_, MemoryStore>,
+    limit: Option<u32>,
+) -> Result<overview::MemoryOverview, String> {
+    let conn = state.inner().0.lock().map_err(|e| e.to_string())?;
+    overview::build(&conn, limit).map_err(|e| e.to_string())
 }

@@ -111,12 +111,14 @@ impl DialogueBackend for MockBackend {
 /// harness judges empty as a decline + no disagreement, so a dead server
 /// reads as worst case instead of fabricated passes.
 pub struct LocalBackend {
-    pub client: crate::llm::OllamaClient,
+    /// spec-m2 §1.1: 传输层可替换（本地 sidecar / 云端 OpenAI 兼容），
+    /// 人格卡渲染与判定完全不知道背后是哪种模型。
+    pub client: std::sync::Arc<dyn crate::llm::ChatClient>,
 }
 
 impl LocalBackend {
     pub fn new() -> Self {
-        LocalBackend { client: crate::llm::OllamaClient::from_env() }
+        LocalBackend { client: crate::llm::current_client() }
     }
 }
 
@@ -157,7 +159,7 @@ impl DialogueBackend for LocalBackend {
                 &build_msgs(system, history, user),
                 temperature,
                 crate::llm::CHAT_TIMEOUT_SECS,
-                |delta| on_delta(delta),
+                &mut |delta: &str| on_delta(delta),
             )
             .unwrap_or_default()
     }

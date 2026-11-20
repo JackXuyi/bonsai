@@ -14,6 +14,7 @@ import {
 import { useTauriEvent } from "@/lib/tauriListen";
 import { inTauri } from "@/lib/tauriInvoke";
 import { useChatStore } from "@/lib/stores/chatStore";
+import { useLlmStore } from "@/lib/stores/llmStore";
 import { toast, useUiStore } from "@/lib/stores/uiStore";
 import type {
   CalendarRemindPayload,
@@ -34,12 +35,9 @@ export function useAppEvents() {
   useTauriEvent<unknown>("relationship:stage", () => {
     drainRelationshipAnnouncements().catch(() => {});
   });
-  useTauriEvent<unknown>("llm:ready", (p) => {
-    const model =
-      p && typeof p === "object" && "model" in (p as Record<string, unknown>)
-        ? String((p as Record<string, unknown>).model)
-        : "";
-    if (model) useUiStore.getState().setLlmModel(model);
+  // sidecar 起来了 → 补一次配置读取（页头状态依赖 provider / activeId）。
+  useTauriEvent<unknown>("llm:ready", () => {
+    void useLlmStore.getState().load();
   });
   useTauriEvent<unknown>("window:shown", () => {
     // tray「重新做一次引导」等：重查 growth/关系播报与 onboarding

@@ -1,8 +1,9 @@
 "use client";
 
-// 工具页（旧 tab-tools）：三个动作按钮 + 感知/日历/边界/关系四卡 + 结果卡。
+// 工具页：动作按钮 + 感知/日历/边界/关系/人格卡 + 结果卡。
 import { useState } from "react";
 import { ActionRow } from "./ActionRow";
+import { PersonaCard } from "./PersonaCard";
 import { PerceptionCard } from "./PerceptionCard";
 import { CalendarCard } from "./CalendarCard";
 import { BoundaryCard } from "./BoundaryCard";
@@ -23,6 +24,7 @@ export function ToolsPane() {
           setReport({ open: true, md });
         }}
       />
+      <PersonaCard />
       <PerceptionCard active />
       <CalendarCard active />
       <BoundaryCard active />

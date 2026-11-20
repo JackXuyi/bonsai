@@ -771,9 +771,10 @@ pub fn app_rhythm(conn: &Connection, days: i64) -> rusqlite::Result<Vec<RhythmEn
 
 /// Did the proactive dialogue channel already speak today (mutual exclusion,
 /// plan §3.3: a day that had its proactive message gets no prediction)?
-pub fn proactive_spoke_today(conn: &Connection) -> rusqlite::Result<bool> {
-    let (start, end) = super::super::report::local_day_window(chrono::Local::now().date_naive())
-        .unwrap_or_default();
+pub fn proactive_spoke_today(conn: &Connection, day: chrono::NaiveDate) -> rusqlite::Result<bool> {
+    // 「今天」必须由调用方传入（predict 传 schedule_iteration 的 now）：测试
+    // 用 clock::pinned 钉住时间线时，真实 Local::now() 会查出空窗口导致误判。
+    let (start, end) = super::super::report::local_day_window(day).unwrap_or_default();
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM events
          WHERE role = 'assistant' AND session_id = 'proactive' AND ts >= ?1 AND ts < ?2",

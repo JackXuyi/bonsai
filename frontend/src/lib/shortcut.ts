@@ -29,3 +29,14 @@ export function routeForKeys(meta: boolean, key: string): string | null {
 export function titleForPath(path: string): string {
   return ROUTES.find((r) => r.path === path)?.label ?? "阿盆";
 }
+
+/**
+ * 归一化 usePathname 的结果：静态导出直开 /xxx.html 时 pathname 会带
+ * .html 后缀（导致高亮失效 + 水合不匹配），剥掉并对齐 index.html → /。
+ * Tauri 内从 / 加载 + SPA 导航不受影响，此处仅为直开兜底。
+ */
+export function normalizePath(p: string): string {
+  if (p === "/index.html") return "/";
+  const noHtml = p.replace(/\.html$/, "");
+  return noHtml === "" ? "/" : noHtml;
+}

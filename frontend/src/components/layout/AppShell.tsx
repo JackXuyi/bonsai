@@ -6,12 +6,19 @@ import { Sidebar } from "@/components/layout/Sidebar";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { OnboardingFlow } from "@/components/onboarding/OnboardingFlow";
 import { ToastHost } from "@/components/ToastHost";
+import { useEffect } from "react";
 import { useAppEvents } from "@/hooks/useAppEvents";
 import { useTabShortcuts } from "@/hooks/useTabShortcuts";
+import { useLlmStore } from "@/lib/stores/llmStore";
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   useAppEvents();
   useTabShortcuts();
+
+  // 页头状态依赖 provider / activeId —— 壳层只读一次（load 自身幂等）。
+  useEffect(() => {
+    void useLlmStore.getState().load();
+  }, []);
 
   return (
     <main className="app">

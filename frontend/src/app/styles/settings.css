@@ -1,0 +1,572 @@
+/* 设置页（spec-m1 模型区） */
+
+/* ── status row ────────────────────────────────────────────── */
+
+.model-status {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.model-status .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex: none;
+}
+
+.model-status.off .dot {
+  background: var(--faint);
+}
+
+.model-error {
+  font-size: 10.5px;
+  color: #b3552e;
+  background: rgba(179, 85, 46, 0.08);
+  border-radius: 7px;
+  padding: 5px 8px;
+}
+
+.section-label {
+  margin-top: 2px;
+  font-size: 9.5px;
+  letter-spacing: 0.4px;
+  color: var(--faint);
+}
+
+.hint-line {
+  font-size: 10.5px;
+  line-height: 1.6;
+  color: var(--faint);
+}
+
+/* ── 已装模型 grid ─────────────────────────────────────────── */
+
+.mgrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.mcard {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 9px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--card);
+  text-align: left;
+  font: inherit;
+  color: var(--ink);
+  cursor: pointer;
+  transition: border-color 0.16s, box-shadow 0.16s, transform 0.16s;
+}
+
+.mcard:hover:not(.ghost):not(:disabled) {
+  border-color: rgba(76, 140, 43, 0.45);
+  transform: translateY(-1px);
+}
+
+.mcard.on {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+
+.mcard.ghost {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.m-check {
+  position: absolute;
+  top: 7px;
+  right: 8px;
+  font-size: 10px;
+  color: var(--accent);
+  opacity: 0;
+  transition: opacity 0.16s;
+}
+
+.mcard.on .m-check {
+  opacity: 1;
+}
+
+.m-spin {
+  position: absolute;
+  top: 7px;
+  right: 8px;
+  width: 9px;
+  height: 9px;
+  border: 2px solid var(--line);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.m-name {
+  font-size: 11.5px;
+  font-weight: 600;
+  padding-right: 14px;
+  word-break: break-all;
+}
+
+.m-meta {
+  font-size: 9.5px;
+  line-height: 1.4;
+  color: var(--faint);
+}
+
+.m-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  margin-top: 2px;
+  min-height: 0;
+}
+
+.tag {
+  font-size: 9px;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.tag.ok {
+  color: var(--accent-ink);
+  background: var(--accent-wash);
+}
+
+.tag.warn {
+  color: #8a5a1e;
+  background: rgba(224, 165, 60, 0.16);
+}
+
+.tag.ram {
+  color: var(--muted);
+  background: rgba(60, 50, 30, 0.06);
+}
+
+/* ── 可下载列表 ────────────────────────────────────────────── */
+
+#dl-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.dl-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  border: 1px solid var(--line-soft);
+  border-radius: 9px;
+  background: #fffefa;
+}
+
+.dl-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.dl-name {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.dl-meta {
+  margin-top: 1px;
+  font-size: 9.5px;
+  color: var(--faint);
+}
+
+.dl-bar {
+  height: 4px;
+  margin-top: 5px;
+  border-radius: 999px;
+  background: var(--bg-sunk);
+  overflow: hidden;
+}
+
+.dl-bar i {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: inherit;
+  transition: width 0.3s ease;
+}
+
+.dl-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
+}
+
+.dl-pct {
+  font-size: 9px;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+.btn {
+  flex: none;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+  font: inherit;
+  font-size: 10.5px;
+  color: var(--accent-ink);
+  cursor: pointer;
+  transition: 0.16s;
+}
+
+.btn:hover {
+  border-color: rgba(76, 140, 43, 0.45);
+  background: #fbfdf7;
+}
+
+.btn-ghost {
+  padding: 3px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  font: inherit;
+  font-size: 10px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.btn-ghost:hover {
+  background: rgba(60, 50, 30, 0.06);
+  color: var(--ink);
+}
+
+.btn-danger {
+  padding: 4px 10px;
+  border: 1px solid rgba(179, 85, 46, 0.4);
+  border-radius: 8px;
+  background: rgba(179, 85, 46, 0.08);
+  font: inherit;
+  font-size: 10.5px;
+  color: #a04a28;
+  cursor: pointer;
+}
+
+.more-toggle {
+  align-self: flex-start;
+  padding: 2px 4px;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 10px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.more-toggle:hover {
+  color: var(--ink);
+}
+
+/* ── 删除确认 ──────────────────────────────────────────────── */
+
+.mconfirm {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(40, 36, 24, 0.24);
+  backdrop-filter: blur(1.5px);
+  z-index: 40;
+}
+
+.mconfirm-box {
+  width: 250px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: var(--bg);
+  box-shadow: 0 14px 40px rgba(40, 36, 24, 0.22);
+}
+
+.mconfirm-title {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.mconfirm-sub {
+  margin-top: 4px;
+  font-size: 10.5px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+.mconfirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+/* ── 本地 / 云端 段选（spec-m2 §3）──────────────────────────── */
+
+.ptabs {
+  display: flex;
+  gap: 3px;
+  padding: 3px;
+  border-radius: 9px;
+  background: var(--bg-sunk);
+}
+
+.ptabs button {
+  flex: 1;
+  padding: 5px 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  font: inherit;
+  font-size: 11px;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background 0.16s, color 0.16s;
+}
+
+.ptabs button:hover {
+  color: var(--ink);
+}
+
+.ptabs button.on {
+  background: var(--card);
+  color: var(--ink);
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(40, 36, 24, 0.1);
+}
+
+/* ── 云端清单 ──────────────────────────────────────────────── */
+
+.clist {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ccard {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 9px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--card);
+  cursor: pointer;
+  transition: border-color 0.16s, box-shadow 0.16s, transform 0.16s;
+}
+
+.ccard:hover {
+  border-color: rgba(224, 165, 60, 0.5);
+  transform: translateY(-1px);
+}
+
+.ccard.on {
+  border-color: #e0a53c;
+  box-shadow: 0 0 0 1px #e0a53c inset;
+}
+
+.ccard-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ccard-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 11.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ccard-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+
+.ccard-meta {
+  font-size: 9.5px;
+  line-height: 1.4;
+  color: var(--faint);
+  word-break: break-all;
+}
+
+.ccard-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  margin-top: 2px;
+}
+
+.cloud-empty {
+  padding: 10px 0;
+  text-align: center;
+}
+
+.cloud-add {
+  width: 100%;
+  margin-top: 8px;
+}
+
+/* ── 表单弹窗（添加 / 编辑云端模型）────────────────────────── */
+
+.mconfirm-box.form {
+  width: 290px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.field span {
+  font-size: 9.5px;
+  color: var(--faint);
+}
+
+.field input,
+.field select {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  font: inherit;
+  font-size: 11.5px;
+  color: var(--ink);
+}
+
+.field input:focus,
+.field select:focus {
+  outline: none;
+  border-color: rgba(76, 140, 43, 0.55);
+}
+
+.test-line {
+  min-height: 14px;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--faint);
+}
+
+.test-line.ok {
+  color: var(--accent-ink);
+}
+
+.test-line.fail {
+  color: #a04a28;
+}
+
+.test-error {
+  display: block;
+  color: #a04a28;
+}
+
+/* ── opt-in 警示 ───────────────────────────────────────────── */
+
+.optin-list {
+  margin: 6px 0 0;
+  padding-left: 16px;
+  font-size: 10.5px;
+  line-height: 1.7;
+  color: var(--muted);
+}
+
+/* ── 日志卡（spec-m4 §4B）────────────────────────────────────── */
+
+.log-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.log-tabs button {
+  font-family: inherit;
+  font-size: 11px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--muted);
+  border-radius: 6px;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+
+.log-tabs button.on {
+  background: var(--bg-sunk);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.log-tabs-spacer {
+  flex: 1;
+}
+
+.log-dir-btn {
+  border: none !important;
+  background: none !important;
+  color: var(--accent-ink) !important;
+  padding: 3px 2px !important;
+}
+
+.logbox {
+  background: #2b2820;
+  color: #cfc9b4;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 10.5px;
+  border-radius: 8px;
+  padding: 10px 12px;
+  line-height: 1.7;
+  max-height: 128px;
+  overflow-y: auto;
+  margin-bottom: 8px;
+  word-break: break-all;
+}
+
+.logbox .lv-warn {
+  color: #e0a34e;
+}
+
+.logbox .lv-info {
+  color: #8fbf6a;
+}
+
+.logbox .lv-error {
+  color: #e07a5f;
+}
+
+.log-empty {
+  color: #8a8574;
+}

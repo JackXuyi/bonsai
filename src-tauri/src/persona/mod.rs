@@ -16,6 +16,7 @@
 
 pub mod eval;
 pub mod prompt;
+pub mod snapshot;
 
 use serde::{Deserialize, Serialize};
 

@@ -98,7 +98,7 @@ impl FaceController {
     }
 }
 
-fn is_weekend(now: &chrono::DateTime<chrono::Local>) -> bool {
+pub fn is_weekend(now: &chrono::DateTime<chrono::Local>) -> bool {
     matches!(
         now.weekday(),
         chrono::Weekday::Sat | chrono::Weekday::Sun

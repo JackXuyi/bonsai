@@ -1,0 +1,169 @@
+/* 记忆页（spec-m3）：徽章行 / 事件列表 / 三段折叠 / 动作。
+   色板沿用 base.css 的 :root 变量，不引入新颜色。 */
+
+.mem-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.mem-badge {
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-sunk);
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.mem-badge b {
+  color: var(--ink);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 按 kind 分组的计数：一行小 chip，太多就换行，不折叠 */
+.mem-kinds {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.mem-kind-chip {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--bg-sunk);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9px;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+/* ── 行 ──────────────────────────────────────────────────── */
+
+.mem-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 3px 0;
+  border-top: 1px solid rgba(60, 50, 30, 0.06);
+}
+
+.mem-row:first-of-type {
+  border-top: 0;
+}
+
+.mem-kind {
+  flex: none;
+  width: 74px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9px;
+  color: var(--faint);
+}
+
+.mem-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+.mem-ts {
+  flex: none;
+  font-size: 9px;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.mem-ts.settled {
+  color: var(--accent-ink);
+}
+
+/* 派生事件：灰显 + 虚线框，一眼区分「它自己记的状态」与「你说的话」 */
+.mem-row.derived {
+  opacity: 0.55;
+}
+
+.mem-row.derived .mem-kind {
+  border-bottom: 1px dashed var(--line);
+}
+
+.mem-row.boundary .mem-text {
+  color: var(--accent-ink);
+}
+
+.mem-empty {
+  margin: 2px 0;
+  font-size: 9.5px;
+  line-height: 1.6;
+  color: var(--faint);
+}
+
+/* ── 折叠分组 ────────────────────────────────────────────── */
+
+.mem-groups {
+  gap: 4px;
+}
+
+.mem-group {
+  border-top: 1px solid rgba(60, 50, 30, 0.06);
+  padding-top: 4px;
+}
+
+.mem-group:first-of-type {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.mem-group > summary {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.mem-group > summary::-webkit-details-marker {
+  display: none;
+}
+
+.mem-group > summary .card-title {
+  flex: 1;
+}
+
+.mem-group > summary::after {
+  content: "▾";
+  flex: none;
+  font-size: 8px;
+  color: var(--faint);
+  transition: transform 0.16s;
+}
+
+.mem-group:not([open]) > summary::after {
+  transform: rotate(-90deg);
+}
+
+/* ── 动作 ────────────────────────────────────────────────── */
+
+.mem-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0 8px;
+}
+
+.mem-hint {
+  width: 100%;
+  font-size: 9.5px;
+  line-height: 1.6;
+  color: var(--faint);
+}

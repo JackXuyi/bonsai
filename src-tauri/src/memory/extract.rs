@@ -194,12 +194,12 @@ pub const EXTRACT_TIMEOUT_SECS: u64 = crate::llm::EXTRACT_TIMEOUT_SECS;
 /// Any failure → `RuleExtractor` fallback (plan §5.2), so the pipeline's
 /// guarantees never depend on the model behaving.
 pub struct LocalExtractor {
-    pub client: crate::llm::OllamaClient,
+    pub client: std::sync::Arc<dyn crate::llm::ChatClient>,
 }
 
 impl LocalExtractor {
     pub fn new() -> Self {
-        LocalExtractor { client: crate::llm::OllamaClient::from_env() }
+        LocalExtractor { client: crate::llm::current_client() }
     }
 
     /// The model call, isolated so `extract` can fall back on any error.
@@ -470,7 +470,7 @@ mod tests {
         // Port 1 on localhost: nothing listens → LLM call fails → the trait
         // impl must behave exactly like RuleExtractor (plan §5.2).
         let ex = LocalExtractor {
-            client: crate::llm::OllamaClient::new("http://127.0.0.1:1", "test"),
+            client: std::sync::Arc::new(crate::llm::OllamaClient::new("http://127.0.0.1:1", "test")),
         };
         let evs = vec![event(1, "我喜欢雨天"), event(2, "今天天气不错")];
         let out = ex.extract(&SessionDigest { user_utterances: &evs, active_facts: &[] });

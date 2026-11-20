@@ -40,9 +40,16 @@
 
 ## 6. 验收清单
 
-- [ ] 520×560 窗口，侧栏 5 项点击 + ⌘1–5 全部可达，高亮正确
-- [ ] 对话页聊天中切到设置再切回，消息仍在
-- [ ] 对话流式正常（消息流内部滚动 + 回到底按钮）
-- [ ] 表情页大脸 150px 常驻，演示按钮工作
-- [ ] 记忆/设置占位页可达；旧三页内容无缺失
-- [ ] `pnpm test` 全绿；截图对比 M0a 基线：三旧页仅布局差异、无样式回归
+- [x] 520×560 窗口，侧栏 5 项点击 + ⌘1–5 全部可达，高亮正确（浏览器静态导出验证；tauri.conf 无 windows 配置，尺寸改在 tray.rs 建窗处，见实施备注）
+- [x] 对话页聊天中切到设置再切回，消息仍在（浏览器验证：气泡跨导航保留）
+- [x] 对话页流式正常（消息流内部滚动 + 回到底按钮）——真机验收通过（2026-11-20）
+- [x] 表情页大脸 150px 常驻，演示按钮工作（浏览器验证）
+- [x] 记忆/设置占位页可达；旧三页内容无缺失（截图核验 5 页）
+- [x] `pnpm test` 全绿（21 测）；截图对比 M0a 基线：三旧页仅布局差异、无样式回归
+
+## 7. 实施备注（2026-11-19）
+
+1. **窗口尺寸落点与 spec 不同**：窗口为 Rust 程序化创建（tauri.conf.json `windows: []`），尺寸改在 `tray.rs` `inner_size(520.0, 560.0)`，非 tauri.conf.json。
+2. **静态导出直开 .html 的水合坑**：`usePathname()` 在直开 `/xxx.html` 时带后缀 → 高亮失效 + React 水合错误（#418/#425/#423）。修复：`lib/shortcut.ts normalizePath()` 剥后缀（Sidebar/PageHeader 统一过它）。Tauri 内从 / 加载 + SPA 导航不受影响，此为兜底。
+3. 事件结构变化：proactive/prediction/calendar:remind 从 ChatPane 上移到 `useAppEvents`（路由化后 ChatPane 只在 / 挂载）；600ms 帧翻转抽 `useFaceFrame`；poke 逻辑抽 `PokeFace`（侧栏 sm / 表情页 lg 复用）；浏览器演示轮换移入 useAppEvents（壳层单实例）。
+4. uiStore 移除 `tab/setTab/TabName`（路由即状态）；导航统一 `useRouter().push`，lib 层无路由依赖。

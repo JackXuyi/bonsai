@@ -23,7 +23,8 @@ interface UiState {
   relationship: RelationshipStatus | null;
   /** 表情页形态演示的临时覆盖（null = 用真实 growth） */
   stagePreview: { stage: number; dormant: boolean } | null;
-  llmModel: string | null;
+  /** 云端 opt-in 警示每会话只弹一次（spec-m2 §3） */
+  cloudOptinAcked: boolean;
   toolResult: ToolResult | null;
   /** window:shown 断点计数（托盘唤起 / growth 播报重引导的触发器） */
   windowShownAt: number;
@@ -32,7 +33,7 @@ interface UiState {
   setGrowth: (g: GrowthStatus | null) => void;
   setRelationship: (r: RelationshipStatus | null) => void;
   setStagePreview: (p: { stage: number; dormant: boolean } | null) => void;
-  setLlmModel: (m: string) => void;
+  ackCloudOptin: () => void;
   setToolResult: (r: ToolResult | null) => void;
   bumpWindowShown: () => void;
   pushToast: (text: string) => void;
@@ -47,7 +48,7 @@ export const useUiStore = create<UiState>((set) => ({
   growth: null,
   relationship: null,
   stagePreview: null,
-  llmModel: null,
+  cloudOptinAcked: false,
   toolResult: null,
   windowShownAt: 0,
   toasts: [],
@@ -58,7 +59,7 @@ export const useUiStore = create<UiState>((set) => ({
   setGrowth: (g) => set({ growth: g, stagePreview: null }),
   setRelationship: (r) => set({ relationship: r }),
   setStagePreview: (p) => set({ stagePreview: p }),
-  setLlmModel: (m) => set({ llmModel: m }),
+  ackCloudOptin: () => set({ cloudOptinAcked: true }),
   setToolResult: (r) => set({ toolResult: r }),
   bumpWindowShown: () => set((st) => ({ windowShownAt: st.windowShownAt + 1 })),
   pushToast: (text) => {

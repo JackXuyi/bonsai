@@ -7,7 +7,7 @@ import { usePathname } from "next/navigation";
 import { PokeFace } from "@/components/face/PokeFace";
 import { MOODS, MOOD_COLORS } from "@/components/face/frames";
 import { useFaceFrame } from "@/hooks/useFaceFrame";
-import { ROUTES } from "@/lib/shortcut";
+import { normalizePath, ROUTES } from "@/lib/shortcut";
 import { useUiStore } from "@/lib/stores/uiStore";
 
 const ICONS: Record<string, React.ReactNode> = {
@@ -45,7 +45,7 @@ const ICONS: Record<string, React.ReactNode> = {
 };
 
 export function Sidebar() {
-  const pathname = usePathname();
+  const pathname = normalizePath(usePathname());
   const faceState = useUiStore((s) => s.faceState);
   const frame = useFaceFrame();
 

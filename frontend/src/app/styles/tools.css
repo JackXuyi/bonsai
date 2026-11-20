@@ -450,3 +450,55 @@
 .status-line[hidden] {
   display: none;
 }
+
+/* ── 工具页 · 人格卡（spec-m4 §4A）────────────────────────────── */
+.persona-fold {
+  border-top: 1px solid var(--line);
+  padding: 6px 0;
+}
+
+.persona-fold summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--ink);
+  cursor: pointer;
+  user-select: none;
+}
+
+.persona-fold summary::-webkit-details-marker {
+  display: none;
+}
+
+.persona-count {
+  font-size: 9.5px;
+  color: var(--faint);
+}
+
+.persona-items {
+  margin: 5px 0 0;
+  padding-left: 16px;
+  font-size: 10.5px;
+  line-height: 1.7;
+  color: var(--muted);
+}
+
+.persona-now {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin-top: 6px;
+  font-size: 10.5px;
+  color: var(--faint);
+}
+
+.persona-now strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.persona-dormant {
+  font-style: normal;
+  color: #a07a2a;
+}

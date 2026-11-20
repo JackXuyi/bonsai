@@ -116,8 +116,28 @@
 }
 
 .page-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   font-size: 10px;
   color: var(--faint);
+}
+
+/* 状态点：本地绿 / 云端黄 / 未就绪灰（spec-m2 §3） */
+.page-status .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--faint);
+  flex: none;
+}
+
+.page-status.local .dot {
+  background: var(--accent);
+}
+
+.page-status.cloud .dot {
+  background: #e0a53c;
 }
 
 /* ── placeholder cards（记忆 / 设置骨架页）─────────────────── */

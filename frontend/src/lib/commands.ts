@@ -5,12 +5,21 @@ import { invokeWithTimeout, inTauri } from "./tauriInvoke";
 import type {
   Boundary,
   CalendarStatus,
+  CatalogRow,
+  CloudEntryInput,
+  CloudEntryView,
+  CloudTestReport,
   ConsolidateResult,
   DialogueOutcome,
   GrowthStatus,
+  LlmConfigView,
+  OllamaModelRow,
   OnboardingAnswer,
   OnboardingStatus,
+  LogFile,
+  MemoryOverview,
   OnboardingSubmitResult,
+  PersonaSnapshot,
   PerceptionConfig,
   PerceptionStatus,
   RelationshipStatus,
@@ -93,6 +102,34 @@ export const memoryAddFact = (key: string, value: string) =>
   call<void>("add_fact", { key, value });
 export const memorySearch = (query: string, limit?: number) =>
   call<unknown[]>("search", { query, limit });
+/** 记忆页总览（spec-m3）：只读快照，limit 缺省 20、后端上限 100。 */
+export const memoryOverview = (limit?: number) =>
+  call<MemoryOverview>("memory_overview", { limit });
+
+// ---------- llm（llm_admin.rs，spec-m1）----------
+export const llmConfigGet = () => call<LlmConfigView>("llm_config_get");
+/** 切换模型含 1-token 探测（冷加载可达数十秒），超时放宽到 90s。 */
+export const llmConfigSetActive = (id: string) =>
+  invokeWithTimeout<LlmConfigView>("llm_config_set_active", { id }, 90000);
+export const llmModelListInstalled = () =>
+  invokeWithTimeout<OllamaModelRow[]>("llm_model_list_installed", undefined, 8000);
+export const llmCatalog = () => call<CatalogRow[]>("llm_catalog");
+export const llmModelDownload = (tag: string) =>
+  call<void>("llm_model_download", { tag });
+export const llmModelCancel = () => call<void>("llm_model_cancel");
+export const llmModelRemove = (tag: string) =>
+  call<void>("llm_model_remove", { tag });
+
+// ---------- 云端模型（llm_cloud.rs，spec-m2）----------
+export const llmCloudEntriesGet = () =>
+  call<CloudEntryView[]>("llm_cloud_entries_get");
+export const llmCloudEntrySave = (entry: CloudEntryInput) =>
+  call<CloudEntryView>("llm_cloud_entry_save", { entry });
+export const llmCloudEntryRemove = (id: string) =>
+  call<void>("llm_cloud_entry_remove", { id });
+/** 一枪测试要真跑一次 1-token 请求，超时放宽到 45s（慢服务商）。 */
+export const llmCloudTest = (entry: CloudEntryInput) =>
+  invokeWithTimeout<CloudTestReport>("llm_cloud_test", { entry }, 45000);
 
 // ---------- misc ----------
 export const getPersona = () => call<Record<string, unknown>>("get_persona");
@@ -102,3 +139,9 @@ export const evaluate = (args: Record<string, unknown>) =>
   call<unknown>("evaluate", args);
 export const predictionStats = () => call<unknown>("prediction_stats");
 export const dailyReport = () => call<string>("daily_report");
+
+// ---------- 人格快照 / debug 日志（spec-m4）----------
+export const personaSnapshot = () => call<PersonaSnapshot>("persona_snapshot");
+export const debugLogTail = (file: LogFile, lines?: number) =>
+  call<string[]>("debug_log_tail", { file, lines });
+export const debugOpenLogDir = () => call<void>("debug_open_log_dir");

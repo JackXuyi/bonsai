@@ -81,7 +81,7 @@ pub fn show_main_window(app: &AppHandle) {
     } else {
         let _ = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
             .title("bonsai")
-            .inner_size(520.0, 560.0)
+            .inner_size(1560.0, 960.0) // 宽 = 520×3，高 960（适配 1080p 屏）
             .resizable(false)
             .build();
     }

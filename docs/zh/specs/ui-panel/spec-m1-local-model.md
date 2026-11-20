@@ -90,9 +90,11 @@ Rust（cargo test，~14）：
 
 ## 5. 验收清单
 
-- [ ] 设置页下拉变卡片：点 qwen3:4b → 测试 → ✓ → 立即发消息验证走新模型（done 事件 model_used 字段）
-- [ ] 下载 gemma3:4b：进度条推进 → 完成后出现在已装 → 点选生效；中途取消正常
-- [ ] 并发保护：第二个下载点击提示 busy
-- [ ] 重启应用：选择持久（settings），页头状态正确
-- [ ] sidecar 关掉：设置页灰点 + fallback 清单，对话页显示「本地模型未就绪」
-- [ ] `llm:pull:progress` 事件在 exit 时无泄漏（kill 后无孤儿 ollama pull 进程：`pgrep -f "ollama pull"`）
+> 2026-11-20 真机验收通过。
+
+- [x] 设置页下拉变卡片：点 qwen3:4b → 测试 → ✓ → 立即发消息验证走新模型（done 事件 model_used 字段）
+- [x] 下载 gemma3:4b：进度条推进 → 完成后出现在已装 → 点选生效；中途取消正常
+- [x] 并发保护：第二个下载点击提示 busy
+- [x] 重启应用：选择持久（settings），页头状态正确
+- [x] sidecar 关掉：设置页灰点 + fallback 清单，对话页显示「本地模型未就绪」
+- [x] `llm:pull:progress` 事件在 exit 时无泄漏（kill 后无孤儿 ollama pull 进程：`pgrep -f "ollama pull"`）
