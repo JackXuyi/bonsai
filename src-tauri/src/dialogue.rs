@@ -296,7 +296,22 @@ fn agent_pipeline(
             let label = tool_label(kit, &name);
             match crate::mcp_admin::execute_audited(conn, kit, &name, args) {
                 Err(e) => {
-                    let why = if e == "denied" { "需要你确认，这次先没有执行" } else { "没能执行成功" };
+                    // Carry the failure class into the bubble (2026-11-20: the
+                    // one-size「没能执行成功」hid an unconnected MCP server
+                    // behind a generic excuse). Reasons are short, audited
+                    // classes — clipped just in case.
+                    let clip = |s: &str| crate::agent_tools::clip_chars(s, 80);
+                    let why = if e == "denied" {
+                        "需要你确认，这次先没有执行".to_string()
+                    } else if e.starts_with(crate::mcp::ERR_UNREACHABLE) {
+                        "没能执行成功——工具所在的服务器没连上（去工具页看它的状态）".to_string()
+                    } else if e.starts_with(crate::mcp::ERR_TIMEOUT) {
+                        "没能执行成功——服务器半天没回应".to_string()
+                    } else if e.starts_with("tool_error") {
+                        format!("执行出错了——{}", clip(&e))
+                    } else {
+                        format!("没能执行成功（{}）", clip(&e))
+                    };
                     (format!("（工具 {name} {why}。）"), label, false)
                 }
                 Ok(out) => {
@@ -1254,6 +1269,41 @@ mod tests {
         assert_eq!(records[0].action, "memory_search");
         assert_eq!(records[0].result_status.as_deref(), Some("auto_allowed"));
         assert!(records[0].params_summary.as_deref().unwrap_or("").contains("18号"));
+    }
+
+    /// The failure template must carry the failure CLASS (2026-11-20: a
+    /// disconnected MCP server hid behind the generic 「没能执行成功」).
+    #[test]
+    fn tool_failure_template_carries_the_reason() {
+        let conn = mem();
+        let c = card();
+        // MockMcpProvider::with_tool has no reply registered → execute
+        // returns Err(mcp_unreachable) — the exact shape of the regression.
+        let mut kit = crate::mcp_admin::AgentKit {
+            providers: vec![Box::new(crate::mcp::MockMcpProvider::with_tool(
+                "weather",
+                "查天气",
+                r#"{"type":"object"}"#,
+            ))],
+            gate: Box::new(crate::agent_tools::AutoAllowGate),
+            prompt_trace: std::sync::Mutex::new(Vec::new()),
+        };
+        let mut backend = SeqBackend::new(&[
+            r#"{"candidates": ["weather"]}"#,
+            r#"{"tool": "weather", "args": {}}"#,
+        ]);
+        let out = chat_turn_with_kit(
+            &conn, &mut backend, &c, "s1", "天气", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit,
+        )
+        .unwrap();
+        assert!(out.reply.contains("没连上"), "template must name the class: {}", out.reply);
+        assert!(!out.reply.contains("mcp_unreachable"), "raw error string stays out: {}", out.reply);
+        assert_eq!(out.tool.as_deref(), Some("mcp:weather"));
+        let records = db::tool_call_records(&conn, 5).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].outcome, "unavailable");
+        assert_eq!(records[0].result_status.as_deref(), Some("mcp_unreachable"));
     }
 
     /// Offering is signal-gated: plain chat keeps the legacy kit-free path

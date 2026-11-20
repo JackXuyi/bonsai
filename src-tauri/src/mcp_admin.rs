@@ -277,6 +277,21 @@ pub struct AgentState {
     pub app: Option<tauri::AppHandle>,
 }
 
+/// Refresh tool_cache for one server row (shared by toggle / test / startup
+/// reconnect).
+fn write_tool_cache(conn: &Connection, id: &str, descriptors: &[ToolDescriptor]) -> Result<(), String> {
+    conn.execute(
+        "UPDATE mcp_servers SET tool_cache=?2, tool_cache_at=?3 WHERE id=?1",
+        rusqlite::params![
+            id,
+            serde_json::to_string(&descriptors).unwrap_or_default(),
+            crate::memory::clock::now_iso()
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Build a transport row → live client, refresh tool_cache. Used by toggle
 /// and test-connect.
 fn connect_and_cache(conn: &Connection, row: &RawRow) -> Result<(Arc<McpClient>, Vec<ToolDescriptor>), String> {
@@ -290,16 +305,73 @@ fn connect_and_cache(conn: &Connection, row: &RawRow) -> Result<(Arc<McpClient>,
     )?;
     let client = Arc::new(McpClient::connect(&transport)?);
     let descriptors = client.list_tools()?;
-    conn.execute(
-        "UPDATE mcp_servers SET tool_cache=?2, tool_cache_at=?3 WHERE id=?1",
-        rusqlite::params![
-            row.id,
-            serde_json::to_string(&descriptors).unwrap_or_default(),
-            crate::memory::clock::now_iso()
-        ],
-    )
-    .map_err(|e| e.to_string())?;
+    write_tool_cache(conn, &row.id, &descriptors)?;
     Ok((client, descriptors))
+}
+
+/// Reconnect every ENABLED server at app startup (2026-11-20 getHardwareInfo
+/// regression: the pool is only filled by the admin toggle, so any restart
+/// left enabled servers "catalog visible but not connected" — the model
+/// named a tool, execute_audited found no client, the turn answered
+/// 「没能执行成功」). Best effort per row: a slow/hung server must not stall
+/// the others or boot, so connect happens OUTSIDE the db lock; failures are
+/// logged and skipped (the tool stays listed but calls will surface
+/// mcp_unreachable, which the chat template now explains). Returns the
+/// number of servers successfully reconnected.
+pub fn reconnect_enabled_servers(agent: &AgentState, store: &crate::memory::MemoryStore) -> usize {
+    let rows: Vec<RawRow> = {
+        let conn = match store.0.lock() {
+            Ok(c) => c,
+            Err(_) => return 0,
+        };
+        list_raw(&conn)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.enabled)
+            .collect()
+    };
+    let mut ok = 0;
+    for row in rows {
+        let transport = match McpTransport::from_row(
+            &row.transport,
+            row.command.as_deref(),
+            &row.args_json,
+            row.url.as_deref(),
+            &row.headers_json,
+            &row.env_json,
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                log::warn!("mcp_reconnect {}: bad transport: {e}", row.name);
+                continue;
+            }
+        };
+        let client = match McpClient::connect(&transport) {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!("mcp_reconnect {}: connect failed: {e}", row.name);
+                continue;
+            }
+        };
+        let descriptors = match client.list_tools() {
+            Ok(d) => d,
+            Err(e) => {
+                log::warn!("mcp_reconnect {}: list_tools failed: {e}", row.name);
+                continue;
+            }
+        };
+        {
+            let conn = match store.0.lock() {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let _ = write_tool_cache(&conn, &row.id, &descriptors);
+        }
+        log::info!("mcp_reconnect: {} up ({} tools)", row.name, descriptors.len());
+        agent.manager.insert(row.id.clone(), Arc::new(client));
+        ok += 1;
+    }
+    ok
 }
 
 // ---------------------------------------------------------------- providers
@@ -1225,6 +1297,41 @@ pub(crate) mod tests {
         let good = &recs[0];
         assert_eq!(good.result_status.as_deref(), Some("auto_allowed"));
         assert_eq!(good.outcome, "ok");
+    }
+
+    /// Startup reconnect (2026-11-20 getHardwareInfo regression): disabled
+    /// rows must be skipped, an enabled-but-dead server must fail CLEANLY
+    /// (logged, pool stays empty, count reflects reality).
+    #[test]
+    fn reconnect_enabled_servers_skips_dead_and_disabled() {
+        let dir = std::env::temp_dir().join("bonsai-mcp-reconnect-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = crate::memory::MemoryStore::open(
+            &dir.join(format!("r-{}-{}.sqlite3", std::process::id(), SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst))),
+        )
+        .unwrap();
+        let agent = AgentState {
+            manager: crate::mcp::McpManager::default(),
+            skills_dir: std::env::temp_dir(),
+            approvals: Arc::new(ApprovalBroker::default()),
+            app: None,
+        };
+        let conn = store.0.lock().unwrap();
+        let id = insert_server(&conn, "死掉的", "stdio", Some("/bin/true"), &[], None, &[], &[]).unwrap();
+        drop(conn);
+
+        // Disabled row: skipped without any connection attempt.
+        assert_eq!(reconnect_enabled_servers(&agent, &store), 0);
+        assert!(agent.manager.get(&id).is_none(), "disabled row must not enter the pool");
+
+        // Enabled but not a real MCP server (/bin/true exits immediately →
+        // initialize fails): clean skip, pool stays empty.
+        {
+            let conn = store.0.lock().unwrap();
+            conn.execute("UPDATE mcp_servers SET enabled=1 WHERE id=?1", [&id]).unwrap();
+        }
+        assert_eq!(reconnect_enabled_servers(&agent, &store), 0);
+        assert!(agent.manager.get(&id).is_none(), "dead server must not enter the pool");
     }
 
     #[test]

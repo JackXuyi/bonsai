@@ -131,6 +131,23 @@ pub fn run() {
                 app: Some(app.handle().clone()),
             });
 
+            // MCP startup reconnect (2026-11-20 getHardwareInfo regression):
+            // the connection pool only fills via the admin toggle, so a
+            // restart left every enabled server "listed but not connected".
+            // Background thread — connect latency (≤10s/server) must not
+            // block boot; failures are logged, never fatal.
+            {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    let store = handle.state::<MemoryStore>();
+                    let agent = handle.state::<mcp_admin::AgentState>();
+                    let n = mcp_admin::reconnect_enabled_servers(&agent, &store);
+                    if n > 0 {
+                        log::info!("mcp_reconnect: {n} server(s) restored at startup");
+                    }
+                });
+            }
+
             // L4: decision-layer runtime state.
             app.manage(AppState {
                 proactivity: std::sync::Mutex::new(decision::ProactivityState::default()),
