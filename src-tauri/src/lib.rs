@@ -24,6 +24,7 @@ pub mod llm_models;
 pub mod llm_pull;
 pub mod mcp;
 pub mod mcp_admin;
+pub mod mcp_discover;
 pub mod memory;
 pub mod morph;
 pub mod onboarding;
@@ -251,6 +252,8 @@ pub fn run() {
             mcp_admin::mcp_server_toggle,
             mcp_admin::mcp_server_test,
             mcp_admin::mcp_server_tools,
+            mcp_discover::mcp_discover_scan,
+            mcp_discover::mcp_discover_import,
             mcp_admin::skill_list,
             mcp_admin::skill_toggle,
             mcp_admin::skill_remove,

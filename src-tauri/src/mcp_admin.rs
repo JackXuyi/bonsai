@@ -96,6 +96,21 @@ fn masked_kv(json: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Dedup key for auto-discovery (mcp_discover): must match
+/// `DiscoveredServer::signature` byte-for-byte.
+pub(crate) fn row_signature(r: &RawRow) -> String {
+    if r.transport == "http" {
+        format!("http|{}", r.url.clone().unwrap_or_default())
+    } else {
+        let args: Vec<String> = serde_json::from_str(&r.args_json).unwrap_or_default();
+        format!(
+            "stdio|{}|{}",
+            r.command.clone().unwrap_or_default(),
+            args.join("\u{1f}")
+        )
+    }
+}
+
 fn view(row: &RawRow, conn: &Connection) -> McpServerRow {
     let tool_count = row
         .tool_cache
@@ -121,7 +136,7 @@ fn view(row: &RawRow, conn: &Connection) -> McpServerRow {
 
 // ---------------------------------------------------------------- SQL
 
-fn list_raw(conn: &Connection) -> rusqlite::Result<Vec<RawRow>> {
+pub(crate) fn list_raw(conn: &Connection) -> rusqlite::Result<Vec<RawRow>> {
     let mut stmt = conn.prepare(
         "SELECT id, name, transport, command, args_json, url, headers_json, env_json, enabled,
                 tool_cache, tool_cache_at
@@ -145,7 +160,7 @@ fn list_raw(conn: &Connection) -> rusqlite::Result<Vec<RawRow>> {
     rows.collect()
 }
 
-fn insert_server(
+pub(crate) fn insert_server(
     conn: &Connection,
     name: &str,
     transport: &str,
@@ -928,7 +943,7 @@ pub fn agent_approval_set(
 // ---------------------------------------------------------------- tests
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::memory::db;
 
@@ -943,6 +958,19 @@ mod tests {
 
     fn hdrs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    // cross-module helpers (mcp_discover tests share the temp-db pattern)
+    pub(crate) fn mem_conn() -> Connection {
+        mem()
+    }
+
+    pub(crate) fn next_seq() -> u32 {
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(crate) fn view_for_test(row: &RawRow, conn: &Connection) -> McpServerRow {
+        view(row, conn)
     }
 
     #[test]

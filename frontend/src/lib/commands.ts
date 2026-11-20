@@ -12,10 +12,12 @@ import type {
   ConsolidateResult,
   DialogueOutcome,
   DialogueBubble,
+  DiscoveredServer,
   GrowthStatus,
   LlmConfigView,
   McpSaveInput,
   McpServerRow,
+  McpImportReport,
   OllamaModelRow,
   OnboardingAnswer,
   OnboardingStatus,
@@ -169,6 +171,11 @@ export const mcpServerTest = (id: string) =>
   invokeWithTimeout<number>("mcp_server_test", { id }, 30000);
 export const mcpServerTools = (id: string) =>
   call<ToolDescriptor[]>("mcp_server_tools", { id });
+/** 本机 MCP 自动发现：扫客户端配置文件 + 应用 manifest，候选默认停用。 */
+export const mcpDiscoverScan = () => call<DiscoveredServer[]>("mcp_discover_scan");
+/** 导入选中的候选（按 signature，后端重扫落盘，明文不经过前端）。 */
+export const mcpDiscoverImport = (signatures: string[]) =>
+  call<McpImportReport>("mcp_discover_import", { signatures });
 export const skillList = () => call<SkillView[]>("skill_list");
 export const skillToggle = (id: string, enable: boolean) =>
   call<void>("skill_toggle", { id, enable });
@@ -199,6 +206,7 @@ export function humanizeAgentError(err: unknown): string {
   if (s.includes("skill_injection")) return "技能包试图改写人格边界，已拒绝载入";
   if (s.includes("bad_skill_id")) return "技能 ID 不合法";
   if (s.includes("no_tool_cache")) return "还没拿到工具清单：先启用或测试连接";
+  if (s.includes("no_home")) return "读不到用户主目录，无法扫描本机";
   if (s.includes("denied")) return "这次调用被拒绝了";
   return s;
 }

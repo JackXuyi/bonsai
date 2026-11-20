@@ -385,3 +385,23 @@ export interface McpSaveInput {
   headers?: [string, string][];
   env?: [string, string][];
 }
+
+// ── 本机 MCP 自动发现（mcp_discover.rs，spec-s2 §6）──────────────
+export interface DiscoveredServer {
+  name: string;
+  transport: "stdio" | "http";
+  command?: string | null;
+  args: string[];
+  url?: string | null;
+  /** 已脱敏（后端 mask_secrets），导入走后端重扫，前端不带明文。 */
+  headers: [string, string][];
+  env: [string, string][];
+  source: string;
+  signature: string;
+  imported: boolean;
+}
+
+export interface McpImportReport {
+  inserted: number;
+  skipped: number;
+}

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { McpSection } from "@/components/agent/McpSection";
-import type { McpServerRow, SkillView, ToolCallRecord } from "@/lib/types";
+import type { DiscoveredServer, McpServerRow, SkillView, ToolCallRecord } from "@/lib/types";
 
 const row: McpServerRow = {
   id: "srv1",
@@ -24,6 +24,8 @@ const skillListMock = vi.fn().mockResolvedValue<SkillView[]>([]);
 const recordsMock = vi.fn().mockResolvedValue<ToolCallRecord[]>([]);
 const approvalGetMock = vi.fn().mockResolvedValue<"auto" | "ask">("auto");
 const approvalSetMock = vi.fn().mockResolvedValue(undefined);
+const scanMock = vi.fn().mockResolvedValue<DiscoveredServer[]>([]);
+const importMock = vi.fn().mockResolvedValue({ inserted: 0, skipped: 0 });
 
 vi.mock("@/lib/commands", async (importOriginal) => {
   const orig = await importOriginal<typeof import("@/lib/commands")>();
@@ -40,6 +42,8 @@ vi.mock("@/lib/commands", async (importOriginal) => {
     toolCallRecords: (...args: unknown[]) => recordsMock(...args),
     agentApprovalGet: (...args: unknown[]) => approvalGetMock(...args),
     agentApprovalSet: (...args: unknown[]) => approvalSetMock(...args),
+    mcpDiscoverScan: (...args: unknown[]) => scanMock(...args),
+    mcpDiscoverImport: (...args: unknown[]) => importMock(...args),
   };
 });
 
@@ -49,6 +53,8 @@ beforeEach(() => {
   saveMock.mockClear();
   approvalGetMock.mockClear().mockResolvedValue("auto");
   approvalSetMock.mockClear();
+  scanMock.mockClear().mockResolvedValue<DiscoveredServer[]>([]);
+  importMock.mockClear().mockResolvedValue({ inserted: 0, skipped: 0 });
 });
 
 describe("McpSection", () => {
@@ -97,6 +103,53 @@ describe("McpSection", () => {
     fireEvent.click(screen.getByText("http（远程）"));
     expect(screen.getByPlaceholderText(/mcp\.example\.com/)).toBeTruthy();
     expect(screen.queryByPlaceholderText(/mcp-server-fs/)).toBeNull();
+  });
+
+  it("scan modal lists candidates and imports selected signatures", async () => {
+    const candNew: DiscoveredServer = {
+      name: "prune",
+      transport: "stdio",
+      command: "/bin/prune",
+      args: ["mcp"],
+      url: null,
+      headers: [],
+      env: [],
+      source: "cursor",
+      signature: "stdio|/bin/prune|mcp",
+      imported: false,
+    };
+    const candDone: DiscoveredServer = {
+      name: "followup",
+      transport: "http",
+      command: null,
+      args: [],
+      url: "https://api.followup.us/api/v1/mcp",
+      headers: [],
+      env: [],
+      source: "claude-code",
+      signature: "http|https://api.followup.us/api/v1/mcp",
+      imported: true,
+    };
+    scanMock.mockResolvedValue([candNew, candDone]);
+    importMock.mockResolvedValue({ inserted: 1, skipped: 0 });
+    render(<McpSection />);
+    await waitFor(() => screen.getByText("文件检索")); // flush initial load inside act
+    fireEvent.click(screen.getByText("扫描本机"));
+    await waitFor(() => expect(screen.getByTestId("scan-modal")).toBeTruthy());
+    expect(scanMock).toHaveBeenCalledTimes(1);
+    expect(screen.getAllByTestId("scan-row").length).toBe(2);
+    // 已导入的候选勾选框禁用且标了「已导入」
+    const doneBox = screen.getByLabelText("选择 followup") as HTMLInputElement;
+    expect(doneBox.disabled).toBe(true);
+    expect(screen.getByText(/已导入/)).toBeTruthy();
+    // 导入只带未导入的 signature
+    fireEvent.click(screen.getByText(/导入选中/));
+    await waitFor(() =>
+      expect(importMock).toHaveBeenCalledWith(["stdio|/bin/prune|mcp"])
+    );
+    // 导入成功后重扫刷新 imported 标记
+    await waitFor(() => expect(scanMock).toHaveBeenCalledTimes(2));
+    expect(screen.getByText(/已导入 1 条/)).toBeTruthy();
   });
 });
 

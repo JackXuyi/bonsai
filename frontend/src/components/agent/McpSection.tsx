@@ -7,13 +7,15 @@ import {
   agentApprovalGet,
   agentApprovalSet,
   humanizeAgentError,
+  mcpDiscoverImport,
+  mcpDiscoverScan,
   mcpServerList,
   mcpServerRemove,
   mcpServerSave,
   mcpServerTest,
   mcpServerToggle,
 } from "@/lib/commands";
-import type { McpServerRow } from "@/lib/types";
+import type { DiscoveredServer, McpServerRow } from "@/lib/types";
 
 /** null = 关闭；"new" = 添加；id = 编辑 */
 type FormState = null | "new" | string;
@@ -26,6 +28,13 @@ export function McpSection() {
   const [confirmId, setConfirmId] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [approval, setApproval] = useState<"auto" | "ask">("auto");
+  // 本机扫描（spec-s2 §6）
+  const [scanOpen, setScanOpen] = useState(false);
+  const [scanRows, setScanRows] = useState<DiscoveredServer[]>([]);
+  const [scanning, setScanning] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [importing, setImporting] = useState(false);
+  const [scanMsg, setScanMsg] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -84,6 +93,49 @@ export function McpSection() {
   }
 
   const editing = typeof form === "string" && form !== "new" ? rows.find((r) => r.id === form) ?? null : null;
+
+  function toggleSel(sig: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(sig)) next.delete(sig);
+      else next.add(sig);
+      return next;
+    });
+  }
+
+  async function runScan() {
+    setScanning(true);
+    setScanMsg(null);
+    try {
+      const found = await mcpDiscoverScan();
+      setScanRows(found);
+      setSelected(new Set(found.filter((r) => !r.imported).map((r) => r.signature)));
+      setScanOpen(true);
+      setError(null);
+    } catch (e) {
+      setError(humanizeAgentError(e));
+    } finally {
+      setScanning(false);
+    }
+  }
+
+  async function importSelected() {
+    setImporting(true);
+    try {
+      const report = await mcpDiscoverImport([...selected]);
+      setScanMsg(`已导入 ${report.inserted} 条，跳过 ${report.skipped} 条。导入后默认停用，逐个「测试/启用」生效。`);
+      await refresh();
+      // 重扫一次刷新 imported 标记
+      const found = await mcpDiscoverScan();
+      setScanRows(found);
+      setSelected(new Set(found.filter((r) => !r.imported).map((r) => r.signature)));
+      setError(null);
+    } catch (e) {
+      setError(humanizeAgentError(e));
+    } finally {
+      setImporting(false);
+    }
+  }
 
   return (
     <div className="card agent-card">
@@ -152,9 +204,14 @@ export function McpSection() {
           ))}
         </div>
       )}
-      <button type="button" className="btn cloud-add" onClick={() => setForm("new")}>
-        ＋ 接入 MCP server
-      </button>
+      <div style={{ display: "flex", gap: 8 }}>
+        <button type="button" className="btn cloud-add" style={{ flex: 1 }} onClick={() => setForm("new")}>
+          ＋ 接入 MCP server
+        </button>
+        <button type="button" className="btn-ghost" disabled={scanning} onClick={() => void runScan()}>
+          {scanning ? "扫描中…" : "扫描本机"}
+        </button>
+      </div>
       <p className="hint-line" style={{ marginTop: 8 }}>
         支持 stdio（本机子进程）与 Streamable HTTP（远程）两种传输。新接入一律默认停用，手动启用后生效；
         {approval === "ask"
@@ -171,6 +228,62 @@ export function McpSection() {
             await refresh();
           }}
         />
+      )}
+
+      {scanOpen && (
+        <div className="mconfirm" role="dialog" aria-modal="true">
+          <div className="mconfirm-box agent-form" data-testid="scan-modal">
+            <p className="mconfirm-title">扫描本机 MCP 配置</p>
+            <p className="mconfirm-sub">
+              来源：Cursor / Claude / VS Code / Windsurf 等客户端配置文件，以及应用自带的 mcp manifest。
+              导入后默认停用，手动启用才生效。
+            </p>
+            {scanRows.length === 0 ? (
+              <p className="hint-line">没扫到任何 MCP 配置。</p>
+            ) : (
+              <div className="agent-list">
+                {scanRows.map((r) => (
+                  <div key={r.signature} className="agent-row" data-testid="scan-row">
+                    <div className="agent-row-main">
+                      <input
+                        type="checkbox"
+                        aria-label={`选择 ${r.name}`}
+                        disabled={r.imported}
+                        checked={selected.has(r.signature)}
+                        onChange={() => toggleSel(r.signature)}
+                      />
+                      <span className="agent-transport" data-transport={r.transport}>
+                        {r.transport}
+                      </span>
+                      <span className="agent-name">{r.name}</span>
+                      <span className="hint-line">
+                        {r.source}
+                        {r.imported ? " · 已导入" : ""}
+                      </span>
+                    </div>
+                    <div className="agent-row-actions">
+                      <span className="hint-line">{r.transport === "stdio" ? r.command : r.url}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            {scanMsg && <p className="hint-line">{scanMsg}</p>}
+            <div className="mconfirm-actions">
+              <button type="button" className="btn-ghost" onClick={() => setScanOpen(false)}>
+                关闭
+              </button>
+              <button
+                type="button"
+                className="btn"
+                disabled={importing || selected.size === 0}
+                onClick={() => void importSelected()}
+              >
+                {importing ? "导入中…" : `导入选中（${selected.size}）`}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {confirmId && (
