@@ -185,7 +185,9 @@ body {
 /* ── report dialog ─────────────────────────────────────────── */
 
 dialog {
-  width: 316px;
+  /* 弹窗统一宽度底线：最小 300px（2026-11-20 用户要求） */
+  min-width: 300px;
+  max-width: 92vw;
   max-height: 372px;
   margin: auto;
   padding: 0;
