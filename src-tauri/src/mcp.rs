@@ -22,7 +22,16 @@ use crate::agent_tools::{clip_chars, mask_secrets, ToolCall, ToolDescriptor, Too
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const CALL_TIMEOUT: Duration = Duration::from_secs(60);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+/// Remote (http) tools: conservative 200-char budget — the payload leaves the
+/// device, so size/leak surface must stay small regardless of model capacity.
 const SUMMARY_MAX: usize = 200;
+/// Local (stdio) tools: the payload never leaves the device, so the budget is
+/// sized to what an online LLM can digest in one pass-3 prompt (~16k chars ≈
+/// 4-8k tokens against a 128k-token context, room for persona + history +
+/// catalog alongside). Prune's JSON reports (net_diag/net_sites/…) put their
+/// conclusions past the old 200-char mark, which read as "结果被截断"
+/// (2026-11-20 诊断：调用全 ok 但模型只见到 JSON 开头 ~200 字符)。
+const SUMMARY_MAX_LOCAL: usize = 16000;
 
 pub const ERR_TIMEOUT: &str = "mcp_timeout";
 pub const ERR_UNREACHABLE: &str = "mcp_unreachable";
@@ -79,6 +88,8 @@ fn client_info() -> ClientConfig {
 /// process / HTTP session alive; Drop cancels the service loop.
 pub struct McpClient {
     service: RunningService<RoleClient, ClientConfig>,
+    /// stdio = 本机子进程（输出不出设备，摘要预算可放宽）；http = 远程。
+    local: bool,
 }
 
 impl McpClient {
@@ -102,7 +113,7 @@ impl McpClient {
                         Err(_) => Err(ERR_TIMEOUT.to_string()),
                     }
                 })?;
-                Ok(McpClient { service })
+                Ok(McpClient { service, local: true })
             }
             McpTransport::Http { url, headers } => {
                 let transport = http_transport(url, headers)?;
@@ -111,7 +122,7 @@ impl McpClient {
                 })
                 .map_err(|_| ERR_TIMEOUT.to_string())?
                 .map_err(|e| format!("{ERR_UNREACHABLE}: {e}"))?;
-                Ok(McpClient { service })
+                Ok(McpClient { service, local: false })
             }
         }
     }
@@ -140,7 +151,8 @@ impl McpClient {
     }
 
     /// tools/call with a 60s hard timeout. Text content is joined for the
-    /// summary (≤200 chars, masked); the full text stays out of the model.
+    /// summary (masked; 本地 16k / 远程 200 字符预算，见 SUMMARY_MAX_*); the
+    /// full text stays out of the model.
     pub fn call_tool(&self, call: &ToolCall) -> Result<ToolOutput, String> {
         let mut params = CallToolRequestParams::new(call.name.clone());
         params.arguments = Some(call.args.as_object().cloned().unwrap_or_default());
@@ -160,7 +172,7 @@ impl McpClient {
         if result.is_error.unwrap_or(false) {
             return Err(format!("tool_error: {}", clip_chars(&full, 120)));
         }
-        Ok(ToolOutput { summary: clip_chars(&mask_secrets(&full), SUMMARY_MAX), full })
+        Ok(ToolOutput { summary: clip_summary(self.local, &full), full })
     }
 
     pub fn ping(&self) -> bool {
@@ -171,6 +183,14 @@ impl McpClient {
     pub fn shutdown(&mut self) {
         let _ = tauri::async_runtime::block_on(self.service.close_with_timeout(SHUTDOWN_TIMEOUT));
     }
+}
+
+/// Tool-result → model-visible summary. Budget by transport: local stdio gets
+/// the online-LLM-sized window (SUMMARY_MAX_LOCAL), remote http stays at the
+/// conservative SUMMARY_MAX. Secrets are masked in both.
+fn clip_summary(local: bool, full: &str) -> String {
+    let cap = if local { SUMMARY_MAX_LOCAL } else { SUMMARY_MAX };
+    clip_chars(&mask_secrets(full), cap)
 }
 
 /// Streamable HTTP transport via the rmcp config builder: `Authorization`
@@ -289,6 +309,36 @@ impl ToolProvider for MockMcpProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn summary_budget_is_transport_aware() {
+        // 2026-11-20 诊断回归：prune 的 JSON 报告结论字段在 200 字符之后，
+        // 本地工具曾被统一 200 截断 → 模型永远看到半截 JSON（"结果被截断"）。
+        // ENDMARK sits AFTER 20k chars — a correct remote clip must never
+        // reach it (curlExitCode sits in the first ~100 chars, so it
+        // legitimately survives any 200-char clip).
+        let long = format!(
+            r#"{{"note":"stalled = 握手完成但首字节不到","sites":[{{"host":"example.com","curlExitCode":28}}],"tail":"{}ENDMARK"}}"#,
+            "x".repeat(20000)
+        );
+
+        let local = clip_summary(true, &long);
+        assert!(local.contains("curlExitCode"), "local budget must keep conclusion fields: {local}");
+        assert!(local.chars().count() <= SUMMARY_MAX_LOCAL);
+        assert!(local.chars().count() > 200, "local budget must exceed the old 200-char clip");
+
+        let remote = clip_summary(false, &long);
+        assert!(remote.chars().count() <= 200, "remote budget stays conservative");
+        assert!(!remote.contains("ENDMARK"), "remote clip still cuts the tail");
+    }
+
+    #[test]
+    fn summary_budget_masks_secrets_in_both_modes() {
+        let secret = "sk-abc123def456ghi789";
+        let full = format!("token={secret} and some more padding text to fill the window out a bit");
+        assert!(!clip_summary(true, &full).contains(secret));
+        assert!(!clip_summary(false, &full).contains(secret));
+    }
 
     #[test]
     fn connect_outside_runtime_returns_err_not_panic() {
