@@ -479,8 +479,12 @@ fn find_owner<'a>(
 }
 
 /// Execute a validated call through the gate + provider, fully audited.
+/// The store lock is held ONLY for audit-row writes and for providers that
+/// declare `needs_conn()` — MCP subprocess execution (up to ~10s timeout)
+/// runs conn-less so a slow tool never blocks other store consumers
+/// (2026-11-20 lock-narrowing).
 pub fn execute_audited(
-    conn: &Connection,
+    store: &crate::memory::MemoryStore,
     kit: &AgentKit,
     name: &str,
     args: serde_json::Value,
@@ -499,53 +503,55 @@ pub fn execute_audited(
     // gate — garbage from a small model never reaches approval or execution.
     let started = std::time::Instant::now();
     if let Err(reason) = crate::agent_tools::validate_args(&descriptor.detail, &args) {
-        db::log_agent_tool_call(
-            conn,
+        audit_log(
+            store,
             descriptor.kind.as_str(),
             &descriptor.name,
             "error",
             &reason,
             Some(&args_summary),
-            Some(&kit.trace_ref()),
+            Some(kit.trace_ref().as_str()),
             descriptor.remote,
             Some(started.elapsed().as_millis() as i64),
-        )
-        .ok();
+        );
         return Err(reason);
     }
     let call = ToolCall { name: name.to_string(), args };
     let decision = kit.gate.check(&call, &descriptor.name, descriptor.remote);
     if decision == ApprovalDecision::Deny {
-        db::log_agent_tool_call(
-            conn,
+        audit_log(
+            store,
             descriptor.kind.as_str(),
             &descriptor.name,
             "denied",
             "denied_by_gate",
             Some(&args_summary),
-            Some(&kit.trace_ref()),
+            Some(kit.trace_ref().as_str()),
             descriptor.remote,
             Some(started.elapsed().as_millis() as i64),
-        )
-        .ok();
+        );
         return Err("denied".into());
     }
-    let result = provider.execute_with_conn(conn, &call);
+    let result = if provider.needs_conn() {
+        let conn = store.0.lock().map_err(|_| "store_poisoned".to_string())?;
+        provider.execute_with_conn(&conn, &call)
+    } else {
+        provider.execute(&call)
+    };
     let duration = Some(started.elapsed().as_millis() as i64);
     match result {
         Ok(out) => {
-            db::log_agent_tool_call(
-                conn,
+            audit_log(
+                store,
                 descriptor.kind.as_str(),
                 &descriptor.name,
                 "ok",
                 if descriptor.remote { "auto_allowed_remote" } else { "auto_allowed" },
                 Some(&args_summary),
-                Some(&kit.trace_ref()),
+                Some(kit.trace_ref().as_str()),
                 descriptor.remote,
                 duration,
-            )
-            .ok();
+            );
             Ok(out)
         }
         Err(e) => {
@@ -558,21 +564,52 @@ pub fn execute_audited(
             } else {
                 "error"
             };
-            db::log_agent_tool_call(
-                conn,
+            audit_log(
+                store,
                 descriptor.kind.as_str(),
                 &descriptor.name,
                 if status == "mcp_unreachable" { "unavailable" } else { "error" },
                 status,
                 Some(&args_summary),
-                Some(&kit.trace_ref()),
+                Some(kit.trace_ref().as_str()),
                 descriptor.remote,
                 duration,
-            )
-            .ok();
+            );
             Err(e)
         }
     }
+}
+
+/// One audit row under a short-lived lock. Audit failures never fail the
+/// call itself (same semantics as the previous inline `.ok()` writes).
+#[allow(clippy::too_many_arguments)]
+fn audit_log(
+    store: &crate::memory::MemoryStore,
+    kind: &str,
+    name: &str,
+    outcome: &str,
+    detail: &str,
+    args_summary: Option<&str>,
+    trace: Option<&str>,
+    remote: bool,
+    duration_ms: Option<i64>,
+) {
+    let Ok(conn) = store.0.lock() else {
+        log::warn!("audit_log: store lock poisoned — row dropped");
+        return;
+    };
+    db::log_agent_tool_call(
+        &conn,
+        kind,
+        name,
+        outcome,
+        detail,
+        args_summary,
+        trace,
+        remote,
+        duration_ms,
+    )
+    .ok();
 }
 
 /// Build the turn's kit from managed state + settings. Cost: one SQL read
@@ -1062,6 +1099,24 @@ pub(crate) mod tests {
         .unwrap()
     }
 
+    /// Store-backed twin for tests that go through `execute_audited` (it
+    /// locks the store internally — 2026-11-20 lock-narrowing).
+    fn mem_store() -> crate::memory::MemoryStore {
+        let dir = std::env::temp_dir().join("bonsai-mcp-admin-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::memory::MemoryStore::open(&dir.join(format!(
+            "s-{}-{}.sqlite3",
+            std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        )))
+        .unwrap()
+    }
+
+    fn with_conn<T>(s: &crate::memory::MemoryStore, f: impl FnOnce(&Connection) -> T) -> T {
+        let conn = s.0.lock().unwrap();
+        f(&conn)
+    }
+
     fn hdrs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
     }
@@ -1216,15 +1271,15 @@ pub(crate) mod tests {
 
     #[test]
     fn execute_audited_unknown_tool_errors() {
-        let conn = mem();
+        let s = mem_store();
         let kit = AgentKit::empty();
-        let err = execute_audited(&conn, &kit, "ghost", serde_json::json!({})).unwrap_err();
+        let err = execute_audited(&s, &kit, "ghost", serde_json::json!({})).unwrap_err();
         assert_eq!(err, "unknown_tool");
     }
 
     #[test]
     fn execute_audited_records_ok_and_failure_status() {
-        let conn = mem();
+        let s = mem_store();
 
         // ok path: auto_allowed + masked params.
         let mut ok = crate::mcp::MockMcpProvider::with_tool("weather", "查天气", "{}");
@@ -1236,7 +1291,7 @@ pub(crate) mod tests {
         };
         kit.trace("round1:candidates=1".into());
         let out = execute_audited(
-            &conn,
+            &s,
             &kit,
             "weather",
             serde_json::json!({"auth": "Bearer sk-abcdefgh123"}),
@@ -1244,7 +1299,7 @@ pub(crate) mod tests {
         .unwrap();
         assert_eq!(out.summary, "杭州多云 18 度");
 
-        let rec = &db::tool_call_records(&conn, 10).unwrap()[0];
+        let rec = &with_conn(&s, |conn| db::tool_call_records(conn, 10).unwrap())[0];
         assert_eq!(rec.tool, "mcp");
         assert_eq!(rec.action, "weather");
         assert_eq!(rec.outcome, "ok");
@@ -1263,10 +1318,10 @@ pub(crate) mod tests {
             gate: Box::new(crate::agent_tools::AutoAllowGate),
             prompt_trace: Mutex::new(Vec::new()),
         };
-        let err = execute_audited(&conn, &kit_broken, "weather", serde_json::json!({})).unwrap_err();
+        let err = execute_audited(&s, &kit_broken, "weather", serde_json::json!({})).unwrap_err();
         assert_eq!(err, crate::mcp::ERR_TIMEOUT);
 
-        let rec = &db::tool_call_records(&conn, 10).unwrap()[0];
+        let rec = &with_conn(&s, |conn| db::tool_call_records(conn, 10).unwrap())[0];
         assert_eq!(rec.outcome, "error");
         assert_eq!(rec.result_status.as_deref(), Some("mcp_timeout"));
     }
@@ -1276,7 +1331,7 @@ pub(crate) mod tests {
         // plan §3.3: strict inputSchema check BEFORE the approval gate —
         // a small model's hallucinated args never reach execution, and the
         // audit row records the exact reason.
-        let conn = mem();
+        let s = mem_store();
         let schema = r#"{"type":"object","properties":{"city":{"type":"string"},"days":{"type":"integer"}},"required":["city"]}"#;
         let mut provider = crate::mcp::MockMcpProvider::with_tool("weather", "查天气", schema);
         provider.replies.insert("weather".into(), "杭州多云 18 度".into());
@@ -1288,24 +1343,24 @@ pub(crate) mod tests {
 
         // missing required → rejected, provider never called.
         let err =
-            execute_audited(&conn, &kit, "weather", serde_json::json!({"days": 3})).unwrap_err();
+            execute_audited(&s, &kit, "weather", serde_json::json!({"days": 3})).unwrap_err();
         assert_eq!(err, "bad_args:missing:city");
 
         // wrong type → rejected.
-        let err = execute_audited(&conn, &kit, "weather", serde_json::json!({"city": "杭州", "days": "三天"}))
+        let err = execute_audited(&s, &kit, "weather", serde_json::json!({"city": "杭州", "days": "三天"}))
             .unwrap_err();
         assert_eq!(err, "bad_args:type:days");
 
         // not an object → rejected.
-        let err = execute_audited(&conn, &kit, "weather", serde_json::json!("杭州")).unwrap_err();
+        let err = execute_audited(&s, &kit, "weather", serde_json::json!("杭州")).unwrap_err();
         assert_eq!(err, "bad_args:not-an-object");
 
         // valid args (incl. unknown extra field) → passes, executes.
-        let out = execute_audited(&conn, &kit, "weather", serde_json::json!({"city": "杭州", "unit": "c"})).unwrap();
+        let out = execute_audited(&s, &kit, "weather", serde_json::json!({"city": "杭州", "unit": "c"})).unwrap();
         assert_eq!(out.summary, "杭州多云 18 度");
 
         // audit: only the rejected rows carry bad_args; the good one auto_allowed.
-        let recs = db::tool_call_records(&conn, 10).unwrap();
+        let recs = with_conn(&s, |conn| db::tool_call_records(conn, 10).unwrap());
         let bad = recs.iter().filter(|r| r.result_status.as_deref().unwrap_or("").starts_with("bad_args"));
         assert_eq!(bad.count(), 3);
         let good = &recs[0];
@@ -1352,34 +1407,37 @@ pub(crate) mod tests {
     fn ask_mode_gate_denies_when_no_ui_is_attached() {
         // Full flip check: setting=ask → build_agent_kit picks the asking
         // gate → without an app handle it must deny (never silently allow).
-        let conn = mem();
-        db::set_setting(&conn, "approval_mode", "ask").unwrap();
+        let s = mem_store();
+        with_conn(&s, |conn| {
+            db::set_setting(conn, "approval_mode", "ask").unwrap();
+            let id = insert_server(conn, "本地", "stdio", Some("/bin/true"), &[], None, &[], &[]).unwrap();
+            let cache = serde_json::to_string(&vec![ToolDescriptor {
+                name: "weather".into(),
+                summary: "查天气".into(),
+                detail: "{}".into(),
+                kind: crate::agent_tools::ToolKind::Mcp,
+                remote: false,
+            }])
+            .unwrap();
+            conn.execute(
+                "UPDATE mcp_servers SET enabled = 1, tool_cache = ?1 WHERE id = ?2",
+                rusqlite::params![cache, id],
+            )
+            .unwrap();
+        });
         let state = AgentState {
             manager: crate::mcp::McpManager::default(),
             skills_dir: std::env::temp_dir(),
             approvals: Arc::new(ApprovalBroker::default()),
             app: None,
         };
-        let id = insert_server(&conn, "本地", "stdio", Some("/bin/true"), &[], None, &[], &[]).unwrap();
-        let cache = serde_json::to_string(&vec![ToolDescriptor {
-            name: "weather".into(),
-            summary: "查天气".into(),
-            detail: "{}".into(),
-            kind: crate::agent_tools::ToolKind::Mcp,
-            remote: false,
-        }])
-        .unwrap();
-        conn.execute(
-            "UPDATE mcp_servers SET enabled = 1, tool_cache = ?1 WHERE id = ?2",
-            rusqlite::params![cache, id],
-        )
-        .unwrap();
-
-        let kit = build_agent_kit(&conn, &state, "今天有什么会");
+        // Separate scopes: execute_audited locks internally, so no guard may
+        // be alive here.
+        let kit = with_conn(&s, |conn| build_agent_kit(conn, &state, "今天有什么会"));
         assert!(kit.has_capabilities());
-        let err = execute_audited(&conn, &kit, "weather", serde_json::json!({})).unwrap_err();
+        let err = execute_audited(&s, &kit, "weather", serde_json::json!({})).unwrap_err();
         assert_eq!(err, "denied");
-        let rec = &db::tool_call_records(&conn, 10).unwrap()[0];
+        let rec = &with_conn(&s, |conn| db::tool_call_records(conn, 10).unwrap())[0];
         assert_eq!(rec.outcome, "denied");
         assert_eq!(rec.result_status.as_deref(), Some("denied_by_gate"));
     }

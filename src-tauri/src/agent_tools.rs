@@ -74,9 +74,17 @@ pub trait ToolProvider: Send + Sync {
     fn descriptors(&self) -> Vec<ToolDescriptor>;
     /// Skills and other prompt-only kinds answer `Err("unsupported")` (D4).
     fn execute(&self, call: &ToolCall) -> Result<ToolOutput, String>;
-    /// Built-in tools that need the memory store override this; the chat
-    /// turn already holds the connection when it executes a call. Default:
-    /// conn-less execution, so every existing provider is untouched.
+    /// Whether the provider actually READS the connection during execution.
+    /// `execute_audited` locks the store only for these providers (built-in
+    /// memory_search); MCP providers run their subprocess wait WITHOUT the
+    /// DB lock (2026-11-20 lock-narrowing: a 10s tool timeout must not
+    /// block every other store consumer).
+    fn needs_conn(&self) -> bool {
+        false
+    }
+    /// Built-in tools that need the memory store override this AND
+    /// `needs_conn`. Default: conn-less execution, so every existing
+    /// provider is untouched.
     fn execute_with_conn(
         &self,
         _conn: &rusqlite::Connection,

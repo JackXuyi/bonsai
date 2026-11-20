@@ -79,6 +79,20 @@ fn clip(text: &str, n: usize) -> String {
     text.chars().take(n).collect()
 }
 
+/// Short-lived store lock for ONE db operation (2026-11-20 lock-narrowing).
+/// The chat pipeline acquires/releases per phase: model inference, MCP
+/// subprocess waits and skill-body reads NEVER hold the store mutex.
+/// The guard derefs to `Connection`, so every db-layer helper keeps its
+/// `&Connection` signature unchanged.
+fn lock_conn(store: &MemoryStore) -> rusqlite::Result<std::sync::MutexGuard<'_, Connection>> {
+    store.0.lock().map_err(|_| {
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(1),
+            Some("memory store mutex poisoned".into()),
+        )
+    })
+}
+
 fn is_weekend_today() -> bool {
     use chrono::Datelike;
     matches!(
@@ -166,14 +180,14 @@ fn summary_round_prompt(sys1: &str, name: &str, summary: &str) -> String {
 /// back as-is and the caller applies FALLBACK_REPLY.
 #[allow(clippy::too_many_lines)]
 fn agent_pipeline(
-    conn: &Connection,
+    store: &MemoryStore,
     backend: &mut dyn DialogueBackend,
     kit: &mut crate::mcp_admin::AgentKit,
     system: &str,
     history: &[crate::persona::eval::Turn],
     user_text: &str,
     mut on_delta: Option<&mut dyn FnMut(&str)>,
-) -> (String, Option<String>, bool) {
+) -> rusqlite::Result<(String, Option<String>, bool)> {
     use crate::agent_tools::{json_object_slice, name_catalog, parse_candidates, parse_tool_decision, ToolDecision, ToolKind};
 
     // The `DialogueOutcome.tool` label, prefixed by the tool's kind so the
@@ -197,11 +211,11 @@ fn agent_pipeline(
     // ---- pass 1: name-only round (never streamed — the output may be JSON)
     let raw1 = backend.reply(&sys0, history, user_text, CHAT_TEMPERATURE);
     if raw1.trim().is_empty() {
-        return (raw1, None, false);
+        return Ok((raw1, None, false));
     }
     let Ok(cands) = parse_candidates(&raw1) else {
         kit.trace("level1:direct-answer".into());
-        return (raw1, None, false);
+        return Ok((raw1, None, false));
     };
 
     // Whitelist + cap (silent degrade, spec-s3 §3). The whitelist checks the
@@ -226,7 +240,7 @@ fn agent_pipeline(
         // The model *wanted* tools but named none that exist (hallucinated
         // names or a since-disabled server). Never leak the raw candidates
         // JSON into the chat (2026-11-20 screenshot regression).
-        return (prose_retry(backend, system, history, user_text), None, false);
+        return Ok((prose_retry(backend, system, history, user_text), None, false));
     }
     kit.trace(format!(
         "level1:{}",
@@ -272,7 +286,7 @@ fn agent_pipeline(
     );
     let raw2 = backend.reply(&sys1, history, user_text, CHAT_TEMPERATURE);
     if raw2.trim().is_empty() {
-        return (raw2, None, false);
+        return Ok((raw2, None, false));
     }
 
     match parse_tool_decision(&raw2) {
@@ -282,39 +296,44 @@ fn agent_pipeline(
         // it verbatim is exactly the 2026-11-20 leak. Re-ask in prose.
         Err(_) if json_object_slice(&raw2).is_some() => {
             kit.trace("level2:json-not-prose".into());
-            (prose_retry(backend, system, history, user_text), None, false)
+            Ok((prose_retry(backend, system, history, user_text), None, false))
         }
         // Prose answer (skill body sufficed, or the model declined).
         Err(_) => {
-            for d in used.iter().filter(|d| d.kind == ToolKind::Skill) {
-                db::log_agent_tool_call(
-                    conn,
-                    "skill",
-                    &d.name,
-                    "ok",
-                    "answered",
-                    None,
-                    Some(&kit.trace_ref()),
-                    false,
-                    None,
-                )
-                .ok();
+            // Audit rows for the skills whose bodies were injected — one
+            // short lock scope (lock-narrowing).
+            {
+                let conn = lock_conn(store)?;
+                for d in used.iter().filter(|d| d.kind == ToolKind::Skill) {
+                    db::log_agent_tool_call(
+                        &conn,
+                        "skill",
+                        &d.name,
+                        "ok",
+                        "answered",
+                        None,
+                        Some(&kit.trace_ref()),
+                        false,
+                        None,
+                    )
+                    .ok();
+                }
             }
             kit.trace("level2:prose-answer".into());
             let label = used
                 .iter()
                 .find(|d| d.kind == ToolKind::Skill)
                 .map(|d| format!("skill:{}", d.name));
-            (raw2, label, false)
+            Ok((raw2, label, false))
         }
         Ok(ToolDecision::None) => {
             kit.trace("level2:none".into());
-            ("（这轮先不动用工具——直接聊吧。）".into(), None, false)
+            Ok(("（这轮先不动用工具——直接聊吧。）".into(), None, false))
         }
         Ok(ToolDecision::Call { name, args }) => {
             kit.trace(format!("level2:call:{name}"));
             let label = tool_label(kit, &name);
-            match crate::mcp_admin::execute_audited(conn, kit, &name, args) {
+            match crate::mcp_admin::execute_audited(store, kit, &name, args) {
                 Err(e) => {
                     // Carry the failure class into the bubble (2026-11-20: the
                     // one-size「没能执行成功」hid an unconnected MCP server
@@ -332,7 +351,7 @@ fn agent_pipeline(
                     } else {
                         format!("没能执行成功（{}）", clip(&e))
                     };
-                    (format!("（工具 {name} {why}。）"), label, false)
+                    Ok((format!("（工具 {name} {why}。）"), label, false))
                 }
                 Ok(out) => {
                     // ---- pass 3: result-summary round (streaming lives here)
@@ -380,11 +399,11 @@ fn agent_pipeline(
                         }
                     }
                     if raw3.trim().is_empty() {
-                        (
+                        Ok((
                             format!("（{name} 跑完了，但盆栽没组织好语言——结果：{}）", out.summary),
                             label,
                             true,
-                        )
+                        ))
                     } else if json_out {
                         kit.trace("level3:json-not-prose".into());
                         let sys3 = format!(
@@ -397,16 +416,16 @@ fn agent_pipeline(
                         );
                         let retry = backend.reply(&sys3, history, user_text, CHAT_TEMPERATURE);
                         if !retry.trim().is_empty() && !retry.trim_start().starts_with('{') {
-                            (retry, label, false)
+                            Ok((retry, label, false))
                         } else {
-                            (
+                            Ok((
                                 format!("（{name} 的结果：{}）", out.summary),
                                 label,
                                 false,
-                            )
+                            ))
                         }
                     } else {
-                        (raw3, label, true)
+                        Ok((raw3, label, true))
                     }
                 }
             }
@@ -416,8 +435,12 @@ fn agent_pipeline(
 
 /// One user-initiated chat turn: render → backend → filter → record.
 /// Always produces a reply (fallback line when the model is down).
+///
+/// Takes `&MemoryStore` and locks it per DB phase (lock-narrowing, 2026-11-20):
+/// the model rounds below run with ZERO locks held, so a 45s cloud inference
+/// never blocks the proactive thread, tray updates or consolidate jobs.
 pub fn chat_turn(
-    conn: &Connection,
+    store: &MemoryStore,
     backend: &mut dyn DialogueBackend,
     card: &Persona,
     session_id: &str,
@@ -426,13 +449,13 @@ pub fn chat_turn(
     raining: bool,
     access: crate::calendar::CalendarAccess,
 ) -> rusqlite::Result<DialogueOutcome> {
-    chat_turn_inner(conn, backend, card, session_id, user_text, hour, raining, access, None, None)
+    chat_turn_inner(store, backend, card, session_id, user_text, hour, raining, access, None, None)
 }
 
 /// Same turn, with the agent pipeline (spec-s3): three-stage progressive
 /// tool/skill selection runs only when the kit carries capabilities.
 pub fn chat_turn_with_kit(
-    conn: &Connection,
+    store: &MemoryStore,
     backend: &mut dyn DialogueBackend,
     card: &Persona,
     session_id: &str,
@@ -442,13 +465,13 @@ pub fn chat_turn_with_kit(
     access: crate::calendar::CalendarAccess,
     kit: &mut crate::mcp_admin::AgentKit,
 ) -> rusqlite::Result<DialogueOutcome> {
-    chat_turn_inner(conn, backend, card, session_id, user_text, hour, raining, access, Some(kit), None)
+    chat_turn_inner(store, backend, card, session_id, user_text, hour, raining, access, Some(kit), None)
 }
 
 /// Same turn with incremental delivery: every model chunk goes to `on_delta`
 /// while it is still being generated (the frontend renders it live).
 pub fn chat_turn_streaming(
-    conn: &Connection,
+    store: &MemoryStore,
     backend: &mut dyn DialogueBackend,
     card: &Persona,
     session_id: &str,
@@ -458,13 +481,13 @@ pub fn chat_turn_streaming(
     access: crate::calendar::CalendarAccess,
     on_delta: &mut dyn FnMut(&str),
 ) -> rusqlite::Result<DialogueOutcome> {
-    chat_turn_inner(conn, backend, card, session_id, user_text, hour, raining, access, None, Some(on_delta))
+    chat_turn_inner(store, backend, card, session_id, user_text, hour, raining, access, None, Some(on_delta))
 }
 
 /// Streaming + agent pipeline: deltas fire on the final round only
 /// (spec-s3 deviation note — the selection rounds may be JSON).
 pub fn chat_turn_streaming_with_kit(
-    conn: &Connection,
+    store: &MemoryStore,
     backend: &mut dyn DialogueBackend,
     card: &Persona,
     session_id: &str,
@@ -475,11 +498,11 @@ pub fn chat_turn_streaming_with_kit(
     kit: &mut crate::mcp_admin::AgentKit,
     on_delta: &mut dyn FnMut(&str),
 ) -> rusqlite::Result<DialogueOutcome> {
-    chat_turn_inner(conn, backend, card, session_id, user_text, hour, raining, access, Some(kit), Some(on_delta))
+    chat_turn_inner(store, backend, card, session_id, user_text, hour, raining, access, Some(kit), Some(on_delta))
 }
 
 fn chat_turn_inner(
-    conn: &Connection,
+    store: &MemoryStore,
     backend: &mut dyn DialogueBackend,
     card: &Persona,
     session_id: &str,
@@ -495,8 +518,9 @@ fn chat_turn_inner(
     // are still recorded (compliance audit), no streaming deltas are sent.
     if crate::onboarding::crisis_hit(user_text) {
         let reply = crate::onboarding::CRISIS_REPLY.to_string();
-        db::add_event_meta(conn, "dialogue", user_text, Some("user"), Some(session_id))?;
-        db::add_event_meta(conn, "dialogue", &reply, Some("assistant"), Some(session_id))?;
+        let conn = lock_conn(store)?;
+        db::add_event_meta(&conn, "dialogue", user_text, Some("user"), Some(session_id))?;
+        db::add_event_meta(&conn, "dialogue", &reply, Some("assistant"), Some(session_id))?;
         return Ok(DialogueOutcome {
             reply,
             filter: generation::FilterReport::default(),
@@ -510,9 +534,16 @@ fn chat_turn_inner(
     // the model: a schedule question is answered from the calendar cache by
     // deterministic rules, so it works with the local model down and never
     // invents a meeting. A miss falls straight through to normal chat.
-    if let Some(tool) = crate::tools::maybe_answer(conn, access, user_text, chrono::Local::now()) {
-        db::add_event_meta(conn, "dialogue", user_text, Some("user"), Some(session_id))?;
-        db::add_event_meta(conn, "dialogue", &tool.reply, Some("assistant"), Some(session_id))?;
+    // One lock scope: cache read/write + both event rows.
+    if let Some(tool) = {
+        let conn = lock_conn(store)?;
+        let t = crate::tools::maybe_answer(&conn, access, user_text, chrono::Local::now());
+        if let Some(t) = &t {
+            db::add_event_meta(&conn, "dialogue", user_text, Some("user"), Some(session_id))?;
+            db::add_event_meta(&conn, "dialogue", &t.reply, Some("assistant"), Some(session_id))?;
+        }
+        t
+    } {
         return Ok(DialogueOutcome {
             reply: tool.reply,
             filter: generation::FilterReport::default(),
@@ -522,15 +553,20 @@ fn chat_turn_inner(
         });
     }
 
-    let system = format!("{}{}", env_prefix(conn), system_prompt(conn, card, hour, raining)?);
-    let history = db::dialogue_history(conn, session_id, MAX_HISTORY_TURNS)?;
+    // ---- phase: context read (one short lock) → then inference runs FREE
+    let (system, history) = {
+        let conn = lock_conn(store)?;
+        let s = format!("{}{}", env_prefix(&conn), system_prompt(&conn, card, hour, raining)?);
+        let h = db::dialogue_history(&conn, session_id, MAX_HISTORY_TURNS)?;
+        (s, h)
+    };
 
     // Agent pipeline (spec-s3): only when capabilities exist. Anything it
     // returns is final for the turn — record both sides, filter, out.
     if let Some(kit) = kit.take().filter(|k| k.has_capabilities()) {
         let reborrow = on_delta.as_mut().map(|f| &mut **f as &mut dyn FnMut(&str));
         let (raw, tool_label, streamed) =
-            agent_pipeline(conn, backend, kit, &system, &history, user_text, reborrow);
+            agent_pipeline(store, backend, kit, &system, &history, user_text, reborrow)?;
         let model_used = !raw.trim().is_empty();
         let reply = if model_used { raw } else { FALLBACK_REPLY.to_string() };
         // Rounds 1/2 and template replies were not streamed — emit once.
@@ -542,14 +578,15 @@ fn chat_turn_inner(
             }
         }
         let filter = generation::filter(&reply);
-        db::add_event_meta(conn, "dialogue", user_text, Some("user"), Some(session_id))?;
-        db::add_event_meta(conn, "dialogue", &reply, Some("assistant"), Some(session_id))?;
+        let conn = lock_conn(store)?;
+        db::add_event_meta(&conn, "dialogue", user_text, Some("user"), Some(session_id))?;
+        db::add_event_meta(&conn, "dialogue", &reply, Some("assistant"), Some(session_id))?;
         if filter.explicit_disagreement {
-            db::add_event(conn, "disagreement", &clip(&reply, 80))?;
+            db::add_event(&conn, "disagreement", &clip(&reply, 80))?;
         }
         if filter.hedged_disagreement {
-            db::add_event(conn, "disagreement_hedged", &clip(&reply, 80))?;
-            let _ = relationship::maybe_first_refusal(conn, chrono::Local::now());
+            db::add_event(&conn, "disagreement_hedged", &clip(&reply, 80))?;
+            let _ = relationship::maybe_first_refusal(&conn, chrono::Local::now());
         }
         return Ok(DialogueOutcome { reply, filter, model_used, crisis: false, tool: tool_label });
     }
@@ -565,21 +602,22 @@ fn chat_turn_inner(
         FALLBACK_REPLY.to_string()
     };
     let filter = generation::filter(&reply);
-    db::add_event_meta(conn, "dialogue", user_text, Some("user"), Some(session_id))?;
-    db::add_event_meta(conn, "dialogue", &reply, Some("assistant"), Some(session_id))?;
+    let conn = lock_conn(store)?;
+    db::add_event_meta(&conn, "dialogue", user_text, Some("user"), Some(session_id))?;
+    db::add_event_meta(&conn, "dialogue", &reply, Some("assistant"), Some(session_id))?;
 
     // Anti-sycophancy evidence (plan-relationship.md §3.6): the filter used to
     // be report-only, so "how often does it actually push back" was
     // unknowable. Record the two shapes as events — explicit push-back is the
     // relationship line's only qualitative evidence.
     if filter.explicit_disagreement {
-        db::add_event(conn, "disagreement", &clip(&reply, 80))?;
+        db::add_event(&conn, "disagreement", &clip(&reply, 80))?;
     }
     if filter.hedged_disagreement {
-        db::add_event(conn, "disagreement_hedged", &clip(&reply, 80))?;
+        db::add_event(&conn, "disagreement_hedged", &clip(&reply, 80))?;
         // The wishy-washy moment may be the one worth telling a story about
         // (R2 + 7 days, fired at most once, ever).
-        let _ = relationship::maybe_first_refusal(conn, chrono::Local::now());
+        let _ = relationship::maybe_first_refusal(&conn, chrono::Local::now());
     }
     Ok(DialogueOutcome { reply, filter, model_used, crisis: false, tool: None })
 }
@@ -611,24 +649,34 @@ fn today_observations(conn: &Connection) -> String {
 /// Build the day's single proactive message. Returns None (silence) when
 /// the model is unavailable — see module docs. Records the message as an
 /// assistant dialogue event under the proactive session.
+///
+/// Takes `&MemoryStore` (lock-narrowing): the model round below runs with
+/// zero locks — it can take 10s+ on a cloud backend and must not block the
+/// consolidate job or chat turns racing for the store.
 pub fn proactive_text(
-    conn: &Connection,
+    store: &MemoryStore,
     backend: &mut dyn DialogueBackend,
     card: &Persona,
     hour: u32,
     raining: bool,
 ) -> rusqlite::Result<Option<String>> {
-    let system = system_prompt(conn, card, hour, raining)?;
-    let obs = today_observations(conn);
+    let (system, obs) = {
+        let conn = lock_conn(store)?;
+        let s = system_prompt(&conn, card, hour, raining)?;
+        let o = today_observations(&conn);
+        (s, o)
+    };
     let user = format!(
         "（系统注入的一次性指令：这是你今天唯一的主动搭话。基于下面的观察说一句自然、简短的话，像随口聊一句。不要列表，不要复述细节。实在没什么可说，就关心一句用户今天过得怎么样。）\n\n今日观察：{obs}"
     );
+    // zero-lock model round
     let reply = backend.reply(&system, &[], &user, CHAT_TEMPERATURE);
     let reply = reply.trim();
     if reply.is_empty() {
         return Ok(None); // model down → silence, not a canned line
     }
-    db::add_event_meta(conn, "dialogue", reply, Some("assistant"), Some(PROACTIVE_SESSION))?;
+    let conn = lock_conn(store)?;
+    db::add_event_meta(&conn, "dialogue", reply, Some("assistant"), Some(PROACTIVE_SESSION))?;
     Ok(Some(reply.to_string()))
 }
 
@@ -683,8 +731,8 @@ pub fn spawn_proactive(app: tauri::AppHandle) {
         let hour = chrono::Local::now().hour() as u32;
         let message = (|| -> Option<String> {
             let card = app.try_state::<Persona>()?;
-            let conn = store.inner().0.lock().ok()?;
-            proactive_text(&conn, backend.as_mut(), card.inner(), hour, false)
+            // proactive_text locks per phase itself — no guard held here.
+            proactive_text(store.inner(), backend.as_mut(), card.inner(), hour, false)
                 .ok()
                 .flatten()
         })();
@@ -723,11 +771,14 @@ pub async fn dialogue_chat(
         let session = session_id.unwrap_or_else(|| "default".to_string());
         let hour = chrono::Local::now().hour() as u32;
         let mut backend = crate::persona::backend().map_err(|e| e.to_string())?;
-        let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
-        crate::onboarding::ensure_not_minor(&conn)?;
-        let mut kit = crate::mcp_admin::build_agent_kit(&conn, agent.inner(), &user_text);
+        // Short lock for the gate + kit build; the turn locks per phase.
+        let mut kit = {
+            let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+            crate::onboarding::ensure_not_minor(&conn)?;
+            crate::mcp_admin::build_agent_kit(&conn, agent.inner(), &user_text)
+        };
         chat_turn_with_kit(
-            &conn,
+            store.inner(),
             backend.as_mut(),
             &card,
             &session,
@@ -766,14 +817,17 @@ pub async fn dialogue_chat_stream(
         let session = session_id.unwrap_or_else(|| "default".to_string());
         let hour = chrono::Local::now().hour() as u32;
         let mut backend = crate::persona::backend().map_err(|e| e.to_string())?;
-        let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
-        crate::onboarding::ensure_not_minor(&conn)?;
-        let mut kit = crate::mcp_admin::build_agent_kit(&conn, agent.inner(), &user_text);
+        // Short lock for the gate + kit build; the turn locks per phase.
+        let mut kit = {
+            let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+            crate::onboarding::ensure_not_minor(&conn)?;
+            crate::mcp_admin::build_agent_kit(&conn, agent.inner(), &user_text)
+        };
         let mut emit = |delta: &str| {
             let _ = on_delta.send(serde_json::json!({ "delta": delta }));
         };
         chat_turn_streaming_with_kit(
-            &conn,
+            store.inner(),
             backend.as_mut(),
             &card,
             &session,
@@ -801,9 +855,12 @@ pub async fn dialogue_proactive_now(app: tauri::AppHandle) -> Result<Option<Stri
         let card = app.state::<Persona>();
         let hour = chrono::Local::now().hour() as u32;
         let mut backend = crate::persona::backend().map_err(|e| e.to_string())?;
-        let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
-        crate::onboarding::ensure_not_minor(&conn)?;
-        proactive_text(&conn, backend.as_mut(), &card, hour, false).map_err(|e| e.to_string())
+        {
+            let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+            crate::onboarding::ensure_not_minor(&conn)?;
+        }
+        // proactive_text locks per phase itself — no guard held here.
+        proactive_text(store.inner(), backend.as_mut(), &card, hour, false).map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -843,7 +900,7 @@ mod tests {
         parse_card(include_str!("../resources/persona.json")).expect("card parses")
     }
 
-    fn mem() -> Connection {
+    fn mem() -> MemoryStore {
         use std::sync::atomic::{AtomicU32, Ordering};
         static SEQ: AtomicU32 = AtomicU32::new(0);
         // Unique file per call: tests run in parallel inside one process, and
@@ -855,26 +912,34 @@ mod tests {
             std::process::id(),
             SEQ.fetch_add(1, Ordering::SeqCst)
         ));
-        db::open(&path).unwrap()
+        MemoryStore::open(&path).unwrap()
+    }
+
+    /// Scoped direct access for assertions. NEVER hold the guard across a
+    /// `chat_turn*` call — the turn locks the store internally per phase
+    /// (2026-11-20 lock-narrowing), so a live guard would self-deadlock.
+    fn with_conn<T>(s: &MemoryStore, f: impl FnOnce(&Connection) -> T) -> T {
+        let conn = s.0.lock().unwrap();
+        f(&conn)
     }
 
     #[test]
     fn chat_turn_records_both_sides_and_flags_sycophancy() {
-        let conn = mem();
+        let s = mem();
         let c = card();
         let mut backend = MockBackend::new("太棒了，就这么办！"); // sycophant draft
         let out =
-            chat_turn(&conn, &mut backend, &c, "s1", "我想把所有记忆删了", 10, false, crate::calendar::CalendarAccess::Denied).unwrap();
+            chat_turn(&s, &mut backend, &c, "s1", "我想把所有记忆删了", 10, false, crate::calendar::CalendarAccess::Denied).unwrap();
         assert!(out.model_used);
         assert!(out.filter.unconditional_affirmation, "filter must flag the opener");
 
         // Both sides recorded with the session id.
-        let history = db::dialogue_history(&conn, "s1", 6).unwrap();
+        let history = with_conn(&s, |conn| db::dialogue_history(conn, "s1", 6).unwrap());
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].user, "我想把所有记忆删了");
         assert_eq!(history[0].assistant, "太棒了，就这么办！");
         // Other sessions see nothing.
-        assert!(db::dialogue_history(&conn, "s2", 6).unwrap().is_empty());
+        assert!(with_conn(&s, |conn| db::dialogue_history(conn, "s2", 6).unwrap()).is_empty());
     }
 
     /// Anti-sycophancy evidence (plan-relationship.md §3.6): the filter used
@@ -882,49 +947,52 @@ mod tests {
     /// backs. Both shapes must land as events, and a plain reply must not.
     #[test]
     fn filter_evidence_is_persisted_as_events() {
-        let conn = mem();
+        let s = mem();
         let c = card();
         let mut backend = MockBackend::new("我不同意这个判断，因为数据对不上。");
-        let out = chat_turn(&conn, &mut backend, &c, "s1", "这个方案如何", 10, false, crate::calendar::CalendarAccess::Denied).unwrap();
+        let out = chat_turn(&s, &mut backend, &c, "s1", "这个方案如何", 10, false, crate::calendar::CalendarAccess::Denied).unwrap();
         assert!(out.filter.explicit_disagreement);
-        let n: i64 = conn
-            .query_row("SELECT COUNT(*) FROM events WHERE kind = 'disagreement'", [], |r| r.get(0))
-            .unwrap();
+        let n: i64 = with_conn(&s, |conn| {
+            conn.query_row("SELECT COUNT(*) FROM events WHERE kind = 'disagreement'", [], |r| r.get(0))
+                .unwrap()
+        });
         assert_eq!(n, 1, "explicit push-back must be recorded");
 
         let mut b2 = MockBackend::new("虽然很有道理，但也可以再想想。");
-        chat_turn(&conn, &mut b2, &c, "s1", "再想想？", 10, false, crate::calendar::CalendarAccess::Denied).unwrap();
-        let h: i64 = conn
-            .query_row(
+        chat_turn(&s, &mut b2, &c, "s1", "再想想？", 10, false, crate::calendar::CalendarAccess::Denied).unwrap();
+        let h: i64 = with_conn(&s, |conn| {
+            conn.query_row(
                 "SELECT COUNT(*) FROM events WHERE kind = 'disagreement_hedged'",
                 [],
                 |r| r.get(0),
             )
-            .unwrap();
+            .unwrap()
+        });
         assert_eq!(h, 1, "hedged push-back is recorded separately");
 
         // A plain reply writes no evidence at all — the pipeline must not
         // manufacture signals out of nothing.
         let mut b3 = MockBackend::new("行，那就这么办。");
-        chat_turn(&conn, &mut b3, &c, "s1", "好", 10, false, crate::calendar::CalendarAccess::Denied).unwrap();
-        let total: i64 = conn
-            .query_row(
+        chat_turn(&s, &mut b3, &c, "s1", "好", 10, false, crate::calendar::CalendarAccess::Denied).unwrap();
+        let total: i64 = with_conn(&s, |conn| {
+            conn.query_row(
                 "SELECT COUNT(*) FROM events WHERE kind LIKE 'disagreement%'",
                 [],
                 |r| r.get(0),
             )
-            .unwrap();
+            .unwrap()
+        });
         assert_eq!(total, 2);
     }
 
     #[test]
     fn chat_turn_history_is_fed_back_across_turns() {
-        let conn = mem();
+        let s = mem();
         let c = card();
         let mut backend = MockBackend::new("好").script("第一轮", "回答甲").script("第二轮", "回答乙");
-        chat_turn(&conn, &mut backend, &c, "s1", "第一轮", 10, false, crate::calendar::CalendarAccess::Denied).unwrap();
-        chat_turn(&conn, &mut backend, &c, "s1", "第二轮", 10, false, crate::calendar::CalendarAccess::Denied).unwrap();
-        let history = db::dialogue_history(&conn, "s1", 6).unwrap();
+        chat_turn(&s, &mut backend, &c, "s1", "第一轮", 10, false, crate::calendar::CalendarAccess::Denied).unwrap();
+        chat_turn(&s, &mut backend, &c, "s1", "第二轮", 10, false, crate::calendar::CalendarAccess::Denied).unwrap();
+        let history = with_conn(&s, |conn| db::dialogue_history(conn, "s1", 6).unwrap());
         assert_eq!(history.len(), 2);
         assert_eq!(history[0].assistant, "回答甲");
         assert_eq!(history[1].assistant, "回答乙");
@@ -932,68 +1000,70 @@ mod tests {
 
     #[test]
     fn dead_model_falls_back_to_honest_line() {
-        let conn = mem();
+        let s = mem();
         let c = card();
         // LocalBackend with no server → empty reply (see eval.rs docs).
         let mut backend = crate::persona::eval::LocalBackend::new();
         // Point at a closed port for determinism.
         backend.client = std::sync::Arc::new(crate::llm::OllamaClient::new("http://127.0.0.1:1", "test"));
-        let out = chat_turn(&conn, &mut backend, &c, "s1", "在吗", 10, false, crate::calendar::CalendarAccess::Denied).unwrap();
+        let out = chat_turn(&s, &mut backend, &c, "s1", "在吗", 10, false, crate::calendar::CalendarAccess::Denied).unwrap();
         assert!(!out.model_used);
         assert_eq!(out.reply, FALLBACK_REPLY);
     }
 
     #[test]
     fn crisis_input_intercepts_before_any_model_call() {
-        let conn = mem();
+        let s = mem();
         let c = card();
         // A dead backend proves no model call happened: the intercept is
         // rule-level and must work when the local LLM never came up.
         let mut backend = crate::persona::eval::LocalBackend::new();
         backend.client = std::sync::Arc::new(crate::llm::OllamaClient::new("http://127.0.0.1:1", "test"));
-        let out = chat_turn(&conn, &mut backend, &c, "s1", "说实话，我最近有点不想活了", 10, false, crate::calendar::CalendarAccess::Denied).unwrap();
+        let out = chat_turn(&s, &mut backend, &c, "s1", "说实话，我最近有点不想活了", 10, false, crate::calendar::CalendarAccess::Denied).unwrap();
         assert!(out.crisis);
         assert!(out.reply.contains("12356"), "reply must carry the hotline");
-        let history = db::dialogue_history(&conn, "s1", 6).unwrap();
+        let history = with_conn(&s, |conn| db::dialogue_history(conn, "s1", 6).unwrap());
         assert_eq!(history.len(), 1, "both sides still recorded for audit");
     }
 
     #[test]
     fn minor_gate_blocks_dialogue() {
-        let conn = mem();
-        crate::onboarding::ensure_not_minor(&conn).unwrap(); // no record → allowed
-        db::set_setting(&conn, "age_group", "minor").unwrap();
-        assert!(crate::onboarding::ensure_not_minor(&conn).is_err());
-        db::set_setting(&conn, "age_group", "adult").unwrap();
-        crate::onboarding::ensure_not_minor(&conn).unwrap();
+        let s = mem();
+        with_conn(&s, |conn| {
+            crate::onboarding::ensure_not_minor(conn).unwrap(); // no record → allowed
+            db::set_setting(conn, "age_group", "minor").unwrap();
+            assert!(crate::onboarding::ensure_not_minor(conn).is_err());
+            db::set_setting(conn, "age_group", "adult").unwrap();
+            crate::onboarding::ensure_not_minor(conn).unwrap();
+        });
     }
 
     #[test]
     fn proactive_speaks_with_mock_and_silences_on_dead_model() {
-        let conn = mem();
+        let s = mem();
         let c = card();
 
         let mut live = MockBackend::new("看你今天剪贴板挺忙，盆栽来问一句。");
-        let text = proactive_text(&conn, &mut live, &c, 10, false).unwrap();
+        let text = proactive_text(&s, &mut live, &c, 10, false).unwrap();
         assert!(text.is_some());
         // Recorded under the proactive session.
-        let history = db::dialogue_history(&conn, PROACTIVE_SESSION, 6).unwrap();
+        let history = with_conn(&s, |conn| db::dialogue_history(conn, PROACTIVE_SESSION, 6).unwrap());
         assert_eq!(history.len(), 1);
 
         let mut dead = crate::persona::eval::LocalBackend::new();
         dead.client = std::sync::Arc::new(crate::llm::OllamaClient::new("http://127.0.0.1:1", "test"));
-        let text = proactive_text(&conn, &mut dead, &c, 10, false).unwrap();
+        let text = proactive_text(&s, &mut dead, &c, 10, false).unwrap();
         assert!(text.is_none(), "dead model → silence, not a canned line");
     }
 
     #[test]
     fn chat_turn_streaming_deltas_and_records_match_chat_turn() {
-        let conn = mem();
+        let s = mem();
         let c = card();
         let mut backend = MockBackend::new("分块也不会丢");
         let mut deltas = Vec::new();
         let out = chat_turn_streaming(
-            &conn,
+            &s,
             &mut backend,
             &c,
             "s1",
@@ -1008,7 +1078,7 @@ mod tests {
         assert_eq!(deltas, vec!["分块也不会丢".to_string()]);
         assert_eq!(out.reply, "分块也不会丢");
         assert!(out.model_used);
-        let history = db::dialogue_history(&conn, "s1", 6).unwrap();
+        let history = with_conn(&s, |conn| db::dialogue_history(conn, "s1", 6).unwrap());
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].assistant, "分块也不会丢");
     }
@@ -1064,14 +1134,14 @@ mod tests {
 
     #[test]
     fn capability_section_appears_only_when_tools_exist() {
-        let conn = mem();
+        let s = mem();
         let c = card();
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
 
         // No capabilities → env segment yes (D6), capability catalog no.
         let mut plain = SpyBackend { reply: "好".into(), seen: seen.clone() };
         chat_turn(
-            &conn, &mut plain, &c, "s1", "在吗", 10, false,
+            &s, &mut plain, &c, "s1", "在吗", 10, false,
             crate::calendar::CalendarAccess::Denied,
         )
         .unwrap();
@@ -1084,7 +1154,7 @@ mod tests {
         let mut withed = SpyBackend { reply: "我不需要工具。".into(), seen: seen2.clone() };
         let mut kit = weather_kit();
         chat_turn_with_kit(
-            &conn, &mut withed, &c, "s2", "在吗", 10, false,
+            &s, &mut withed, &c, "s2", "在吗", 10, false,
             crate::calendar::CalendarAccess::Denied, &mut kit,
         )
         .unwrap();
@@ -1097,8 +1167,8 @@ mod tests {
 
     #[test]
     fn env_prefix_carries_time_and_language() {
-        let conn = mem();
-        let p = env_prefix(&conn);
+        let s = mem();
+        let p = with_conn(&s, env_prefix);
         assert!(p.contains("# 环境（系统注入，不可变）"));
         assert!(p.contains("语言：简体中文"));
         assert!(p.contains("UTC+"));
@@ -1106,9 +1176,9 @@ mod tests {
 
     #[test]
     fn env_prefix_respects_pinned_clock() {
-        let conn = mem();
+        let s = mem();
         let _g = crate::memory::clock::pinned("2026-11-19T02:30:00Z");
-        let p = env_prefix(&conn);
+        let p = with_conn(&s, env_prefix);
         assert!(
             p.contains("2026-11-19"),
             "env segment must use the pinned clock, got: {p}"
@@ -1118,7 +1188,7 @@ mod tests {
 
     #[test]
     fn pipeline_three_rounds_full_chain_is_audited() {
-        let conn = mem();
+        let s = mem();
         let c = card();
         let mut backend = SeqBackend::new(&[
             r#"{"candidates": ["weather"]}"#,
@@ -1127,7 +1197,7 @@ mod tests {
         ]);
         let mut kit = weather_kit();
         let out = chat_turn_with_kit(
-            &conn, &mut backend, &c, "s1", "今天杭州天气怎么样", 10, false,
+            &s, &mut backend, &c, "s1", "今天杭州天气怎么样", 10, false,
             crate::calendar::CalendarAccess::Denied, &mut kit,
         )
         .unwrap();
@@ -1135,7 +1205,7 @@ mod tests {
         assert_eq!(out.tool.as_deref(), Some("mcp:weather"));
         assert!(out.reply.contains("多云"));
         // Audit row: ok / auto_allowed with a trace reference.
-        let records = db::tool_call_records(&conn, 10).unwrap();
+        let records = with_conn(&s, |conn| db::tool_call_records(conn, 10).unwrap());
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].tool, "mcp");
         assert_eq!(records[0].result_status.as_deref(), Some("auto_allowed"));
@@ -1147,7 +1217,7 @@ mod tests {
     /// skill/tool can't change compliance or steal an existing intent.
     #[test]
     fn kit_never_preempts_crisis_or_calendar_routing() {
-        let conn = mem();
+        let s = mem();
         let c = card();
         let mut kit = weather_kit();
         let mut skill_kit = crate::mcp_admin::AgentKit {
@@ -1169,7 +1239,7 @@ mod tests {
         // no model call, no tool round, no audit row.
         let mut backend = SeqBackend::new(&[]);
         let out = chat_turn_with_kit(
-            &conn, &mut backend, &c, "s1", "我最近有点不想活了", 10, false,
+            &s, &mut backend, &c, "s1", "我最近有点不想活了", 10, false,
             crate::calendar::CalendarAccess::Denied, &mut skill_kit,
         )
         .unwrap();
@@ -1181,7 +1251,7 @@ mod tests {
         // pipeline stays out (Denied access ⇒ honest "not permitted" reply).
         let mut backend2 = SeqBackend::new(&[]);
         let out2 = chat_turn_with_kit(
-            &conn, &mut backend2, &c, "s1", "今天有什么会", 10, false,
+            &s, &mut backend2, &c, "s1", "今天有什么会", 10, false,
             crate::calendar::CalendarAccess::Denied, &mut kit,
         )
         .unwrap();
@@ -1189,13 +1259,13 @@ mod tests {
         assert!(out2.tool.is_some(), "rule router owns schedule questions");
         assert_ne!(out2.tool.as_deref(), Some("mcp:weather"));
         // Only the calendar router's own audit row exists — no mcp/skill row.
-        let rows = db::tool_call_records(&conn, 10).unwrap();
+        let rows = with_conn(&s, |conn| db::tool_call_records(conn, 10).unwrap());
         assert!(rows.iter().all(|r| r.tool == "calendar"), "unexpected: {rows:?}");
     }
 
     #[test]
     fn pipeline_skill_body_answers_without_execution() {
-        let conn = mem();
+        let s = mem();
         let c = card();
         let pack = crate::skill::SkillPack {
             id: "gmp-qa".into(),
@@ -1215,13 +1285,13 @@ mod tests {
             "根据 GMP 附件一第 37 条，洁净区压差应保持 10Pa 以上。",
         ]);
         let out = chat_turn_with_kit(
-            &conn, &mut backend, &c, "s1", "洁净区压差多少", 10, false,
+            &s, &mut backend, &c, "s1", "洁净区压差多少", 10, false,
             crate::calendar::CalendarAccess::Denied, &mut kit,
         )
         .unwrap();
         assert!(out.reply.contains("37 条"));
         assert_eq!(out.tool.as_deref(), Some("skill:GMP 助手"));
-        let records = db::tool_call_records(&conn, 10).unwrap();
+        let records = with_conn(&s, |conn| db::tool_call_records(conn, 10).unwrap());
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].tool, "skill");
         assert_eq!(records[0].result_status.as_deref(), Some("answered"));
@@ -1229,7 +1299,7 @@ mod tests {
 
     #[test]
     fn skill_budget_caps_injected_bodies_at_two() {
-        let conn = mem();
+        let s = mem();
         let c = card();
         let pack = |id: &str| crate::skill::SkillPack {
             id: id.into(),
@@ -1251,43 +1321,43 @@ mod tests {
             "直接用技能里的做法回答。",
         ]);
         let out = chat_turn_with_kit(
-            &conn, &mut backend, &c, "s1", "问个问题", 10, false,
+            &s, &mut backend, &c, "s1", "问个问题", 10, false,
             crate::calendar::CalendarAccess::Denied, &mut kit,
         )
         .unwrap();
         assert_eq!(out.tool.as_deref(), Some("skill:技能a"));
         // Third body never entered the prompt → never counted as used.
-        let rows = db::tool_call_records(&conn, 10).unwrap();
+        let rows = with_conn(&s, |conn| db::tool_call_records(conn, 10).unwrap());
         assert_eq!(rows.len(), crate::skill::SIMULTANEOUS_SKILLS);
         assert!(rows.iter().all(|r| r.action != "技能c"), "{rows:?}");
     }
 
     #[test]
     fn pipeline_degrades_silently_on_garbage() {
-        let conn = mem();
+        let s = mem();
         let c = card();
         let mut kit = weather_kit();
         // Round 1: no candidates JSON → the reply IS the final answer,
         // no audit rows, no extra rounds.
         let mut backend = SeqBackend::new(&["我今天不需要工具，直接说：挺好。"]);
         let out = chat_turn_with_kit(
-            &conn, &mut backend, &c, "s1", "在吗", 10, false,
+            &s, &mut backend, &c, "s1", "在吗", 10, false,
             crate::calendar::CalendarAccess::Denied, &mut kit,
         )
         .unwrap();
         assert!(out.reply.contains("挺好"));
         assert_eq!(out.tool, None);
-        assert!(db::tool_call_records(&conn, 10).unwrap().is_empty());
+        assert!(with_conn(&s, |conn| db::tool_call_records(conn, 10).unwrap()).is_empty());
     }
 
     #[test]
     fn pipeline_empty_model_output_falls_back() {
-        let conn = mem();
+        let s = mem();
         let c = card();
         let mut kit = weather_kit();
         let mut backend = SeqBackend::new(&[""]); // model down at round 1
         let out = chat_turn_with_kit(
-            &conn, &mut backend, &c, "s1", "在吗", 10, false,
+            &s, &mut backend, &c, "s1", "在吗", 10, false,
             crate::calendar::CalendarAccess::Denied, &mut kit,
         )
         .unwrap();
@@ -1297,7 +1367,7 @@ mod tests {
 
     #[test]
     fn pipeline_unknown_candidate_dropped_and_denied_call_templates() {
-        let conn = mem();
+        let s = mem();
         let c = card();
         // Unknown names filtered; the surviving tool then gets denied by the
         // ask-first gate → template reply + denied audit row.
@@ -1315,13 +1385,13 @@ mod tests {
             r#"{"tool": "weather", "args": {}}"#,
         ]);
         let out = chat_turn_with_kit(
-            &conn, &mut backend, &c, "s1", "天气", 10, false,
+            &s, &mut backend, &c, "s1", "天气", 10, false,
             crate::calendar::CalendarAccess::Denied, &mut kit,
         )
         .unwrap();
         assert!(out.reply.contains("weather"));
         assert_eq!(out.tool.as_deref(), Some("mcp:weather"));
-        let records = db::tool_call_records(&conn, 10).unwrap();
+        let records = with_conn(&s, |conn| db::tool_call_records(conn, 10).unwrap());
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].outcome, "denied");
     }
@@ -1341,13 +1411,15 @@ mod tests {
     #[test]
     fn builtin_memory_search_full_chain_is_audited_and_labeled() {
         let _g = crate::memory::clock::pinned("2026-11-20T07:00:00Z");
-        let conn = mem();
-        conn.execute(
-            "INSERT INTO events (ts, kind, content, role, session_id)
-             VALUES ('2026-11-18T01:00:00+00:00', 'dialogue', '聊了报销流程怎么走', 'user', 's1')",
-            [],
-        )
-        .unwrap();
+        let s = mem();
+        with_conn(&s, |conn| {
+            conn.execute(
+                "INSERT INTO events (ts, kind, content, role, session_id)
+                 VALUES ('2026-11-18T01:00:00+00:00', 'dialogue', '聊了报销流程怎么走', 'user', 's1')",
+                [],
+            )
+            .unwrap();
+        });
         let c = card();
         let mut backend = SeqBackend::new(&[
             r#"{"candidates": ["memory_search"]}"#,
@@ -1356,14 +1428,14 @@ mod tests {
         ]);
         let mut kit = memory_kit();
         let out = chat_turn_with_kit(
-            &conn, &mut backend, &c, "s1", "总结一下我18号说了啥", 10, false,
+            &s, &mut backend, &c, "s1", "总结一下我18号说了啥", 10, false,
             crate::calendar::CalendarAccess::Denied, &mut kit,
         )
         .unwrap();
         assert!(out.reply.contains("报销"));
         assert_eq!(out.tool.as_deref(), Some("builtin:memory_search"));
         // Audit row: kind=builtin, status auto_allowed (local read, no gate).
-        let records = db::tool_call_records(&conn, 10).unwrap();
+        let records = with_conn(&s, |conn| db::tool_call_records(conn, 10).unwrap());
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].tool, "builtin");
         assert_eq!(records[0].action, "memory_search");
@@ -1390,7 +1462,7 @@ mod tests {
     /// the retry lands as the reply.
     #[test]
     fn pass3_json_echo_is_muted_and_retried_as_prose() {
-        let conn = mem();
+        let s = mem();
         let c = card();
         let mut kit = weather_kit();
         let decision = r#"{"tool": "weather", "args": {}}"#;
@@ -1403,7 +1475,7 @@ mod tests {
         let deltas: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
         let mut emit = |d: &str| deltas.lock().unwrap().push(d.to_string());
         let out = chat_turn_streaming_with_kit(
-            &conn, &mut backend, &c, "s1", "天气", 10, false,
+            &s, &mut backend, &c, "s1", "天气", 10, false,
             crate::calendar::CalendarAccess::Denied, &mut kit, &mut emit,
         )
         .unwrap();
@@ -1418,7 +1490,7 @@ mod tests {
     /// fallback (never the raw JSON).
     #[test]
     fn pass3_json_retry_still_json_falls_back_to_summary() {
-        let conn = mem();
+        let s = mem();
         let c = card();
         let mut kit = weather_kit();
         let decision = r#"{"tool": "weather", "args": {}}"#;
@@ -1429,7 +1501,7 @@ mod tests {
             decision, // retry is JSON too
         ]);
         let out = chat_turn_with_kit(
-            &conn, &mut backend, &c, "s1", "天气", 10, false,
+            &s, &mut backend, &c, "s1", "天气", 10, false,
             crate::calendar::CalendarAccess::Denied, &mut kit,
         )
         .unwrap();
@@ -1441,7 +1513,7 @@ mod tests {
     /// disconnected MCP server hid behind the generic 「没能执行成功」).
     #[test]
     fn tool_failure_template_carries_the_reason() {
-        let conn = mem();
+        let s = mem();
         let c = card();
         // MockMcpProvider::with_tool has no reply registered → execute
         // returns Err(mcp_unreachable) — the exact shape of the regression.
@@ -1459,14 +1531,14 @@ mod tests {
             r#"{"tool": "weather", "args": {}}"#,
         ]);
         let out = chat_turn_with_kit(
-            &conn, &mut backend, &c, "s1", "天气", 10, false,
+            &s, &mut backend, &c, "s1", "天气", 10, false,
             crate::calendar::CalendarAccess::Denied, &mut kit,
         )
         .unwrap();
         assert!(out.reply.contains("没连上"), "template must name the class: {}", out.reply);
         assert!(!out.reply.contains("mcp_unreachable"), "raw error string stays out: {}", out.reply);
         assert_eq!(out.tool.as_deref(), Some("mcp:weather"));
-        let records = db::tool_call_records(&conn, 5).unwrap();
+        let records = with_conn(&s, |conn| db::tool_call_records(conn, 5).unwrap());
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].outcome, "unavailable");
         assert_eq!(records[0].result_status.as_deref(), Some("mcp_unreachable"));
@@ -1476,7 +1548,7 @@ mod tests {
     /// (no extra model round), recall questions get the tool in the catalog.
     #[test]
     fn kit_gates_memory_tool_by_recall_signal() {
-        let conn = mem();
+        let s = mem();
         let state = crate::mcp_admin::AgentState {
             manager: crate::mcp::McpManager::default(),
             skills_dir: std::env::temp_dir(),
@@ -1484,10 +1556,10 @@ mod tests {
             app: None,
         };
         assert!(
-            !crate::mcp_admin::build_agent_kit(&conn, &state, "我今天好累").has_capabilities(),
+            !with_conn(&s, |conn| crate::mcp_admin::build_agent_kit(conn, &state, "我今天好累").has_capabilities()),
             "plain chat must not grow a catalog"
         );
-        let kit = crate::mcp_admin::build_agent_kit(&conn, &state, "总结一下我18号说了啥");
+        let kit = with_conn(&s, |conn| crate::mcp_admin::build_agent_kit(conn, &state, "总结一下我18号说了啥"));
         assert!(kit.has_capabilities());
         assert!(kit.catalog().iter().any(|d| d.name == "memory_search"));
     }
@@ -1497,7 +1569,7 @@ mod tests {
     /// by the whitelist. The turn must land as prose, never as JSON.
     #[test]
     fn hallucinated_candidates_never_leak_json_into_the_chat() {
-        let conn = mem();
+        let s = mem();
         let c = card();
         let mut kit = weather_kit();
         let mut backend = SeqBackend::new(&[
@@ -1505,7 +1577,7 @@ mod tests {
             "设备状态这块我查不了，也不会编。",
         ]);
         let out = chat_turn_with_kit(
-            &conn, &mut backend, &c, "s1", "当前设备的状态", 10, false,
+            &s, &mut backend, &c, "s1", "当前设备的状态", 10, false,
             crate::calendar::CalendarAccess::Denied, &mut kit,
         )
         .unwrap();
@@ -1521,7 +1593,7 @@ mod tests {
     /// "prose" — re-ask and land as natural language.
     #[test]
     fn pass2_json_regurgitation_never_ships_as_prose() {
-        let conn = mem();
+        let s = mem();
         let c = card();
         let mut kit = weather_kit();
         let mut backend = SeqBackend::new(&[
@@ -1530,7 +1602,7 @@ mod tests {
             "设备状态这块我手头的工具查不了，你可以在系统设置里看。",
         ]);
         let out = chat_turn_with_kit(
-            &conn, &mut backend, &c, "s1", "当前设备的状态", 10, false,
+            &s, &mut backend, &c, "s1", "当前设备的状态", 10, false,
             crate::calendar::CalendarAccess::Denied, &mut kit,
         )
         .unwrap();
@@ -1544,7 +1616,7 @@ mod tests {
     /// it anyway (history, prior turn's catalog) must still be whitelisted.
     #[test]
     fn whitelist_checks_full_catalog_not_the_prompt_cap() {
-        let conn = mem();
+        let s = mem();
         let c = card();
         let providers: Vec<Box<dyn crate::agent_tools::ToolProvider>> = (0..120)
             .map(|i| {
@@ -1575,15 +1647,69 @@ mod tests {
             "tail tool 回答。",
         ]);
         let out = chat_turn_with_kit(
-            &conn, &mut backend, &c, "s1", "用最后一个工具", 10, false,
+            &s, &mut backend, &c, "s1", "用最后一个工具", 10, false,
             crate::calendar::CalendarAccess::Denied, &mut kit,
         )
         .unwrap();
         assert_eq!(out.reply, "tail tool 回答。");
         assert_eq!(out.tool.as_deref(), Some("mcp:tool119"));
-        let records = db::tool_call_records(&conn, 5).unwrap();
+        let records = with_conn(&s, |conn| db::tool_call_records(conn, 5).unwrap());
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].tool, "mcp");
         assert_eq!(records[0].action, "tool119");
+    }
+
+    // ---- lock-narrowing regressions (2026-11-20)
+
+    /// A backend that fakes a slow model round (cloud inference ≈ seconds).
+    struct SlowBackend {
+        ms: u64,
+    }
+    impl DialogueBackend for SlowBackend {
+        fn reply(&mut self, _system: &str, _h: &[crate::persona::eval::Turn], _u: &str, _t: f64) -> String {
+            std::thread::sleep(std::time::Duration::from_millis(self.ms));
+            "慢慢想好了".into()
+        }
+    }
+
+    /// The whole point of the phase split: while the model round runs, ANY
+    /// other thread must be able to acquire the store lock. Before the
+    /// refactor the pipeline held the mutex for the entire turn (19-45s on
+    /// a cloud backend), freezing proactive/face/tray/consolidate.
+    #[test]
+    fn chat_pipeline_releases_the_store_lock_during_inference() {
+        use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+        static SEQ2: AtomicU32 = AtomicU32::new(0);
+        let dir = std::env::temp_dir().join("bonsai-dialogue-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = std::sync::Arc::new(MemoryStore::open(
+            &dir.join(format!("lk-{}-{}.sqlite3", std::process::id(), SEQ2.fetch_add(1, AtomicOrdering::SeqCst))),
+        )
+        .unwrap());
+        let c = card();
+        let (tx, rx) = std::sync::mpsc::channel::<std::time::Instant>();
+        let bg = store.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            loop {
+                if let Ok(conn) = bg.0.try_lock() {
+                    let _ = db::add_event(&conn, "face_state", "bg-marker");
+                    let _ = tx.send(std::time::Instant::now());
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        });
+        let start = std::time::Instant::now();
+        let mut backend = SlowBackend { ms: 800 };
+        chat_turn(&store, &mut backend, &c, "s1", "你好", 10, false, crate::calendar::CalendarAccess::Denied).unwrap();
+        let turn_end = start.elapsed();
+        // Blocks until the bg thread acquires (it always will eventually);
+        // the assertion is WHEN it happened.
+        let acquired = rx.recv().unwrap() - start;
+        assert!(
+            acquired < turn_end - std::time::Duration::from_millis(200),
+            "store lock must be acquirable MID-inference: bg acquired at {acquired:?}, turn lasted {turn_end:?}"
+        );
     }
 }

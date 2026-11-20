@@ -494,6 +494,10 @@ impl ToolProvider for MemorySearchProvider {
         Err("unsupported".into())
     }
 
+    fn needs_conn(&self) -> bool {
+        true // the LIKE scan reads the store directly — audited locks for us
+    }
+
     fn execute_with_conn(&self, conn: &Connection, call: &ToolCall) -> Result<ToolOutput, String> {
         let query = call.args.get("query").and_then(|v| v.as_str()).unwrap_or("");
         let recall = recall(conn, query);
