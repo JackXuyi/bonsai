@@ -35,6 +35,9 @@ describe("chatStore", () => {
     msg = useChatStore.getState().messages[0] as ChatMessage;
     expect(msg.text).toBe("今天天气不错。");
     expect(msg.note).toBe("日程 · 直接查的日历");
+    // spec-s8 回归：setText 落定正文时必须清掉 streaming，
+    // 否则 MessageBubble 的 `!message.streaming` 门永远挡住操作条。
+    expect(msg.streaming).toBe(false);
 
     // 不存在的 id 静默跳过
     expect(() => useChatStore.getState().appendText(999, "x")).not.toThrow();

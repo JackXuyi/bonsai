@@ -60,9 +60,13 @@ export const useChatStore = create<ChatState>((set) => ({
         m.id === id ? { ...m, text: m.text + delta } : m
       ),
     })),
+  /** 正文落定：流式气泡收尾（spec-s8 修复——streaming 只在此处清除，
+   *  否则操作条 `!message.streaming` 永远不渲染） */
   setText: (id, text) =>
     set((st) => ({
-      messages: st.messages.map((m) => (m.id === id ? { ...m, text } : m)),
+      messages: st.messages.map((m) =>
+        m.id === id ? { ...m, text, streaming: false } : m
+      ),
     })),
   setNote: (id, note) =>
     set((st) => ({
