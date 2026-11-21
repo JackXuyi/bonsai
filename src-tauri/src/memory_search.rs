@@ -374,6 +374,23 @@ pub fn recall(conn: &Connection, query: &str) -> Recall {
     let today = clock::now_local().date_naive();
     let (start, end, phrase) = parse_window(query, today).unwrap_or_else(|| fallback_window(today));
     let kws = keywords(query, &phrase);
+    recall_with_keywords(conn, start, end, &kws)
+}
+
+/// Explicit date-window scan: no keyword legs, the whole window. The caller
+/// (forced fallback / model) hands a concrete [start, end_exclusive) pair so
+/// the tool request shows the resolved dates instead of relying on the
+/// query-text parsing (2026-11-21: 按日期筛选要显式可见).
+pub fn recall_in_window(conn: &Connection, start: NaiveDate, end_exclusive: NaiveDate) -> Recall {
+    recall_with_keywords(conn, start, end_exclusive, &[])
+}
+
+fn recall_with_keywords(
+    conn: &Connection,
+    start: NaiveDate,
+    end: NaiveDate,
+    kws: &[String],
+) -> Recall {
     let (iso_start, iso_end) = iso_pair(start, end);
 
     // Dialogue rows. Keyword legs OR-combined (recall beats precision);
@@ -474,7 +491,7 @@ pub fn builtin_descriptor() -> ToolDescriptor {
     ToolDescriptor {
         name: "memory_search".into(),
         summary: "按日期或关键词翻找过往聊天记录与记忆（本地）".into(),
-        detail: r#"{"type":"object","properties":{"query":{"type":"string","description":"用户原话，日期与关键词由系统解析"}},"required":["query"]}"#.into(),
+        detail: r#"{"type":"object","properties":{"query":{"type":"string","description":"用户原话，日期与关键词由系统解析；给了 date_from/date_to 时可省"},"date_from":{"type":"string","description":"显式开始日期 YYYY-MM-DD（含）；给出日期时按整窗扫描，忽略关键词。date_from 与 date_to 成对给出，可与 query 二选一"},"date_to":{"type":"string","description":"显式结束日期 YYYY-MM-DD（含）"}}}"#.into(),
         kind: ToolKind::Builtin,
         remote: false,
     }
@@ -500,7 +517,21 @@ impl ToolProvider for MemorySearchProvider {
 
     fn execute_with_conn(&self, conn: &Connection, call: &ToolCall) -> Result<ToolOutput, String> {
         let query = call.args.get("query").and_then(|v| v.as_str()).unwrap_or("");
-        let recall = recall(conn, query);
+        // Explicit date window wins over query-text parsing (inclusive both
+        // ends → exclusive end inside the scan). Garbled dates fall back to
+        // the deterministic parse of the query, then the trailing week.
+        let parse_d = |k: &str| {
+            call.args
+                .get(k)
+                .and_then(|v| v.as_str())
+                .and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
+        };
+        let recall = match (parse_d("date_from"), parse_d("date_to")) {
+            (Some(from), Some(to)) if to >= from => {
+                recall_in_window(conn, from, to.succ_opt().unwrap_or(to))
+            }
+            _ => recall(conn, query),
+        };
         Ok(ToolOutput { summary: recall.summary(), full: recall.full() })
     }
 }
@@ -660,6 +691,71 @@ mod tests {
             .execute_with_conn(&conn, &ToolCall { name: "memory_search".into(), args: serde_json::json!({}) })
             .unwrap();
         assert!(out2.summary.contains("对话 1 条"), "window fallback must still find the row: {}", out2.summary);
+    }
+
+    /// Explicit date window (2026-11-21): date_from/date_to must win over
+    /// the query text — inclusive both ends, whole-window scan, and the
+    /// query's words must NOT become keyword legs that filter rows out.
+    #[test]
+    fn explicit_date_window_scans_the_whole_range() {
+        let _g = crate::memory::clock::pinned("2026-11-21T07:00:00Z"); // 本地 11-21 15:00
+        let conn = mem();
+        insert_dialogue(&conn, "2026-11-20T01:00:00+00:00", "user", "聊了盆栽的形态");
+        insert_dialogue(&conn, "2026-11-20T02:00:00+00:00", "assistant", "换水别太勤。");
+        insert_dialogue(&conn, "2026-11-21T01:00:00+00:00", "user", "今天的话不该进昨天窗口");
+        let p = MemorySearchProvider;
+        let out = p
+            .execute_with_conn(&conn, &ToolCall {
+                name: "memory_search".into(),
+                args: serde_json::json!({
+                    "query": "昨天说了什么",
+                    "date_from": "2026-11-20",
+                    "date_to": "2026-11-20",
+                }),
+            })
+            .unwrap();
+        assert!(out.summary.contains("11月20日（周五）"), "explicit window label: {}", out.summary);
+        assert!(out.summary.contains("盆栽的形态"), "row inside the window: {}", out.summary);
+        assert!(!out.summary.contains("今天的话"), "row outside the window: {}", out.summary);
+
+        // 坏日期 → 落回 query 解析，不报错
+        let out2 = p
+            .execute_with_conn(&conn, &ToolCall {
+                name: "memory_search".into(),
+                args: serde_json::json!({
+                    "query": "昨天说了什么",
+                    "date_from": "11月20日",
+                    "date_to": "not-a-date",
+                }),
+            })
+            .unwrap();
+        assert!(out2.summary.contains("11月20日"), "garbled dates fall back to query parse: {}", out2.summary);
+    }
+
+    /// query is OPTIONAL since 2026-11-21: a date-only call must run the
+    /// whole-window scan without any required-arg rejection.
+    #[test]
+    fn date_only_call_works_without_query() {
+        let _g = crate::memory::clock::pinned("2026-11-21T07:00:00Z");
+        let conn = mem();
+        insert_dialogue(&conn, "2026-11-20T01:00:00+00:00", "user", "聊了水培");
+        let p = MemorySearchProvider;
+        let out = p
+            .execute_with_conn(&conn, &ToolCall {
+                name: "memory_search".into(),
+                args: serde_json::json!({ "date_from": "2026-11-20", "date_to": "2026-11-20" }),
+            })
+            .unwrap();
+        assert!(out.summary.contains("11月20日"), "date-only window: {}", out.summary);
+        assert!(out.summary.contains("水培"), "row inside the window: {}", out.summary);
+
+        // 校验器对 date-only 也不拦（query 已可选）
+        let d = builtin_descriptor();
+        assert!(crate::agent_tools::validate_args(
+            &d.detail,
+            &serde_json::json!({ "date_from": "2026-11-20", "date_to": "2026-11-20" })
+        )
+        .is_ok());
     }
 
     #[test]
