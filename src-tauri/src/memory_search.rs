@@ -48,6 +48,9 @@ const RECALL_MARKERS: &[&str] = &[
     "总结", "回顾", "复盘", "回忆", "还记得", "记得吗", "印象", "上次", "历史",
     "说过", "说了", "说啥", "聊过", "聊了", "聊到", "讲过", "讲了", "讲啥",
     "提过", "提到", "谈过", "谈到", "记录", "聊天记录",
+    // 2026-11-21 turn 13–20 教训：「周四聊天原文」一个词都不沾——用户要的
+    // 是回看原文，不是新聊天。「原文/逐字」进了词表，星期词由 has_weekday 兜底。
+    "原文", "逐字",
 ];
 
 fn normalise(text: &str) -> String {
@@ -78,13 +81,36 @@ fn has_numbered_date(t: &str) -> bool {
     false
 }
 
+/// `周X` / `星期X` / `礼拜X` — any weekday mention is a recall signal
+/// (2026-11-21 turn 18–20:「周四聊天原文」必须能进 agent_pipeline).
+/// 数字日期覆盖不了「周四」，这里单独扫。X ∈ 一二三四五六日/天。
+fn has_weekday(t: &str) -> bool {
+    let chars: Vec<char> = t.chars().collect();
+    for i in 1..chars.len() {
+        let is_weekday_numeral = matches!(
+            chars[i],
+            '一' | '二' | '三' | '四' | '五' | '六' | '日' | '天'
+        );
+        if !is_weekday_numeral {
+            continue;
+        }
+        let prev = chars[i - 1];
+        if prev == '周' || (i >= 2 && chars[i - 2] == '星' && chars[i - 1] == '期')
+            || (i >= 2 && chars[i - 2] == '礼' && chars[i - 1] == '拜')
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Should the kit offer `memory_search` for this user text?
 pub fn might_recall(text: &str) -> bool {
     let t = normalise(text);
     if t.is_empty() {
         return false;
     }
-    RECALL_MARKERS.iter().any(|w| t.contains(w)) || has_numbered_date(&t)
+    RECALL_MARKERS.iter().any(|w| t.contains(w)) || has_numbered_date(&t) || has_weekday(&t)
 }
 
 // ---------------------------------------------------------------- date window
@@ -154,6 +180,55 @@ pub fn parse_window(text: &str, today: NaiveDate) -> Option<(NaiveDate, NaiveDat
     ] {
         if let Some((s, e)) = at(phrase) {
             return Some((day, day.succ_opt()?, span_text(&t, s, e)));
+        }
+    }
+    // 周X / 星期X / 礼拜X（2026-11-21 turn 12–20：裸「周三」和「周四聊天原文」
+    // 都要落到具体单日窗口）。带「上上周/上周/本周/这周」前缀取那一周的周X；
+    // 裸周X 取最近一次该星期（今天当天算数）；前缀版落在未来时回退一周
+    // （周五说「这周日」= 上周日）。本块必须排在「上上周/上周」整周窗口之前，
+    // 否则「上周四」会被整周窗口抢先。
+    let weekday_day = |wd: Weekday, base: NaiveDate| -> NaiveDate {
+        let day = base + chrono::Duration::days(wd.num_days_from_monday() as i64);
+        if day > today { day - chrono::Duration::days(7) } else { day }
+    };
+    for (name, wd) in [
+        ("一", Weekday::Mon),
+        ("二", Weekday::Tue),
+        ("三", Weekday::Wed),
+        ("四", Weekday::Thu),
+        ("五", Weekday::Fri),
+        ("六", Weekday::Sat),
+        ("日", Weekday::Sun),
+        ("天", Weekday::Sun),
+    ] {
+        // 前缀版（长前缀优先：「上上周四」不许被「上周四」截胡）。
+        for (prefix, base) in [
+            ("上上周", monday_this_week - chrono::Duration::days(14)),
+            ("上周", monday_this_week - chrono::Duration::days(7)),
+            ("本周", monday_this_week),
+            ("这周", monday_this_week),
+            ("上上", monday_this_week - chrono::Duration::days(14)),
+            ("上", monday_this_week - chrono::Duration::days(7)),
+            ("本", monday_this_week),
+            ("这", monday_this_week),
+        ] {
+            for head in ["周", "星期", "礼拜"] {
+                let phrase = format!("{prefix}{head}{name}");
+                if let Some((s, e)) = at(&phrase) {
+                    let day = weekday_day(wd, base);
+                    return Some((day, day.succ_opt()?, span_text(&t, s, e)));
+                }
+            }
+        }
+        // 裸周X：最近一次该星期（今天当天算数——周四说「周四」指今天）。
+        for head in ["周", "星期", "礼拜"] {
+            let phrase = format!("{head}{name}");
+            if let Some((s, e)) = at(&phrase) {
+                let back =
+                    (today.weekday().num_days_from_monday() + 7 - wd.num_days_from_monday()) % 7;
+                let day = today - chrono::Duration::days(back as i64);
+                return Some((day, day.succ_opt()?, span_text(&t, s, e)));
+            }
         }
     }
     if let Some((s, e)) = at("上上周") {
@@ -266,6 +341,9 @@ const SCAFFOLDING: &[&str] = &[
     "总结一下", "总结", "整理一下", "整理", "回顾一下", "回顾", "复盘",
     "帮我", "说说", "讲讲", "翻翻", "翻一下", "查查", "查一下", "找找", "找一下",
     "看看", "看一下", "什么", "哪些", "咋样", "怎么样", "那天", "当天", "时候",
+    // 2026-11-21：「周四聊天原文」去掉日期后剩下的「聊天原文」做不出有效
+    // LIKE 腿——回看原文类请求要的是整窗扫描，这些词一律剥掉。
+    "原文", "逐字", "聊天", "内容",
 ];
 
 /// Single-char particles and dialogue verbs that never make a keyword.
@@ -608,6 +686,11 @@ mod tests {
             "把18号的聊天记录给我看看",
             "3天前我提到过一个方案",
             "18号",
+            // 2026-11-21 turn 13–20 教训：原文类 + 星期类必须命中，
+            // 否则空 kit 直接走单轮直答，「周四聊天原文」永远答不上。
+            "周四聊天原文",
+            "周五聊天原文",
+            "把那天的逐字记录给我",
         ] {
             assert!(might_recall(t), "gate must fire on: {t}");
         }
@@ -644,6 +727,30 @@ mod tests {
         assert_eq!(win("12月1日聊了啥").0, d(2025, 12, 1));
         // 无日期短语 → None（调用方落回最近一周）
         assert!(parse_window("我们聊过什么", today()).is_none());
+    }
+
+    /// 星期词一等支持（2026-11-21 turn 12–20）。today() = 2026-11-20 周五。
+    #[test]
+    fn weekday_phrases_resolve_to_the_recent_single_day() {
+        let d = |y: i32, m: u32, dd: u32| NaiveDate::from_ymd_opt(y, m, dd).unwrap();
+        // 裸周X = 最近一次该星期；周五说「周四」= 昨天。
+        assert_eq!(win("周四聊天原文").0, d(2026, 11, 19));
+        assert_eq!(win("周三我说了啥").0, d(2026, 11, 18));
+        // 今天当天算数：周五说「周五」= 今天。
+        assert_eq!(win("周五聊了啥").0, d(2026, 11, 20));
+        // 周五说「周日」：本周日是未来 → 回退上周日。
+        assert_eq!(win("周日的安排").0, d(2026, 11, 15));
+        assert_eq!(win("星期二的会").0, d(2026, 11, 17));
+        assert_eq!(win("礼拜三的事").0, d(2026, 11, 18));
+        // 上周X / 上上周X：那一周的周X。
+        assert_eq!(win("上周四的对话").0, d(2026, 11, 12));
+        assert_eq!(win("上上周一说过").0, d(2026, 11, 2));
+        // 单日窗口：start+1 结尾，label 是「M月D日（周X）」。
+        let (s, e, label) = win("周四聊天原文");
+        assert_eq!(e, s.succ_opt().unwrap());
+        assert_eq!(label, "周四");
+        // 整窗扫描关键词：剥掉日期与回看类词后应为空。
+        assert!(keywords("周四聊天原文", "周四").is_empty());
     }
 
     #[test]
