@@ -1,0 +1,218 @@
+/* 链路追踪页（spec-s8 S8-d）：摘要卡 + 垂直时间线。 */
+
+.trace-view {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 720px;
+}
+
+/* —— 回合摘要卡 —— */
+.trace-summary {
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--card);
+}
+
+.trace-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.trace-badge {
+  font-size: 11px;
+  color: var(--muted);
+  background: rgba(0, 0, 0, 0.04);
+  border-radius: 6px;
+  padding: 2px 8px;
+}
+
+.trace-badge.kind {
+  color: var(--accent-ink);
+  background: #eef5e6;
+}
+
+.trace-badge.ok {
+  color: #3b6d11;
+  background: #eaf3de;
+}
+
+.trace-badge.warn {
+  color: #854f0b;
+  background: #faeeda;
+}
+
+.trace-line {
+  margin: 2px 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  word-break: break-word;
+}
+
+.trace-line.user-line {
+  color: var(--muted);
+}
+
+.trace-hint-line {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: var(--faint);
+}
+
+/* —— 垂直时间线 —— */
+.trace-timeline {
+  display: flex;
+  flex-direction: column;
+}
+
+.trace-node {
+  position: relative;
+  display: flex;
+  gap: 10px;
+}
+
+/* 连接线：从本节点圆点下方一直画到节点底部，衔接下一个圆点 */
+.trace-node:not(:last-child)::before {
+  content: "";
+  position: absolute;
+  left: 4.5px;
+  top: 24px;
+  bottom: 0;
+  width: 1px;
+  background: var(--line);
+}
+
+.trace-node .trace-dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  margin-top: 16px;
+  border-radius: 50%;
+  background: var(--card);
+  position: relative;
+  z-index: 1;
+}
+
+.trace-dot.tone-neutral { border: 2px solid var(--faint); }
+.trace-dot.tone-llm { border: 2px solid #185fa5; background: #e6f1fb; }
+.trace-dot.tone-tool { border: 2px solid #3b6d11; background: #eaf3de; }
+.trace-dot.tone-ok { border: 2px solid #3b6d11; background: #eaf3de; }
+.trace-dot.tone-warn { border: 2px solid #ba7517; background: #faeeda; }
+.trace-dot.tone-bad { border: 2px solid #a32d2d; background: #fcebeb; }
+
+.trace-node-body {
+  flex: 1;
+  min-width: 0;
+  padding-bottom: 12px;
+}
+
+.trace-card {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--card);
+  padding: 8px 12px;
+}
+
+.trace-card.expandable {
+  cursor: pointer;
+}
+
+.trace-card.expandable:hover {
+  border-color: rgba(76, 140, 43, 0.45);
+}
+
+.trace-card-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.trace-title {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.trace-caret {
+  color: var(--faint);
+  font-weight: 400;
+}
+
+.trace-meta {
+  margin-left: auto;
+  display: flex;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.trace-hint {
+  margin: 4px 0 0;
+  font-size: 11px;
+  color: var(--faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* —— 展开区：prompt / 输出 / 参数全文 —— */
+.trace-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.trace-pre {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.02);
+  overflow: hidden;
+}
+
+.trace-pre-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.trace-pre-label {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.trace-pre pre {
+  margin: 0;
+  padding: 8px 10px;
+  max-height: 320px;
+  overflow: auto;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+
+/* —— 空态 / 载入中 —— */
+.trace-empty {
+  padding: 48px 0;
+  text-align: center;
+}
+
+.trace-empty .empty-title {
+  margin: 0 0 6px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.trace-empty .empty-sub {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+}

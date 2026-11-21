@@ -178,6 +178,9 @@ export interface TurnTrace {
   toolLabel?: string | null;
   filterReport?: string | null;
   durationMs?: number | null;
+  /** 用户原文 / 最终回复（摘要卡显示；proactive 无 userText） */
+  userText?: string | null;
+  replyText?: string | null;
   ts: string;
   steps: TraceStep[];
 }

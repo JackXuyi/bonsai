@@ -9,6 +9,7 @@
 @import "./styles/settings.css";
 @import "./styles/memory.css";
 @import "./styles/onboarding.css";
+@import "./styles/trace.css";
 
 @tailwind base;
 @tailwind components;

@@ -53,10 +53,10 @@ describe("MessageActions（spec-s8 气泡操作条）", () => {
     expect(writeText).toHaveBeenCalledWith("明天上午有两条安排");
   });
 
-  it("带 turnId 直接跳 /trace/[turnId]", () => {
+  it("带 turnId 直接跳 /trace?turn=[id]", () => {
     render(<MessageActions message={msg({ turnId: 412 })} />);
     fireEvent.click(screen.getByText(/查看详情/));
-    expect(push).toHaveBeenCalledWith("/trace/412");
+    expect(push).toHaveBeenCalledWith("/trace?turn=412");
   });
 
   it("只有 eventId 时反查；查不到不跳转（toast 由 uiStore 承接）", async () => {
@@ -71,7 +71,7 @@ describe("MessageActions（spec-s8 气泡操作条）", () => {
     findMock.mockResolvedValue(77);
     render(<MessageActions message={msg({ eventId: 9002, kind: "user" })} />);
     fireEvent.click(screen.getByText(/查看详情/));
-    await vi.waitFor(() => expect(push).toHaveBeenCalledWith("/trace/77"));
+    await vi.waitFor(() => expect(push).toHaveBeenCalledWith("/trace?turn=77"));
   });
 
   it("非 Tauri 环境不反查", async () => {

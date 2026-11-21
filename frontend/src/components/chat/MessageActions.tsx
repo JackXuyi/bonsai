@@ -27,13 +27,14 @@ export function MessageActions({ message }: { message: ChatMessage }) {
 
   const openTrace = useCallback(() => {
     if (message.turnId) {
-      router.push(`/trace/${message.turnId}`);
+      // 静态导出（output: export）不支持动态路由段，trace 入口统一走 query
+      router.push(`/trace?turn=${message.turnId}`);
       return;
     }
     if (!inTauri || !message.eventId) return;
     void turnTraceFindByEvent(message.eventId)
       .then((tid) => {
-        if (tid) router.push(`/trace/${tid}`);
+        if (tid) router.push(`/trace?turn=${tid}`);
         else toast("这条消息产生于链路追踪上线前，没有留下记录");
       })
       .catch(() => toast("查不到追踪记录"));

@@ -27,6 +27,7 @@ export function routeForKeys(meta: boolean, key: string): string | null {
 
 /** 路由 → 页头标题（未知名路由回落「阿盆」）。 */
 export function titleForPath(path: string): string {
+  if (path.startsWith("/trace")) return "生成链路";
   return ROUTES.find((r) => r.path === path)?.label ?? "阿盆";
 }
 
