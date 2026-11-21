@@ -4,7 +4,6 @@
   display: flex;
   flex-direction: column;
   gap: 14px;
-  max-width: 720px;
 }
 
 /* —— 回合摘要卡 —— */
@@ -189,8 +188,7 @@
 .trace-pre pre {
   margin: 0;
   padding: 8px 10px;
-  max-height: 320px;
-  overflow: auto;
+  /* 不限高、不内部滚动：全文自然撑开，滚动交给页面级 .tab-body（2026-11-21 用户要求） */
   font-family: var(--mono, ui-monospace, monospace);
   font-size: 11px;
   line-height: 1.6;
