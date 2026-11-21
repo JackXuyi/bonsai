@@ -102,4 +102,86 @@ describe("TraceView（spec-s8 追踪页）", () => {
     expect(screen.getByText('{"date_offset":1}')).toBeTruthy();
     expect(screen.getByText("明天上午 2 条日程")).toBeTruthy();
   });
+
+  it("工具返回是 memory_search JSON → 结构化卡片（窗口/行/记忆）", async () => {
+    const memorySummary = JSON.stringify({
+      window: "11月20日（周五）",
+      dialogue_count: 2,
+      fact_count: 1,
+      lines: [
+        { ts: "11-20 09:00", who: "用户", text: "水培该换水了吗" },
+        { ts: "11-20 09:01", who: "盆栽", text: "一周一次就够。" },
+      ],
+      facts: ["用户在养水培植物"],
+    });
+    getMock.mockResolvedValue(
+      trace({
+        toolLabel: "builtin:memory_search",
+        steps: [
+          {
+            seq: 1,
+            stepKind: "tool_call",
+            title: "工具调用 · memory_search",
+            argsJson: '{"date_from":"2026-11-20","date_to":"2026-11-20"}',
+            summary: memorySummary,
+            outcome: "ok",
+            durationMs: 5,
+            ts: "2026-11-20T14:32:03+08:00",
+          },
+        ],
+      })
+    );
+    render(<TraceView turnId={412} />);
+    fireEvent.click(await screen.findByText(/工具调用 · memory_search/));
+    // 结构化卡片：窗口头 + 行 + 记忆，而不是裸 JSON
+    expect(screen.getByText("11月20日（周五）")).toBeTruthy();
+    expect(screen.getByText(/对话 2 条 · 记忆 1 条/)).toBeTruthy();
+    expect(screen.getByText("水培该换水了吗")).toBeTruthy();
+    expect(screen.getByText("一周一次就够。")).toBeTruthy();
+    expect(screen.getByText("用户在养水培植物")).toBeTruthy();
+    expect(screen.queryByText(/"dialogue_count"/)).toBeNull();
+  });
+
+  it("工具返回是未知 JSON → pretty 打印兜底；非 JSON → 原样", async () => {
+    getMock.mockResolvedValue(
+      trace({
+        steps: [
+          {
+            seq: 1,
+            stepKind: "tool_call",
+            title: "工具调用 · prune",
+            argsJson: "{}",
+            summary: '{"cpuPercent": 12, "benign": 115}',
+            outcome: "ok",
+            durationMs: 9,
+            ts: "2026-11-20T14:32:03+08:00",
+          },
+        ],
+      })
+    );
+    render(<TraceView turnId={412} />);
+    fireEvent.click(await screen.findByText(/工具调用 · prune/));
+    expect(screen.getByText(/"cpuPercent": 12/)).toBeTruthy();
+
+    // 非 JSON 原样（旧 trace 数据兼容）
+    getMock.mockResolvedValue(
+      trace({
+        steps: [
+          {
+            seq: 1,
+            stepKind: "tool_call",
+            title: "工具调用 · legacy",
+            argsJson: "{}",
+            summary: "杭州今天多云 18 度",
+            outcome: "ok",
+            durationMs: 9,
+            ts: "2026-11-20T14:32:03+08:00",
+          },
+        ],
+      })
+    );
+    render(<TraceView turnId={413} />);
+    fireEvent.click(await screen.findByText(/工具调用 · legacy/));
+    expect(screen.getByText("杭州今天多云 18 度")).toBeTruthy();
+  });
 });

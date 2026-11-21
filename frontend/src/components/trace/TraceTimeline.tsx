@@ -78,7 +78,81 @@ function TraceStepDetail({ step }: { step: TraceStep }) {
       {step.prompt && <PreBlock label="本轮 prompt（全文）" text={step.prompt} />}
       {step.output && <PreBlock label="模型原始输出" text={step.output} />}
       {step.argsJson && <PreBlock label="工具请求参数" text={step.argsJson} />}
-      {step.summary && <PreBlock label="工具返回摘要" text={step.summary} />}
+      {step.summary && step.stepKind === "tool_call" && <ToolResultBlock text={step.summary} />}
+      {step.summary && step.stepKind !== "tool_call" && <PreBlock label="工具返回摘要" text={step.summary} />}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------- 工具返回结构化渲染
+
+/** memory_search 的 JSON 形态（2026-11-21 裁决：工具 trace 数据一律 JSON）。
+ * 结构化渲染只认这个形状；其他 JSON pretty 打印，坏 JSON 原样兜底。 */
+interface MemoryResultData {
+  window: string;
+  dialogue_count?: number;
+  fact_count?: number;
+  lines?: { ts?: string; who?: string; text?: string }[];
+  facts?: string[];
+}
+
+/** 工具返回摘要：认识 memory_search 形态 → 结构化卡片；其他 JSON →
+ * pretty 打印；解析失败 → 原样文本。导出以便单测。 */
+export function ToolResultBlock({ text }: { text: string }) {
+  try {
+    const j = JSON.parse(text) as unknown;
+    if (
+      j &&
+      typeof j === "object" &&
+      typeof (j as { window?: unknown }).window === "string" &&
+      Array.isArray((j as { lines?: unknown }).lines)
+    ) {
+      return <MemoryResultCard data={j as MemoryResultData} />;
+    }
+    if (j && typeof j === "object") {
+      return <PreBlock label="工具返回（JSON）" text={JSON.stringify(j, null, 2)} />;
+    }
+  } catch {
+    // 非 JSON → 原样兜底
+  }
+  return <PreBlock label="工具返回" text={text} />;
+}
+
+function MemoryResultCard({ data }: { data: MemoryResultData }) {
+  const lines = data.lines ?? [];
+  const facts = data.facts ?? [];
+  return (
+    <div className="trace-tool-result">
+      <div className="trace-tool-head">
+        <span className="trace-tool-window">{data.window}</span>
+        <span className="trace-tool-count">
+          对话 {data.dialogue_count ?? lines.length} 条 · 记忆 {data.fact_count ?? facts.length} 条
+        </span>
+      </div>
+      {lines.length === 0 && facts.length === 0 && (
+        <p className="trace-tool-empty">没有找到对话记录。</p>
+      )}
+      {lines.length > 0 && (
+        <ul className="trace-tool-lines">
+          {lines.map((l, i) => (
+            <li key={`${l.ts ?? ""}-${i}`} className={l.who === "用户" ? "from-user" : "from-agent"}>
+              <span className="trace-tool-ts">{l.ts ?? ""}</span>
+              <span className="trace-tool-who">{l.who ?? "—"}</span>
+              <span className="trace-tool-text">{l.text ?? ""}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {facts.length > 0 && (
+        <div className="trace-tool-facts">
+          <span className="trace-tool-facts-label">记忆</span>
+          <ul className="trace-tool-facts-list">
+            {facts.map((f, i) => (
+              <li key={i}>{f}</li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }
