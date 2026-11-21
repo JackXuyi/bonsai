@@ -34,6 +34,7 @@ function trace(partial?: Partial<TurnTrace>): TurnTrace {
         output: '{"candidates":["agenda_tomorrow"]}',
         outcome: "answered",
         durationMs: 1900,
+        userText: "帮我看看明天上午有什么安排",
         ts: "2026-11-20T14:32:01+08:00",
       },
       {
@@ -96,6 +97,9 @@ describe("TraceView（spec-s8 追踪页）", () => {
     // 展开 LLM 轮
     fireEvent.click(screen.getByText(/第 1 轮 · 能力候选/));
     expect(screen.getByText("SYS PROMPT 全文")).toBeTruthy();
+    // 当前输入（user message 不在 system prompt 里，v11 起每步自带）
+    expect(screen.getByText(/当前输入（user message/)).toBeTruthy();
+    expect(screen.getAllByText("帮我看看明天上午有什么安排").length).toBeGreaterThan(0);
 
     // 展开工具步
     fireEvent.click(screen.getByText(/工具调用 · builtin:agenda_tomorrow/));

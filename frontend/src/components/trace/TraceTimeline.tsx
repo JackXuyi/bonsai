@@ -75,6 +75,7 @@ function TraceNode({ step }: { step: TraceStep }) {
 function TraceStepDetail({ step }: { step: TraceStep }) {
   return (
     <div className="trace-detail">
+      {step.userText && <PreBlock label="当前输入（user message，不在 system prompt 里）" text={step.userText} />}
       {step.prompt && <PreBlock label="本轮 prompt（全文）" text={step.prompt} />}
       {step.output && <PreBlock label="模型原始输出" text={step.output} />}
       {step.argsJson && <PreBlock label="工具请求参数" text={step.argsJson} />}

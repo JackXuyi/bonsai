@@ -164,6 +164,8 @@ export interface TraceStep {
   summary?: string | null;
   outcome?: string | null;
   durationMs?: number | null;
+  /** 当前输入（user message——不在 system prompt 里，v11 起每步自带） */
+  userText?: string | null;
   ts: string;
 }
 

@@ -17,12 +17,15 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use super::clock;
 
+/// SCHEMA_VERSION = 11（2026-11-21）：trace_steps 补 user_text 列——当前
+/// 输入作为 user message 传给模型（不在 system prompt 里），step 级 trace
+/// 此前看不到它（turn 级 turn_trace.user_text 一直有）。
 /// SCHEMA_VERSION = 10（2026-11-21）：turn_trace 补 user_text/reply_text 列。
 /// 上一版 v9 build 已在旧库建过 turn_trace（无这两列），CREATE TABLE IF NOT
 /// EXISTS 不会给已有表加列；v9→v9 不触发 migrate，INSERT 带 user_text 直接
 /// 报 "table turn_trace has no column named user_text"。教训：改 SCHEMA 必
 /// 须同时 bump 此版本号。
-pub(crate) const SCHEMA_VERSION: i64 = 10;
+pub(crate) const SCHEMA_VERSION: i64 = 11;
 
 /// Test-only: materialise the full schema on a bare in-memory connection.
 /// Other modules' tests build their own `Connection::open_in_memory()` and
@@ -295,6 +298,7 @@ CREATE TABLE IF NOT EXISTS trace_steps (
     summary     TEXT,            -- tool_call: ToolOutput.summary
     outcome     TEXT,            -- ok|denied|error|hit|miss|pass|answered|direct|none
     duration_ms INTEGER,
+    user_text   TEXT,           -- v11: the current user message sent THIS round
     ts          TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_trace_steps_turn ON trace_steps(turn_id, seq);
@@ -369,6 +373,8 @@ pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         // already created the tables in an earlier v9 build).
         add_column_if_missing(conn, "turn_trace", "user_text", "TEXT")?;
         add_column_if_missing(conn, "turn_trace", "reply_text", "TEXT")?;
+        // v11: step 级当前输入（user message 不在 system prompt 里，trace 盲点）
+        add_column_if_missing(conn, "trace_steps", "user_text", "TEXT")?;
     }
 
     set_user_version(conn, SCHEMA_VERSION)?;
@@ -1694,6 +1700,7 @@ pub struct TraceStepDraft {
     pub summary: Option<String>,
     pub outcome: Option<String>,
     pub duration_ms: Option<i64>,
+    pub user_text: Option<String>,
 }
 
 /// A whole turn's trace, persisted atomically (turn row + all steps).
@@ -1723,6 +1730,7 @@ pub struct TraceStepRow {
     pub summary: Option<String>,
     pub outcome: Option<String>,
     pub duration_ms: Option<i64>,
+    pub user_text: Option<String>,
     pub ts: String,
 }
 
@@ -1779,8 +1787,8 @@ pub fn trace_turn_persist(
     for (i, step) in turn.steps.iter().enumerate() {
         tx.execute(
             "INSERT INTO trace_steps
-               (turn_id, seq, step_kind, title, prompt, output, args_json, summary, outcome, duration_ms, ts)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+               (turn_id, seq, step_kind, title, prompt, output, args_json, summary, outcome, duration_ms, user_text, ts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 turn_id,
                 (i + 1) as i64,
@@ -1792,6 +1800,7 @@ pub fn trace_turn_persist(
                 step.summary,
                 step.outcome,
                 step.duration_ms,
+                step.user_text,
                 clock::now_iso(),
             ],
         )?;
@@ -1831,7 +1840,7 @@ pub fn turn_trace_get(conn: &Connection, turn_id: i64) -> rusqlite::Result<Optio
     let Some(mut turn) = turn else { return Ok(None) };
     let mut stmt = conn.prepare(
         "SELECT seq, step_kind, title, prompt, output, args_json, summary,
-                outcome, duration_ms, ts
+                outcome, duration_ms, user_text, ts
          FROM trace_steps WHERE turn_id = ?1 ORDER BY seq ASC",
     )?;
     turn.steps = stmt
@@ -1846,7 +1855,8 @@ pub fn turn_trace_get(conn: &Connection, turn_id: i64) -> rusqlite::Result<Optio
                 summary: r.get(6)?,
                 outcome: r.get(7)?,
                 duration_ms: r.get(8)?,
-                ts: r.get(9)?,
+                user_text: r.get(9)?,
+                ts: r.get(10)?,
             })
         })?
         .collect::<Result<_, _>>()?;
@@ -2582,6 +2592,7 @@ mod tests {
                     summary: None,
                     outcome: Some("miss".into()),
                     duration_ms: None,
+                    user_text: None,
                 },
                 TraceStepDraft {
                     step_kind: "llm_round".into(),
@@ -2592,6 +2603,7 @@ mod tests {
                     summary: None,
                     outcome: Some("answered".into()),
                     duration_ms: Some(900),
+                    user_text: Some("在吗".into()),
                 },
             ],
         };

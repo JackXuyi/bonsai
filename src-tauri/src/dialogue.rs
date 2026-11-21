@@ -70,11 +70,20 @@ pub struct DialogueOutcome {
 pub(crate) struct TraceRecorder {
     started: std::time::Instant,
     steps: Vec<db::TraceStepDraft>,
+    /// The current user message. It travels as the user message (NOT inside
+    /// the system prompt), so without this field every trace step hides what
+    /// the user actually asked (2026-11-21 /trace 盲点).
+    user_text: Option<String>,
 }
 
 impl TraceRecorder {
     fn new() -> Self {
-        Self { started: std::time::Instant::now(), steps: Vec::new() }
+        Self { started: std::time::Instant::now(), steps: Vec::new(), user_text: None }
+    }
+
+    /// Recorder that stamps the current user message onto every step.
+    fn with_user(user: &str) -> Self {
+        Self { started: std::time::Instant::now(), steps: Vec::new(), user_text: Some(user.into()) }
     }
 
     /// One model round: title, full prompt, raw output, outcome label.
@@ -95,6 +104,7 @@ impl TraceRecorder {
             summary: None,
             outcome: Some(outcome.into()),
             duration_ms: Some(dur.as_millis() as i64),
+            user_text: self.user_text.clone(),
         });
     }
 
@@ -117,6 +127,7 @@ impl TraceRecorder {
             summary: Some(summary.into()),
             outcome: Some(outcome.into()),
             duration_ms: Some(dur.as_millis() as i64),
+            user_text: self.user_text.clone(),
         });
     }
 
@@ -131,6 +142,7 @@ impl TraceRecorder {
             summary: None,
             outcome: Some(outcome.into()),
             duration_ms: None,
+            user_text: self.user_text.clone(),
         });
     }
 
@@ -835,8 +847,9 @@ fn chat_turn_inner(
 ) -> rusqlite::Result<DialogueOutcome> {
     // Trace collector (spec-s8): lives for the whole turn; every path below
     // records its steps and persists the draft together with the dialogue
-    // events (same lock scope, one transaction).
-    let mut rec = TraceRecorder::new();
+    // events (same lock scope, one transaction). 当前输入进每个 step
+    // （2026-11-21：user message 不在 system prompt 里，trace 必须自带）。
+    let mut rec = TraceRecorder::with_user(user_text);
 
     // Crisis intercept (plan-onboarding.md §3.3): rule-level, BEFORE any
     // model call — a dead model must not change this behavior. Both sides
@@ -1109,7 +1122,7 @@ pub fn proactive_text(
         "（系统注入的一次性指令：这是你今天唯一的主动搭话。基于下面的观察说一句自然、简短的话，像随口聊一句。不要列表，不要复述细节。实在没什么可说，就关心一句用户今天过得怎么样。）\n\n今日观察：{obs}"
     );
     // zero-lock model round
-    let mut rec = TraceRecorder::new();
+    let mut rec = TraceRecorder::with_user(&user);
     let t = std::time::Instant::now();
     let reply = backend.reply(&system, &[], &user, CHAT_TEMPERATURE);
     let dur = t.elapsed();
@@ -2499,6 +2512,16 @@ mod tests {
             assert!(prompts[0].contains("【可用能力（仅名称）】"));
             assert!(prompts[1].contains("【候选能力详情"));
             assert!(prompts[2].contains("工具 weather 的结果"));
+            // 当前输入进每个 step（2026-11-21 v11）：user message 不在
+            // system prompt 里，trace 盲点——每步必须自带 user_text。
+            for st in &t.steps {
+                assert_eq!(
+                    st.user_text.as_deref(),
+                    Some("今天杭州天气怎么样"),
+                    "every step carries the user message: {}",
+                    st.title
+                );
+            }
             let tool = t.steps.iter().find(|st| st.step_kind == "tool_call").unwrap();
             assert_eq!(tool.args_json.as_deref(), Some(r#"{"city":"杭州"}"#));
             assert!(tool.summary.as_deref().unwrap_or("").contains("多云"));
