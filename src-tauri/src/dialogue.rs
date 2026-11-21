@@ -291,6 +291,130 @@ fn summary_round_prompt(sys1: &str, name: &str, summary: &str) -> String {
     }
 }
 
+/// pass 3: result-summary round (streaming lives here). Shared by the normal
+/// `ToolDecision::Call` path and the forced memory-search fallback (2026-11-21:
+/// recall 直答兜底走同一条解读路径，避免两份 pass-3 拷贝漂移).
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+fn summarize_tool_result(
+    backend: &mut dyn DialogueBackend,
+    kit: &mut crate::mcp_admin::AgentKit,
+    history: &[crate::persona::eval::Turn],
+    user_text: &str,
+    base_sys: &str,
+    name: &str,
+    args_text: &str,
+    label: Option<String>,
+    out: &crate::agent_tools::ToolOutput,
+    tool_dur: std::time::Duration,
+    rec: &mut TraceRecorder,
+    mut on_delta: Option<&mut dyn FnMut(&str)>,
+) -> rusqlite::Result<(String, Option<String>, bool)> {
+    let sys2 = summary_round_prompt(base_sys, name, &out.summary);
+    kit.trace("level3:answered".into());
+    rec.tool_call(name, args_text, &out.summary, "ok", None, tool_dur);
+    // Third JSON-leak guard (2026-11-20 regression trio): the
+    // model can echo its own pass-2 decision JSON instead of
+    // prose. Streaming deltas are IRRETRACTABLE, so the sink
+    // gates on the first non-whitespace char: `{` mutes the
+    // whole stream (nothing reaches the UI) and triggers one
+    // non-streamed prose retry.
+    let t3 = std::time::Instant::now();
+    let (raw3, json_out) = match on_delta.as_deref_mut() {
+        Some(cb) => {
+            let verdict = std::cell::RefCell::new(None::<bool>); // None=undecided, Some(true)=json
+            let mut sink = |d: &str| {
+                let is_json = {
+                    let mut g = verdict.borrow_mut();
+                    match *g {
+                        Some(true) => return,
+                        Some(false) => false,
+                        None => match d.chars().find(|c| !c.is_whitespace()) {
+                            None => return,
+                            Some(c) => {
+                                let json = c == '{';
+                                *g = Some(json);
+                                json
+                            }
+                        },
+                    }
+                };
+                if is_json {
+                    return;
+                }
+                cb(d);
+            };
+            let raw3 = backend.reply_streaming(&sys2, history, user_text, CHAT_TEMPERATURE, &mut sink);
+            let json_out = matches!(*verdict.borrow(), Some(true)) || raw3.trim_start().starts_with('{');
+            (raw3, json_out)
+        }
+        None => {
+            let raw3 = backend.reply(&sys2, history, user_text, CHAT_TEMPERATURE);
+            let json_out = raw3.trim_start().starts_with('{');
+            (raw3, json_out)
+        }
+    };
+    rec.llm_round(
+        &format!("第 3 轮 · 解读 {name} 结果"),
+        &sys2,
+        &raw3,
+        "answered",
+        t3.elapsed(),
+    );
+    if raw3.trim().is_empty() {
+        Ok((
+            format!("（{name} 跑完了，但盆栽没组织好语言——结果：{}）", out.summary),
+            label,
+            true,
+        ))
+    } else if json_out {
+        kit.trace("level3:json-not-prose".into());
+        let sys3 = format!(
+            "{sys2}\n\n（你刚才的回复是 JSON，这不对。{} 请直接用自然语言、面向用户回答；不要输出任何 JSON 或代码块。）",
+            if out.summary.trim_start().starts_with('{') || out.summary.trim_start().starts_with('[') {
+                "解读上面的 JSON 数据，给出结论。"
+            } else {
+                ""
+            }
+        );
+        let retry = backend.reply(&sys3, history, user_text, CHAT_TEMPERATURE);
+        rec.simple(
+            "json_retry",
+            "JSON 泄漏 · 重问直答",
+            "ok",
+            Some(&retry),
+        );
+        if !retry.trim().is_empty() && !retry.trim_start().starts_with('{') {
+            Ok((retry, label, false))
+        } else {
+            Ok((
+                format!("（{name} 的结果：{}）", out.summary),
+                label,
+                false,
+            ))
+        }
+    } else {
+        Ok((raw3, label, true))
+    }
+}
+
+/// memory_search 的调用参数（2026-11-21 用户裁决：按日期筛选要显式）：
+/// 服务端解析日期窗 → date_from/date_to（含语义）+ query 原话；解析不出
+/// 日期短语才只传 query（execute 侧自带最近一周兜底）。强制检索兜底与
+/// pass-2 candidates 复读转决策共用。
+fn memory_search_args(user_text: &str) -> serde_json::Value {
+    let today = crate::memory::clock::now_local().date_naive();
+    match crate::memory_search::parse_window(user_text, today) {
+        Some((s, e, _)) => serde_json::json!({
+            "query": user_text,
+            "date_from": s.format("%Y-%m-%d").to_string(),
+            "date_to": e.pred_opt()
+                .map(|d| d.format("%Y-%m-%d").to_string())
+                .unwrap_or_else(|| s.format("%Y-%m-%d").to_string()),
+        }),
+        None => serde_json::json!({ "query": user_text }),
+    }
+}
+
 /// The three-stage progressive disclosure pipeline (spec-s3 §3). Activated
 /// ONLY when the kit has capabilities — with none, the turn is untouched
 /// (legacy behavior, all existing tests ride that path).
@@ -307,7 +431,7 @@ fn agent_pipeline(
     history: &[crate::persona::eval::Turn],
     user_text: &str,
     rec: &mut TraceRecorder,
-    mut on_delta: Option<&mut dyn FnMut(&str)>,
+    on_delta: Option<&mut dyn FnMut(&str)>,
 ) -> rusqlite::Result<(String, Option<String>, bool)> {
     use crate::agent_tools::{json_object_slice, name_catalog, parse_candidates, parse_tool_decision, ToolDecision, ToolKind};
 
@@ -346,7 +470,11 @@ fn agent_pipeline(
                 catalog.truncate(100);
             }
             kit.trace(format!("level0:recall-pin:{}", name_catalog(&catalog)));
-            "\n\n用户的问题可能指向过往对话——查聊天记录/之前说过什么/总结之前的对话，优先用 memory_search（输入用户原话）。"
+            // 强指令（2026-11-21 二次裁决）：弱提示压不过模型的自我判断 +
+            // history 复读（「没有记录」的旧回答进 history 后，模型复读自
+            // 己的失败结论，trace turn 5-7 全部 direct）。「可能用」改成
+            // 「必须先查」，且点名禁止凭记忆答「没有记录」。
+            "\n\n【本回合指令】用户的问题指向过往对话。凭记忆回答等于编造——必须先输出 {\"candidates\": [\"memory_search\"]} 让系统查证，拿到结果后再回答；禁止直接回答「没有记录」或凭印象复述。"
         }
         None => "",
     };
@@ -364,6 +492,32 @@ fn agent_pipeline(
         return Ok((raw1, None, false));
     }
     let Ok(cands) = parse_candidates(&raw1) else {
+        // Recall 兜底（2026-11-21）：模型直答 + recall 命中 → 服务端强制调
+        // memory_search 再进 pass-3。history 里「没有记录」的旧回答会复读
+        // 压过任何 prompt 指令（trace turn 5-7 三连 direct），而 memory_search
+        // 只读零副作用，强制调用无风险——「宁可说不知道也不编」的人格要求
+        // 「没有记录」必须有检索背书。
+        if kit.catalog_all().iter().any(|d| d.name == "memory_search") {
+            kit.trace("level1:forced-memory-search".into());
+            rec.llm_round("第 1 轮 · 能力候选", &sys0, &raw1, "forced-direct", dur1);
+            // 按日期筛选（2026-11-21 用户裁决）：日期窗在服务端解析并
+            // 显式进参数——「昨天说了什么」的请求应是 date_from/date_to
+            // 指向具体日期，而不是把原话当搜索词。
+            let args = memory_search_args(user_text);
+            let args_text = args.to_string();
+            let t_tool = std::time::Instant::now();
+            return match crate::mcp_admin::execute_audited(store, kit, "memory_search", args) {
+                Err(e) => {
+                    rec.tool_call("memory_search", &args_text, "", "error", Some(&e), t_tool.elapsed());
+                    Ok((raw1, None, false))
+                }
+                Ok(out) => summarize_tool_result(
+                    backend, kit, history, user_text, &sys0, "memory_search",
+                    &args_text, tool_label(kit, "memory_search"), &out,
+                    t_tool.elapsed(), rec, on_delta,
+                ),
+            };
+        }
         kit.trace("level1:direct-answer".into());
         rec.llm_round("第 1 轮 · 能力候选", &sys0, &raw1, "direct", dur1);
         return Ok((raw1, None, false));
@@ -446,12 +600,41 @@ fn agent_pipeline(
         return Ok((raw2, None, false));
     }
 
-    match parse_tool_decision(&raw2) {
+    // Pass-2 echo recovery (2026-11-21 turn 10): the model emitted the right
+    // candidates in pass 1, then regurgitated the SAME candidates JSON in
+    // pass 2 instead of a {"tool":…} decision → prose_retry answered from
+    // thin air. The echo IS the decision: the named tool is already
+    // whitelisted in `selected` (its detail was injected this very round),
+    // so execute it instead of burning the turn on a retry.
+    let decision = match parse_tool_decision(&raw2) {
+        Ok(d) => Some(d),
+        Err(_) => {
+            let echo = parse_candidates(&raw2)
+                .ok()
+                .and_then(|cs| cs.into_iter().next())
+                .filter(|name| selected.iter().any(|d| d.name == *name))
+                .map(|name| {
+                    kit.trace(format!("level2:echo-decision:{name}"));
+                    let args = if name == "memory_search" {
+                        memory_search_args(user_text)
+                    } else {
+                        serde_json::json!({})
+                    };
+                    ToolDecision::Call { name, args }
+                });
+            if echo.is_some() {
+                rec.llm_round("第 2 轮 · 读详情决策", &sys1, &raw2, "echoed", dur2);
+            }
+            echo
+        }
+    };
+    match decision {
         // Prose answer (skill body sufficed, or the model declined) — UNLESS
         // the "prose" is itself JSON: a 2B model sometimes regurgitates the
-        // level-0 candidates format here instead of a decision, and shipping
-        // it verbatim is exactly the 2026-11-20 leak. Re-ask in prose.
-        Err(_) if json_object_slice(&raw2).is_some() => {
+        // level-0 candidates format here instead of a decision (echo recovery
+        // above already caught the legit ones), and shipping it verbatim is
+        // exactly the 2026-11-20 leak. Re-ask in prose.
+        None if json_object_slice(&raw2).is_some() => {
             kit.trace("level2:json-not-prose".into());
             rec.llm_round("第 2 轮 · 读详情决策", &sys1, &raw2, "json", dur2);
             let retry = prose_retry(backend, system, history, user_text);
@@ -459,7 +642,7 @@ fn agent_pipeline(
             Ok((retry, None, false))
         }
         // Prose answer (skill body sufficed, or the model declined).
-        Err(_) => {
+        None => {
             // Audit rows for the skills whose bodies were injected — one
             // short lock scope (lock-narrowing).
             {
@@ -487,12 +670,12 @@ fn agent_pipeline(
                 .map(|d| format!("skill:{}", d.name));
             Ok((raw2, label, false))
         }
-        Ok(ToolDecision::None) => {
+        Some(ToolDecision::None) => {
             kit.trace("level2:none".into());
             rec.llm_round("第 2 轮 · 读详情决策", &sys1, &raw2, "none", dur2);
             Ok(("（这轮先不动用工具——直接聊吧。）".into(), None, false))
         }
-        Ok(ToolDecision::Call { name, args }) => {
+        Some(ToolDecision::Call { name, args }) => {
             kit.trace(format!("level2:call:{name}"));
             rec.llm_round("第 2 轮 · 读详情决策", &sys1, &raw2, "answered", dur2);
             let label = tool_label(kit, &name);
@@ -521,94 +704,10 @@ fn agent_pipeline(
                     Ok((format!("（工具 {name} {why}。）"), label, false))
                 }
                 Ok(out) => {
-                    // ---- pass 3: result-summary round (streaming lives here)
-                    let sys2 = summary_round_prompt(&sys1, &name, &out.summary);
-                    kit.trace("level3:answered".into());
-                    rec.tool_call(&name, &args_text, &out.summary, "ok", None, t_tool.elapsed());
-                    // Third JSON-leak guard (2026-11-20 regression trio): the
-                    // model can echo its own pass-2 decision JSON instead of
-                    // prose. Streaming deltas are IRRETRACTABLE, so the sink
-                    // gates on the first non-whitespace char: `{` mutes the
-                    // whole stream (nothing reaches the UI) and triggers one
-                    // non-streamed prose retry.
-                    // Deferred init: both match arms assign before any read.
-                    let raw3;
-                    let json_out;
-                    let t3 = std::time::Instant::now();
-                    match on_delta.as_deref_mut() {
-                        Some(cb) => {
-                            let verdict = std::cell::RefCell::new(None::<bool>); // None=undecided, Some(true)=json
-                            let mut sink = |d: &str| {
-                                let is_json = {
-                                    let mut g = verdict.borrow_mut();
-                                    match *g {
-                                        Some(true) => return,
-                                        Some(false) => false,
-                                        None => match d.chars().find(|c| !c.is_whitespace()) {
-                                            None => return,
-                                            Some(c) => {
-                                                let json = c == '{';
-                                                *g = Some(json);
-                                                json
-                                            }
-                                        },
-                                    }
-                                };
-                                if is_json {
-                                    return;
-                                }
-                                cb(d);
-                            };
-                            raw3 = backend.reply_streaming(&sys2, history, user_text, CHAT_TEMPERATURE, &mut sink);
-                            json_out = matches!(*verdict.borrow(), Some(true)) || raw3.trim_start().starts_with('{');
-                        }
-                        None => {
-                            raw3 = backend.reply(&sys2, history, user_text, CHAT_TEMPERATURE);
-                            json_out = raw3.trim_start().starts_with('{');
-                        }
-                    }
-                    rec.llm_round(
-                        &format!("第 3 轮 · 解读 {name} 结果"),
-                        &sys2,
-                        &raw3,
-                        "answered",
-                        t3.elapsed(),
-                    );
-                    if raw3.trim().is_empty() {
-                        Ok((
-                            format!("（{name} 跑完了，但盆栽没组织好语言——结果：{}）", out.summary),
-                            label,
-                            true,
-                        ))
-                    } else if json_out {
-                        kit.trace("level3:json-not-prose".into());
-                        let sys3 = format!(
-                            "{sys2}\n\n（你刚才的回复是 JSON，这不对。{} 请直接用自然语言、面向用户回答；不要输出任何 JSON 或代码块。）",
-                            if out.summary.trim_start().starts_with('{') || out.summary.trim_start().starts_with('[') {
-                                "解读上面的 JSON 数据，给出结论。"
-                            } else {
-                                ""
-                            }
-                        );
-                        let retry = backend.reply(&sys3, history, user_text, CHAT_TEMPERATURE);
-                        rec.simple(
-                            "json_retry",
-                            "JSON 泄漏 · 重问直答",
-                            "ok",
-                            Some(&retry),
-                        );
-                        if !retry.trim().is_empty() && !retry.trim_start().starts_with('{') {
-                            Ok((retry, label, false))
-                        } else {
-                            Ok((
-                                format!("（{name} 的结果：{}）", out.summary),
-                                label,
-                                false,
-                            ))
-                        }
-                    } else {
-                        Ok((raw3, label, true))
-                    }
+                    summarize_tool_result(
+                        backend, kit, history, user_text, &sys1, &name,
+                        &args_text, label, &out, t_tool.elapsed(), rec, on_delta,
+                    )
                 }
             }
         }
@@ -1951,7 +2050,7 @@ mod tests {
         .unwrap();
         let sys0 = seen.lock().unwrap()[0].clone();
         assert!(
-            sys0.contains("优先用 memory_search（输入用户原话）"),
+            sys0.contains("必须先输出 {\"candidates\": [\"memory_search\"]}"),
             "recall hint must be injected: {sys0}"
         );
         // Pin beats dictionary order: memory_search first, before mem_snapshot.
@@ -1973,6 +2072,79 @@ mod tests {
         let sys0b = seen2.lock().unwrap()[0].clone();
         assert!(!sys0b.contains("memory_search"), "no hint without the tool");
         assert!(!wk.trace_ref().contains("recall-pin"));
+    }
+
+    /// Forced fallback (2026-11-21): the model answered 「没有记录」 in prose
+    /// for three straight recall turns (trace 5-7) — history pollution beats
+    /// any prompt hint. When recall is armed and pass-1 comes back as prose,
+    /// the server must run memory_search itself and feed the result to the
+    /// summary round instead of shipping the unverified "no records" answer.
+    #[test]
+    fn recall_direct_answer_triggers_forced_memory_search() {
+        let _g = crate::memory::clock::pinned("2026-11-21T07:00:00Z"); // 本地 11-21 15:00
+        let s = mem();
+        let c = card();
+        let mut kit = crate::mcp_admin::AgentKit {
+            providers: vec![Box::new(crate::memory_search::MemorySearchProvider)],
+            gate: Box::new(crate::agent_tools::AutoAllowGate),
+            prompt_trace: std::sync::Mutex::new(Vec::new()),
+        };
+        let mut backend = SeqBackend::new(&[
+            "我这边没有聊天记录可查。", // pass-1: prose, no candidates
+            "查过了：昨天你聊过水培和换水。", // pass-3: interpretation of the search result
+        ]);
+        let out = chat_turn_with_kit(
+            &s, &mut backend, &c, "s1", "昨天说了什么", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit,
+        )
+        .unwrap();
+        assert_eq!(out.reply, "查过了：昨天你聊过水培和换水。", "pass-3 answer must win over the prose guess");
+        assert_eq!(out.tool.as_deref(), Some("builtin:memory_search"));
+        let trace = kit.trace_ref();
+        assert!(trace.contains("level1:forced-memory-search"), "forced path traced: {trace}");
+        assert!(trace.contains("level3:answered"), "result fed to the summary round: {trace}");
+        // 按日期筛选（2026-11-21）：强制路径的请求参数必须显式带解析出的
+        // 日期窗，而不是只有 query 原话。
+        let records = with_conn(&s, |conn| db::tool_call_records(conn, 3).unwrap());
+        assert_eq!(records.len(), 1, "one audited call");
+        let params = records[0].params_summary.as_deref().unwrap_or("");
+        assert!(params.contains("date_from"), "explicit date window in params: {params}");
+        assert!(params.contains("date_to"), "explicit date window in params: {params}");
+        assert!(params.contains("2026-11-20"), "「昨天」pinned to 11-20 by the test clock: {params}");
+    }
+
+    /// Pass-2 echo regression (2026-11-21 turn 10): the model emitted the
+    /// right candidates in pass 1, then repeated the SAME candidates JSON in
+    /// pass 2 instead of a {"tool":…} decision → prose_retry answered 「周四
+    /// 的事我这儿没有」 from thin air. The echo must become the decision and
+    /// execute, with the date window resolved server-side.
+    #[test]
+    fn pass2_candidates_echo_becomes_the_decision() {
+        let _g = crate::memory::clock::pinned("2026-11-21T07:00:00Z"); // 本地 11-21 15:00
+        let s = mem();
+        let c = card();
+        let mut kit = crate::mcp_admin::AgentKit {
+            providers: vec![Box::new(crate::memory_search::MemorySearchProvider)],
+            gate: Box::new(crate::agent_tools::AutoAllowGate),
+            prompt_trace: std::sync::Mutex::new(Vec::new()),
+        };
+        let mut backend = SeqBackend::new(&[
+            r#"{"candidates": ["memory_search"]}"#, // pass 1
+            r#"{"candidates": ["memory_search"]}"#, // pass 2: echo instead of decision
+            "查到了：昨天聊了水培。",                // pass 3 interpretation
+        ]);
+        let out = chat_turn_with_kit(
+            &s, &mut backend, &c, "s1", "这周四我说了什么", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit,
+        )
+        .unwrap();
+        assert_eq!(out.reply, "查到了：昨天聊了水培。", "echo must execute, not prose_retry");
+        assert_eq!(out.tool.as_deref(), Some("builtin:memory_search"));
+        assert!(kit.trace_ref().contains("level2:echo-decision"), "echo traced");
+        let records = with_conn(&s, |conn| db::tool_call_records(conn, 3).unwrap());
+        assert_eq!(records.len(), 1);
+        let params = records[0].params_summary.as_deref().unwrap_or("");
+        assert!(params.contains("date_from"), "echo carries the server-side date window: {params}");
     }
 
     /// Screenshot regression (2026-11-20): the model answered with a raw
@@ -2278,10 +2450,12 @@ mod tests {
         let s = mem();
         let c = card();
 
-        // level2: pass2 echoes the candidates JSON instead of deciding → prose_retry.
+        // level2 (2026-11-21 echo recovery): pass2 repeating the candidates
+        // JSON IS the decision now — the tool executes, no prose_retry.
         let mut backend = SeqBackend::new(&[
             r#"{"candidates": ["weather"]}"#,
             r#"{"candidates": ["weather"]}"#,
+            "杭州今天多云。",
         ]);
         let mut kit = weather_kit();
         let out = chat_turn_with_kit(
@@ -2289,8 +2463,24 @@ mod tests {
             crate::calendar::CalendarAccess::Denied, &mut kit,
         )
         .unwrap();
+        assert_eq!(out.tool.as_deref(), Some("mcp:weather"), "echo must execute");
         let steps = steps_of(&s, out.turn_id.unwrap());
-        assert!(steps.iter().any(|(k, _)| k == "prose_retry"), "got {steps:?}");
+        assert!(!steps.iter().any(|(k, _)| k == "prose_retry"), "got {steps:?}");
+
+        // level2 json-not-prose fallback: the echo names a tool OUTSIDE the
+        // selected whitelist → no decision → prose_retry keeps guarding.
+        let mut backend_echo = SeqBackend::new(&[
+            r#"{"candidates": ["weather"]}"#,
+            r#"{"candidates": ["no_such_tool"]}"#,
+        ]);
+        let mut kit_echo = weather_kit();
+        let out_echo = chat_turn_with_kit(
+            &s, &mut backend_echo, &c, "s1", "天气", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit_echo,
+        )
+        .unwrap();
+        let steps_echo = steps_of(&s, out_echo.turn_id.unwrap());
+        assert!(steps_echo.iter().any(|(k, _)| k == "prose_retry"), "got {steps_echo:?}");
 
         // level3: pass3 opens with '{' → json_retry.
         let mut backend2 = SeqBackend::new(&[
