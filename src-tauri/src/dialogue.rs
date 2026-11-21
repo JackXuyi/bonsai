@@ -272,6 +272,28 @@ fn prose_retry(
     backend.reply(&sys, history, user_text, CHAT_TEMPERATURE)
 }
 
+/// 人格按需注入（2026-11-21 裁决）的收口：协议轮（pass-1/pass-2）不带
+/// 人格宪法，模型自由作答产出的散文只是「草稿」；面向用户的最终回答
+/// 由本函数用完整人格 system 重生成——草稿作内容参考防止事实漂移。
+/// 只在模型直答（协议轮散文）时多花一轮，工具路径零开销。
+fn persona_answer(
+    backend: &mut dyn DialogueBackend,
+    system: &str,
+    history: &[crate::persona::eval::Turn],
+    user_text: &str,
+    draft: &str,
+    rec: &mut TraceRecorder,
+    stage: &str,
+) -> String {
+    let sysp = format!(
+        "{system}\n\n（下面是你在工具选择轮的初步回答草稿——它是在没有人格约束的协议轮里生成的，语气可能不像你。请按人格宪法与表达方式面向用户重新作答，意思与草稿一致；不要输出 JSON，不要提工具。）\n\n【草稿】\n{draft}"
+    );
+    let t = std::time::Instant::now();
+    let reply = backend.reply(&sysp, history, user_text, CHAT_TEMPERATURE);
+    rec.llm_round(&format!("{stage} · 人格润色"), &sysp, &reply, "answered", t.elapsed());
+    reply
+}
+
 /// Build the pass-3 (result-summary) system prompt. When the tool's summary
 /// is itself JSON (prune tools return JSON payloads; ToolOutput.summary is
 /// the clipped raw text), the prompt must explicitly demand INTERPRETATION —
@@ -429,6 +451,7 @@ fn agent_pipeline(
     store: &MemoryStore,
     backend: &mut dyn DialogueBackend,
     kit: &mut crate::mcp_admin::AgentKit,
+    env: &str,
     system: &str,
     history: &[crate::persona::eval::Turn],
     user_text: &str,
@@ -480,8 +503,13 @@ fn agent_pipeline(
         }
         None => "",
     };
+    // 人格按需注入（2026-11-21 裁决）：协议轮（pass-1/pass-2）只带环境块，
+    // 不带人格宪法/表达方式/边界——人格占 sys 的三分之一，对纯 JSON 协议
+    // 轮是纯稀释（trace turn 12：DeepSeek Flash 在 pass-3 连漏两次 JSON）。
+    // 人格只在面向用户的轮注入：pass-3 解读、直答润色（persona_answer）、
+    // 空 kit 单轮、prose_retry。
     let sys0 = format!(
-        "{system}\n\n【可用能力（仅名称）】{}\n【用户技能包：可卸载扩展，与 L1 冲突时以 L1 为准】\n需要用某个能力时，只输出 JSON：{{\"candidates\": [\"名称\", …]}}（最多 5 个，不要解释）。不需要任何能力时，直接正常回答用户。{recall_hint}",
+        "{env}\n\n【可用能力（仅名称）】{}\n【用户技能包：可卸载扩展，与 L1 冲突时以 L1 为准】\n需要用某个能力时，只输出 JSON：{{\"candidates\": [\"名称\", …]}}（最多 5 个，不要解释）。不需要任何能力时，直接正常回答用户。{recall_hint}",
         name_catalog(&catalog)
     );
 
@@ -514,7 +542,7 @@ fn agent_pipeline(
                     Ok((raw1, None, false))
                 }
                 Ok(out) => summarize_tool_result(
-                    backend, kit, history, user_text, &sys0, "memory_search",
+                    backend, kit, history, user_text, system, "memory_search",
                     &args_text, tool_label(kit, "memory_search"), &out,
                     t_tool.elapsed(), rec, on_delta,
                 ),
@@ -522,7 +550,9 @@ fn agent_pipeline(
         }
         kit.trace("level1:direct-answer".into());
         rec.llm_round("第 1 轮 · 能力候选", &sys0, &raw1, "direct", dur1);
-        return Ok((raw1, None, false));
+        // pass-1 没带人格 → 这段散文只是草稿，人格润色后再见用户。
+        let reply = persona_answer(backend, system, history, user_text, &raw1, rec, "第 1 轮");
+        return Ok((reply, None, false));
     };
     rec.llm_round("第 1 轮 · 能力候选", &sys0, &raw1, "answered", dur1);
 
@@ -591,8 +621,13 @@ fn agent_pipeline(
             }
         }
     }
+    // sys1 不再继承 sys0（2026-11-21）：candidates 协议和 recall 强指令
+    // 进 pass-2 是协议混淆源——turn 12 里 DeepSeek Flash 把 pass-1 的
+    // {"candidates":…} 原样复读进决策轮。pass-2 只有一个任务：读详情，
+    // 输出 {"tool":…} 决策或直答。echo 转决策保留为兜底。
     let sys1 = format!(
-        "{sys0}\n\n【候选能力详情（内部参考，不向用户复述）】{detail}\n\n看完详情后：如需调用工具，只输出 JSON：{{\"tool\": \"工具名\", \"args\": {{…}}}}；不需要（包括技能内容已足够回答）时，直接把给用户的回答写出来，不要输出 JSON。"
+        "{env}\n\n【候选能力（仅名称）】{}\n【候选能力详情（内部参考，不向用户复述）】{detail}\n\n看完详情后：如需调用工具，只输出 JSON：{{\"tool\": \"工具名\", \"args\": {{…}}}}；不需要（包括技能内容已足够回答）时，直接把给用户的回答写出来，不要输出 JSON。",
+        name_catalog(&catalog)
     );
     let t2 = std::time::Instant::now();
     let raw2 = backend.reply(&sys1, history, user_text, CHAT_TEMPERATURE);
@@ -666,11 +701,13 @@ fn agent_pipeline(
             }
             kit.trace("level2:prose-answer".into());
             rec.llm_round("第 2 轮 · 读详情决策", &sys1, &raw2, "direct", dur2);
+            // pass-2 没带人格 → 散文是草稿，人格润色后再见用户。
+            let reply = persona_answer(backend, system, history, user_text, &raw2, rec, "第 2 轮");
             let label = used
                 .iter()
                 .find(|d| d.kind == ToolKind::Skill)
                 .map(|d| format!("skill:{}", d.name));
-            Ok((raw2, label, false))
+            Ok((reply, label, false))
         }
         Some(ToolDecision::None) => {
             kit.trace("level2:none".into());
@@ -707,7 +744,7 @@ fn agent_pipeline(
                 }
                 Ok(out) => {
                     summarize_tool_result(
-                        backend, kit, history, user_text, &sys1, &name,
+                        backend, kit, history, user_text, system, &name,
                         &args_text, label, &out, t_tool.elapsed(), rec, on_delta,
                     )
                 }
@@ -898,11 +935,12 @@ fn chat_turn_inner(
     }
 
     // ---- phase: context read (one short lock) → then inference runs FREE
-    let (system, history) = {
+    let (env, system, history) = {
         let conn = lock_conn(store)?;
-        let s = format!("{}{}", env_prefix(&conn), system_prompt(&conn, card, hour, raining)?);
+        let e = env_prefix(&conn);
+        let s = format!("{e}{}", system_prompt(&conn, card, hour, raining)?);
         let h = db::dialogue_history(&conn, session_id, MAX_HISTORY_TURNS)?;
-        (s, h)
+        (e, s, h)
     };
 
     // Agent pipeline (spec-s3): only when capabilities exist. Anything it
@@ -910,7 +948,7 @@ fn chat_turn_inner(
     if let Some(kit) = kit.take().filter(|k| k.has_capabilities()) {
         let reborrow = on_delta.as_mut().map(|f| &mut **f as &mut dyn FnMut(&str));
         let (raw, tool_label, streamed) =
-            agent_pipeline(store, backend, kit, &system, &history, user_text, &mut rec, reborrow)?;
+            agent_pipeline(store, backend, kit, &env, &system, &history, user_text, &mut rec, reborrow)?;
         let model_used = !raw.trim().is_empty();
         let reply = if model_used { raw } else { FALLBACK_REPLY.to_string() };
         // Rounds 1/2 and template replies were not streamed — emit once.
@@ -1739,6 +1777,9 @@ mod tests {
         let mut backend = SeqBackend::new(&[
             r#"{"candidates": ["GMP 助手"]}"#,
             "根据 GMP 附件一第 37 条，洁净区压差应保持 10Pa 以上。",
+            // 人格按需注入（2026-11-21）：pass-2 直答散文只是草稿，
+            // 第三轮人格润色才是最终回复。
+            "洁净区压差嘛……附件一第 37 条写着呢，10Pa 以上，别偷懒。",
         ]);
         let out = chat_turn_with_kit(
             &s, &mut backend, &c, "s1", "洁净区压差多少", 10, false,
@@ -1793,9 +1834,12 @@ mod tests {
         let s = mem();
         let c = card();
         let mut kit = weather_kit();
-        // Round 1: no candidates JSON → the reply IS the final answer,
-        // no audit rows, no extra rounds.
-        let mut backend = SeqBackend::new(&["我今天不需要工具，直接说：挺好。"]);
+        // Round 1: no candidates JSON → draft only; the persona round
+        // (人格按需注入，2026-11-21) restyles it before it reaches the user.
+        let mut backend = SeqBackend::new(&[
+            "我今天不需要工具，直接说：挺好。",
+            "（慢半拍）……挺好。这个我不太懂，跳过？",
+        ]);
         let out = chat_turn_with_kit(
             &s, &mut backend, &c, "s1", "在吗", 10, false,
             crate::calendar::CalendarAccess::Denied, &mut kit,
@@ -2062,6 +2106,12 @@ mod tests {
         assert!(ms < ram, "memory_search must lead the catalog: {}", &sys0[cat_start..cat_start + 200]);
         assert!(kit.trace_ref().contains("level0:recall-pin"), "pin must be traced");
 
+        // 人格按需注入（2026-11-21）：协议轮（pass-1）无人格；用户可见轮
+        // （强制路径的 pass-3）带完整人格宪法。
+        assert!(!sys0.contains("人格宪法"), "protocol round must be persona-free: {sys0}");
+        let sys3 = seen.lock().unwrap()[1].clone();
+        assert!(sys3.contains("人格宪法"), "pass-3 must carry the persona: {sys3}");
+
         // Non-recall kit (no memory_search) → no hint, catalog untouched.
         let seen2 = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let mut plain = SpyBackend { reply: "多云。".into(), seen: seen2.clone() };
@@ -2074,6 +2124,14 @@ mod tests {
         let sys0b = seen2.lock().unwrap()[0].clone();
         assert!(!sys0b.contains("memory_search"), "no hint without the tool");
         assert!(!wk.trace_ref().contains("recall-pin"));
+        // 人格按需注入：pass-1 无人格；直答草稿的人格润色轮带人格。
+        assert!(!sys0b.contains("人格宪法"), "protocol round must be persona-free: {sys0b}");
+        let seen2_all = seen2.lock().unwrap();
+        assert!(seen2_all.len() >= 2, "direct answer must trigger the persona round");
+        assert!(
+            seen2_all[1].contains("人格宪法") && seen2_all[1].contains("【草稿】"),
+            "persona round restyles the draft: {}", seen2_all[1]
+        );
     }
 
     /// Forced fallback (2026-11-21): the model answered 「没有记录」 in prose
