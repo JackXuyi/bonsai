@@ -17,7 +17,12 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use super::clock;
 
-pub(crate) const SCHEMA_VERSION: i64 = 9;
+/// SCHEMA_VERSION = 10（2026-11-21）：turn_trace 补 user_text/reply_text 列。
+/// 上一版 v9 build 已在旧库建过 turn_trace（无这两列），CREATE TABLE IF NOT
+/// EXISTS 不会给已有表加列；v9→v9 不触发 migrate，INSERT 带 user_text 直接
+/// 报 "table turn_trace has no column named user_text"。教训：改 SCHEMA 必
+/// 须同时 bump 此版本号。
+pub(crate) const SCHEMA_VERSION: i64 = 10;
 
 /// Test-only: materialise the full schema on a bare in-memory connection.
 /// Other modules' tests build their own `Connection::open_in_memory()` and
@@ -269,6 +274,8 @@ CREATE TABLE IF NOT EXISTS turn_trace (
     tool_label         TEXT,           -- 'builtin:x' | 'mcp:x' | 'skill:x' | 'calendar:action'
     filter_report      TEXT,           -- JSON: {"unconditional_affirmation","hedged","explicit"}
     duration_ms        INTEGER,
+    user_text          TEXT,           -- 用户原文（摘要卡显示；proactive 为 NULL）
+    reply_text         TEXT,           -- 过滤后的最终回复（摘要卡显示）
     ts                 TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_turn_trace_user ON turn_trace(user_event_id);
@@ -358,6 +365,10 @@ pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         add_column_if_missing(conn, "tool_calls", "result_status", "TEXT")?;
         add_column_if_missing(conn, "tool_calls", "prompt_trace", "TEXT")?;
         add_column_if_missing(conn, "tool_calls", "remote", "INTEGER DEFAULT 0")?;
+        // v9 trace tables + summary columns (spec-s8; additive on DBs that
+        // already created the tables in an earlier v9 build).
+        add_column_if_missing(conn, "turn_trace", "user_text", "TEXT")?;
+        add_column_if_missing(conn, "turn_trace", "reply_text", "TEXT")?;
     }
 
     set_user_version(conn, SCHEMA_VERSION)?;
@@ -1694,6 +1705,8 @@ pub struct TraceTurnDraft {
     pub tool_label: Option<String>,
     pub filter_report: Option<String>,
     pub duration_ms: Option<i64>,
+    pub user_text: Option<String>,
+    pub reply_text: Option<String>,
     pub steps: Vec<TraceStepDraft>,
 }
 
@@ -1726,6 +1739,8 @@ pub struct TurnTraceRow {
     pub tool_label: Option<String>,
     pub filter_report: Option<String>,
     pub duration_ms: Option<i64>,
+    pub user_text: Option<String>,
+    pub reply_text: Option<String>,
     pub ts: String,
     pub steps: Vec<TraceStepRow>,
 }
@@ -1744,8 +1759,8 @@ pub fn trace_turn_persist(
     tx.execute(
         "INSERT INTO turn_trace
            (session_id, user_event_id, assistant_event_id, kind, model_used,
-            tool_label, filter_report, duration_ms, ts)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            tool_label, filter_report, duration_ms, user_text, reply_text, ts)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             turn.session_id,
             user_event_id,
@@ -1755,6 +1770,8 @@ pub fn trace_turn_persist(
             turn.tool_label,
             turn.filter_report,
             turn.duration_ms,
+            turn.user_text,
+            turn.reply_text,
             clock::now_iso(),
         ],
     )?;
@@ -1788,7 +1805,8 @@ pub fn turn_trace_get(conn: &Connection, turn_id: i64) -> rusqlite::Result<Optio
     let turn = conn
         .query_row(
             "SELECT id, session_id, user_event_id, assistant_event_id, kind,
-                    model_used, tool_label, filter_report, duration_ms, ts
+                    model_used, tool_label, filter_report, duration_ms,
+                    user_text, reply_text, ts
              FROM turn_trace WHERE id = ?1",
             params![turn_id],
             |r| {
@@ -1802,7 +1820,9 @@ pub fn turn_trace_get(conn: &Connection, turn_id: i64) -> rusqlite::Result<Optio
                     tool_label: r.get(6)?,
                     filter_report: r.get(7)?,
                     duration_ms: r.get(8)?,
-                    ts: r.get(9)?,
+                    user_text: r.get(9)?,
+                    reply_text: r.get(10)?,
+                    ts: r.get(11)?,
                     steps: Vec::new(),
                 })
             },
@@ -2550,6 +2570,8 @@ mod tests {
             tool_label: Some("builtin:memory_search".into()),
             filter_report: Some(r#"{"explicit":false,"hedged":false}"#.into()),
             duration_ms: Some(1234),
+            user_text: Some("帮我看看明天安排".into()),
+            reply_text: Some("明天上午有两条".into()),
             steps: vec![
                 TraceStepDraft {
                     step_kind: "crisis_check".into(),

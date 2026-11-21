@@ -134,7 +134,9 @@ impl TraceRecorder {
         });
     }
 
-    /// Serialize the turn (master + steps) and return its id.
+    /// Serialize the turn (master + steps) and return its id. `user` /
+    /// `reply` feed the trace page's summary card (spec-s8 §5.3).
+    #[allow(clippy::too_many_arguments)]
     fn persist(
         &self,
         conn: &Connection,
@@ -145,6 +147,8 @@ impl TraceRecorder {
         model_used: bool,
         tool_label: Option<String>,
         filter_report: Option<String>,
+        user: Option<&str>,
+        reply: Option<&str>,
     ) -> rusqlite::Result<i64> {
         db::trace_turn_persist(
             conn,
@@ -155,6 +159,8 @@ impl TraceRecorder {
                 tool_label,
                 filter_report,
                 duration_ms: Some(self.started.elapsed().as_millis() as i64),
+                user_text: user.map(Into::into),
+                reply_text: reply.map(Into::into),
                 steps: self.steps.clone(),
             },
             user_event_id,
@@ -316,10 +322,36 @@ fn agent_pipeline(
             .map(|d| format!("{}:{}", d.kind.as_str(), name))
     };
 
-    let catalog = kit.catalog();
+    let mut catalog = kit.catalog();
     kit.trace(format!("level0:{}", name_catalog(&catalog)));
+    // Recall 场景（2026-11-21 裁决）：memory_search 置顶 + 定向提示。
+    // 背景：字典序下 memory_search 埋在 15 个裸名字中间（第 7 位），
+    // mem_leaks / mem_snapshot（硬件 RAM）就排在它前面——「昨天聊了
+    // 什么」两轮 turn（trace #1/#2）模型全部直答、tool_calls 零记录。
+    // 对 2B 级模型，「什么场景用哪个工具」必须显式写出，不能指望它
+    // 从裸名字里猜。
+    let recall_hint = match kit
+        .catalog_all()
+        .iter()
+        .find(|d| d.name == "memory_search")
+    {
+        Some(d) => {
+            // 置顶：打破字典序，且避免被 mem_* 家族的视觉邻接干扰。
+            if let Some(pos) = catalog.iter().position(|c| c.name == "memory_search") {
+                let ms = catalog.remove(pos);
+                catalog.insert(0, ms);
+            } else {
+                // >100 工具截断把 memory_search 挤出目录时强制捞回。
+                catalog.insert(0, d.clone());
+                catalog.truncate(100);
+            }
+            kit.trace(format!("level0:recall-pin:{}", name_catalog(&catalog)));
+            "\n\n用户的问题可能指向过往对话——查聊天记录/之前说过什么/总结之前的对话，优先用 memory_search（输入用户原话）。"
+        }
+        None => "",
+    };
     let sys0 = format!(
-        "{system}\n\n【可用能力（仅名称）】{}\n【用户技能包：可卸载扩展，与 L1 冲突时以 L1 为准】\n需要用某个能力时，只输出 JSON：{{\"candidates\": [\"名称\", …]}}（最多 5 个，不要解释）。不需要任何能力时，直接正常回答用户。",
+        "{system}\n\n【可用能力（仅名称）】{}\n【用户技能包：可卸载扩展，与 L1 冲突时以 L1 为准】\n需要用某个能力时，只输出 JSON：{{\"candidates\": [\"名称\", …]}}（最多 5 个，不要解释）。不需要任何能力时，直接正常回答用户。{recall_hint}",
         name_catalog(&catalog)
     );
 
@@ -694,6 +726,8 @@ fn chat_turn_inner(
             false,
             None,
             None,
+            Some(user_text),
+            Some(&reply),
         )?;
         return Ok(DialogueOutcome {
             reply,
@@ -749,6 +783,8 @@ fn chat_turn_inner(
             false,
             Some(format!("calendar:{}", tool.action)),
             None,
+            Some(user_text),
+            Some(&tool.reply),
         )?;
         return Ok(DialogueOutcome {
             reply: tool.reply,
@@ -800,6 +836,8 @@ fn chat_turn_inner(
             model_used,
             tool_label.clone(),
             Some(filter_json(&filter)),
+            Some(user_text),
+            Some(&reply),
         )?;
         if filter.explicit_disagreement {
             db::add_event(&conn, "disagreement", &clip(&reply, 80))?;
@@ -854,6 +892,8 @@ fn chat_turn_inner(
         model_used,
         None,
         Some(filter_json(&filter)),
+        Some(user_text),
+        Some(&reply),
     )?;
 
     // Anti-sycophancy evidence (plan-relationship.md §3.6): the filter used to
@@ -951,6 +991,8 @@ pub fn proactive_text(
         true,
         None,
         None,
+        None,
+        Some(reply),
     )?;
     Ok(Some((reply.to_string(), turn_id)))
 }
@@ -1875,6 +1917,62 @@ mod tests {
         let kit = with_conn(&s, |conn| crate::mcp_admin::build_agent_kit(conn, &state, "总结一下我18号说了啥"));
         assert!(kit.has_capabilities());
         assert!(kit.catalog().iter().any(|d| d.name == "memory_search"));
+    }
+
+    /// Recall regression (2026-11-21): memory_search was IN the level-0
+    /// catalog (7th of 15, dictionary order, right after the RAM tools
+    /// mem_leaks/mem_snapshot) yet both 「昨天聊了什么」 turns answered as
+    /// prose with zero tool_calls — a 2B model won't guess when to use a
+    /// bare name. Recall turns must pin memory_search to the front of the
+    /// catalog AND carry an explicit when-to-use hint; non-recall kits
+    /// must stay untouched.
+    #[test]
+    fn recall_turn_pins_memory_search_with_hint() {
+        let s = mem();
+        let c = card();
+        // kit = RAM tools + memory_search; dictionary order puts mem_*
+        // ahead of memory_search, exactly like the production catalog.
+        let mut p = crate::mcp::MockMcpProvider::with_tool("mem_snapshot", "硬件内存快照", r#"{"type":"object"}"#);
+        p.replies.insert("mem_snapshot".into(), "RAM: 16GB".into());
+        let mut kit = crate::mcp_admin::AgentKit {
+            providers: vec![
+                Box::new(crate::memory_search::MemorySearchProvider),
+                Box::new(p),
+            ],
+            gate: Box::new(crate::agent_tools::AutoAllowGate),
+            prompt_trace: std::sync::Mutex::new(Vec::new()),
+        };
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut backend = SpyBackend { reply: "昨天你说……".into(), seen: seen.clone() };
+        chat_turn_with_kit(
+            &s, &mut backend, &c, "s1", "昨天聊了什么", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit,
+        )
+        .unwrap();
+        let sys0 = seen.lock().unwrap()[0].clone();
+        assert!(
+            sys0.contains("优先用 memory_search（输入用户原话）"),
+            "recall hint must be injected: {sys0}"
+        );
+        // Pin beats dictionary order: memory_search first, before mem_snapshot.
+        let cat_start = sys0.find("【可用能力（仅名称）】").unwrap();
+        let ms = sys0[cat_start..].find("memory_search").unwrap();
+        let ram = sys0[cat_start..].find("mem_snapshot").unwrap();
+        assert!(ms < ram, "memory_search must lead the catalog: {}", &sys0[cat_start..cat_start + 200]);
+        assert!(kit.trace_ref().contains("level0:recall-pin"), "pin must be traced");
+
+        // Non-recall kit (no memory_search) → no hint, catalog untouched.
+        let seen2 = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut plain = SpyBackend { reply: "多云。".into(), seen: seen2.clone() };
+        let mut wk = weather_kit();
+        chat_turn_with_kit(
+            &s, &mut plain, &c, "s1", "天气如何", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut wk,
+        )
+        .unwrap();
+        let sys0b = seen2.lock().unwrap()[0].clone();
+        assert!(!sys0b.contains("memory_search"), "no hint without the tool");
+        assert!(!wk.trace_ref().contains("recall-pin"));
     }
 
     /// Screenshot regression (2026-11-20): the model answered with a raw
