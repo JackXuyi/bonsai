@@ -311,7 +311,9 @@ fn summarize_tool_result(
 ) -> rusqlite::Result<(String, Option<String>, bool)> {
     let sys2 = summary_round_prompt(base_sys, name, &out.summary);
     kit.trace("level3:answered".into());
-    rec.tool_call(name, args_text, &out.summary, "ok", None, tool_dur);
+    // trace 存 full 而非 summary（2026-11-21 用户裁决：工具 trace 数据一律
+    // JSON，/trace 页结构化渲染）；spec D1 本就是 FULL TEXT 留痕语义。
+    rec.tool_call(name, args_text, &out.full, "ok", None, tool_dur);
     // Third JSON-leak guard (2026-11-20 regression trio): the
     // model can echo its own pass-2 decision JSON instead of
     // prose. Streaming deltas are IRRETRACTABLE, so the sink

@@ -36,8 +36,6 @@ const SUMMARY_LINE_CHARS: usize = 100;
 /// dialogue to summarize a day. Content is local user-authored text, so a
 /// wider window is safe; `full` stays the folded complete view for the UI.
 const SUMMARY_TOTAL_CHARS: usize = 1600;
-/// Per-line clip in the frontend `full` text.
-const FULL_LINE_CHARS: usize = 200;
 
 // ---------------------------------------------------------------- intent gate
 
@@ -397,10 +395,13 @@ fn recall_with_keywords(
     // no keywords → the whole window. Legs are pre-quoted literals built
     // from keyword segments whose ASCII punctuation was stripped, so the
     // string assembly cannot turn into SQL injection.
+    // DESC + Rust-side reverse (2026-11-21 方案A)：ASC 让旧对话先填满
+    // LIMIT 配额——最近一周窗口里 11-20/21 的对话被 11-18/19 旧数据整体
+    // 挤出。回忆类问题的重点恰恰是最近，倒序取满再反排回时间正序。
     let sql = if kws.is_empty() {
         "SELECT ts, role, content FROM events
          WHERE kind = 'dialogue' AND role IN ('user', 'assistant')
-           AND ts >= ?1 AND ts < ?2 ORDER BY id ASC LIMIT ?3"
+           AND ts >= ?1 AND ts < ?2 ORDER BY id DESC LIMIT ?3"
             .to_string()
     } else {
         let legs: Vec<String> = kws
@@ -410,7 +411,7 @@ fn recall_with_keywords(
         format!(
             "SELECT ts, role, content FROM events
              WHERE kind = 'dialogue' AND role IN ('user', 'assistant')
-               AND ts >= ?1 AND ts < ?2 AND ({}) ORDER BY id ASC LIMIT ?3",
+               AND ts >= ?1 AND ts < ?2 AND ({}) ORDER BY id DESC LIMIT ?3",
             legs.join(" OR ")
         )
     };
@@ -432,6 +433,7 @@ fn recall_with_keywords(
             }
         }
     }
+    lines.reverse();
 
     // Facts learned in the window (report §4.2: what was *learned* that day).
     let mut facts = Vec::new();
@@ -468,6 +470,8 @@ impl Recall {
     }
 
     /// What the model summarizes from (see the SUMMARY_* notes above).
+    /// Deliberately NOT JSON: the consumer is the 2B model reading prose —
+    /// escaped JSON hurts more than the fixed `[ts who] text` line shape.
     fn summary(&self) -> String {
         if self.lines.is_empty() && self.facts.is_empty() {
             return format!("{}没有找到对话记录。", self.window_label);
@@ -475,9 +479,21 @@ impl Recall {
         crate::agent_tools::clip_chars(&self.render(SUMMARY_LINE_CHARS), SUMMARY_TOTAL_CHARS)
     }
 
-    /// Folded complete view for the frontend.
+    /// Machine-readable view for the /trace page (2026-11-21 用户裁决:
+    /// 工具 trace 数据一律 JSON，前端结构化渲染;模型侧 summary 保持行式).
     fn full(&self) -> String {
-        self.render(FULL_LINE_CHARS)
+        serde_json::json!({
+            "window": self.window_label,
+            "dialogue_count": self.lines.len(),
+            "fact_count": self.facts.len(),
+            "lines": self.lines.iter().map(|(ts, who, text)| serde_json::json!({
+                "ts": ts,
+                "who": who,
+                "text": text,
+            })).collect::<Vec<_>>(),
+            "facts": self.facts,
+        })
+        .to_string()
     }
 }
 
@@ -684,7 +700,12 @@ mod tests {
             })
             .unwrap();
         assert!(out.summary.contains("盆栽的形态"));
-        assert!(out.full.contains("聊了盆栽的形态"));
+        // full 是 JSON（/trace 结构化渲染），行文本在 lines[].text 里
+        let parsed: serde_json::Value = serde_json::from_str(&out.full).expect("full must be JSON");
+        assert_eq!(parsed["window"], "11月18日（周三）");
+        assert_eq!(parsed["dialogue_count"], 1);
+        assert_eq!(parsed["lines"][0]["who"], "用户");
+        assert_eq!(parsed["lines"][0]["text"], "聊了盆栽的形态");
 
         // 缺 args → 仍给出最近一周的诚实结果，不报错
         let out2 = p
@@ -785,5 +806,9 @@ mod tests {
         let s = r.summary();
         assert!(s.chars().count() <= SUMMARY_TOTAL_CHARS);
         assert!(s.starts_with("【11月18日"));
+        // 倒序取（2026-11-21 方案A）：100 条中保住的是最近的 60 条，
+        // 第 99 条（最新）必须在、第 0 条（最旧）必须被挤出。
+        assert!(r.lines.iter().any(|(_, _, c)| c.contains("第99条")), "keep the newest: {:?}", r.lines.first());
+        assert!(!r.lines.iter().any(|(_, _, c)| c.contains("第0条")), "drop the oldest");
     }
 }
