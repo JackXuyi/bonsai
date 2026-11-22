@@ -512,7 +512,7 @@ pub fn prompts(kind: SummaryKind, base_system: &str, contract: &str, d: &Digest)
     );
     user.push_str(match kind {
         SummaryKind::Daily => {
-            "请按契约写今天的日报。一段话，别用列表。素材里没写的事不要编。"
+            "请按契约写这一天的日报。一段话，别用列表。指代这段时间要用上面的具体日期（如「11-20」），不许说「今天」。素材里没写的事不要编。"
         }
         SummaryKind::Weekly => {
             "请按契约写这周的周总结。四段以内，不要按天流水账。素材里没写的事不要编。"

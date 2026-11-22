@@ -1153,16 +1153,30 @@ fn summary_turn(
     mut on_delta: Option<&mut dyn FnMut(&str)>,
 ) -> rusqlite::Result<DialogueOutcome> {
     let now = crate::memory::clock::now_local();
+    rec.simple("summary_intent", "总结意图路由", kind.action(), None);
     let (digest, system, prompt) = {
         let conn = lock_conn(store)?;
         // 「20 日的日报」这类带具体日期的请求按那个日期开窗，不是永远今天。
         let w = crate::summary::resolve_window(user_text, kind, now);
         let d = crate::summary::collect_in(&conn, kind, w);
+        // 素材召回是流程第 2 步（memory_search 整窗召回），必须在 trace
+        // 里可见——窗口是几号、召回了多少，否则「没调工具」的观感就是
+        // 黑箱。窗口与计数进 output，原文永不落 trace。
+        rec.simple(
+            "summary_material",
+            "素材召回（memory_search）",
+            &format!(
+                "{} · 对话 {} 条 · 新记忆 {} 件",
+                d.window.describe(),
+                d.dialogue.len(),
+                d.facts.len()
+            ),
+            None,
+        );
         let contract = crate::summary::contract(kind, packs);
         let (s, u) = crate::summary::prompts(kind, base_system, &contract, &d);
         (d, s, u)
     };
-    rec.simple("summary_intent", "总结意图路由", kind.action(), None);
 
     let mut model_used = false;
     let text = if digest.is_empty() {
@@ -1686,6 +1700,23 @@ mod tests {
         })
         .expect("trace exists");
         assert!(turn.steps.iter().any(|st| st.step_kind == "summary_intent"));
+        // 流程第 2 步（memory_search 整窗召回）必须在 trace 可见，带窗口
+        // 与计数；原文不落 trace。
+        let material = turn
+            .steps
+            .iter()
+            .find(|st| st.step_kind == "summary_material")
+            .expect("material recall step");
+        assert!(material
+            .outcome
+            .as_deref()
+            .unwrap_or("")
+            .contains("对话 1 条"));
+        assert!(!material
+            .output
+            .as_deref()
+            .unwrap_or("")
+            .contains("供应商 SOP"));
 
         // One audit row for the summary tool, counts only.
         let (n, detail): (i64, Option<String>) = with_conn(&s, |conn| {
