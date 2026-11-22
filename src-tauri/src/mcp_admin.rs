@@ -685,6 +685,17 @@ pub fn build_agent_kit(conn: &Connection, state: &AgentState, user_text: &str) -
         providers.push(Box::new(crate::memory_search::MemorySearchProvider));
     }
 
+    // P3-2 文件工具（plan-files.md §3.5）：总开关开 + roots 非空才挂载。
+    // 空授权 = provider 不进 kit = tools[] 里模型根本看不到 fs_*——
+    // 「最小授权」在挂载层生效，而不是执行层报错。
+    if crate::filetools::fs_enabled(conn) {
+        let roots = crate::filetools::load_roots(conn);
+        if !roots.is_empty() {
+            let cloud_read = crate::filetools::cloud_read_enabled(conn);
+            providers.push(Box::new(crate::filetools::FileToolsProvider::new(roots, cloud_read)));
+        }
+    }
+
     // Skills first (prompt-only), then MCP tools — catalog order is stable
     // either way (sorted by name in AgentKit::catalog).
     // Engine packs are loaded separately and handed to summary.rs: they must

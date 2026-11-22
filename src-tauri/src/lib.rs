@@ -306,6 +306,10 @@ pub fn run() {
             mcp_admin::mcp_approval_reply,
             mcp_admin::agent_approval_get,
             mcp_admin::agent_approval_set,
+            filetools::fs_status,
+            filetools::fs_set_config,
+            filetools::fs_root_add,
+            filetools::fs_root_remove,
         ])
         .build(tauri::generate_context!())
         .expect("error while running bonsai")

@@ -644,17 +644,24 @@ mod tests {
         conn
     }
 
-    /// Registry single-source: `agent_tools::builtin_tools` must equal what
-    /// the provider mounts, so the settings page and the model agree.
+    /// Registry single-source: `agent_tools::builtin_tools` is exactly what
+    /// the built-in providers mount, so the settings page and the model agree.
     #[test]
     fn builtin_registry_matches_provider() {
         let reg = crate::agent_tools::builtin_tools();
-        assert_eq!(reg, vec![builtin_descriptor()]);
-        assert_eq!(reg.len(), 1);
-        assert_eq!(reg[0].name, "memory_search");
-        assert_eq!(reg[0].kind, ToolKind::Builtin);
-        assert!(!reg[0].remote);
-        assert!(MemorySearchProvider.descriptors() == reg);
+        // P3-2 起 registry = memory_search(1) + filetools(4)。fs 工具在
+        // 设置页常显，但 provider 只在 roots 非空时挂载（filetools 单测覆盖）。
+        assert_eq!(reg, [vec![builtin_descriptor()], crate::filetools::builtin_descriptors()].concat());
+        let ms = &reg[0];
+        assert_eq!(ms.name, "memory_search");
+        assert_eq!(ms.kind, ToolKind::Builtin);
+        assert!(!ms.remote);
+        assert!(MemorySearchProvider.descriptors() == vec![builtin_descriptor()]);
+        // 注册表无重名
+        let mut names: Vec<_> = reg.iter().map(|d| d.name.clone()).collect();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), reg.len());
     }
 
     /// Raw insert with an explicit UTC ts (add_event stamps the pinned clock,

@@ -41,7 +41,12 @@ impl ToolKind {
 /// Each entry delegates to its owning module's `builtin_descriptor` (one
 /// definition per tool, referenced here — not duplicated).
 pub fn builtin_tools() -> Vec<ToolDescriptor> {
-    vec![crate::memory_search::builtin_descriptor()]
+    let mut tools = vec![crate::memory_search::builtin_descriptor()];
+    // P3-2 文件工具（plan-files.md）：descriptor 单源在 filetools 模块。
+    // 注意：设置页常显这四个条目（让用户知道能力存在），但 provider 只在
+    // 总开关开且 roots 非空时才挂载（见 mcp_admin::build_agent_kit）。
+    tools.extend(crate::filetools::builtin_descriptors());
+    tools
 }
 
 /// 权限三档（plan-task-card v0.2 §6，roadmap G-10）：只读直行、写操作
