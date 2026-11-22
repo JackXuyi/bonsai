@@ -419,6 +419,10 @@ pub struct AgentKit {
     /// `tool_calls.task_id`。本地/无任务路径恒 None。
     pub task_id: Mutex<Option<String>>,
     pub prompt_trace: Mutex<Vec<String>>,
+    /// 引擎型 skill 包（plan-summary-skill）：summary.rs 在命中总结意图时
+    /// 定向取用。它们不进 `providers`——两个包会占满 SIMULTANEOUS_SKILLS，
+    /// 把用户自己的 skill 挤掉。
+    pub engine_skills: Vec<crate::skill::SkillPack>,
 }
 
 impl AgentKit {
@@ -429,6 +433,7 @@ impl AgentKit {
             ask_gate: Box::new(AskFirstGate::new(Arc::new(ApprovalBroker::default()), None)),
             task_id: Mutex::new(None),
             prompt_trace: Mutex::new(Vec::new()),
+            engine_skills: Vec::new(),
         }
     }
 
@@ -682,12 +687,19 @@ pub fn build_agent_kit(conn: &Connection, state: &AgentState, user_text: &str) -
 
     // Skills first (prompt-only), then MCP tools — catalog order is stable
     // either way (sorted by name in AgentKit::catalog).
+    // Engine packs are loaded separately and handed to summary.rs: they must
+    // never enter the generic skill section (two of them fill the whole
+    // SIMULTANEOUS_SKILLS budget). Two `stat`s when absent, so the common
+    // path stays cheap.
+    let engine_skills = crate::skill::load_engine_packs(&state.skills_dir);
+
     let enabled = crate::skill::enabled_ids(db::get_setting(conn, "skill_enabled").ok().flatten());
     if !enabled.is_empty() {
         let packs: Vec<crate::skill::SkillPack> = crate::skill::scan_skills(&state.skills_dir)
             .into_iter()
             .filter_map(|r| r.ok())
             .filter(|p| enabled.iter().any(|id| id == &p.id))
+            .filter(|p| !crate::skill::is_engine_pack(&p.id))
             .collect();
         if !packs.is_empty() {
             providers.push(Box::new(crate::skill::SkillProvider { packs }));
@@ -728,7 +740,7 @@ pub fn build_agent_kit(conn: &Connection, state: &AgentState, user_text: &str) -
     let ask_gate: Box<dyn ApprovalGate> =
         Box::new(AskFirstGate::new(state.approvals.clone(), state.app.clone()));
 
-    AgentKit { providers, gate, ask_gate, task_id: Mutex::new(None), prompt_trace: Mutex::new(Vec::new()) }
+    AgentKit { providers, gate, ask_gate, task_id: Mutex::new(None), prompt_trace: Mutex::new(Vec::new()), engine_skills }
 }
 
 /// One-at-a-time approval handshake (spec-s4): the chat turn reserves a slot
@@ -1346,6 +1358,7 @@ pub(crate) mod tests {
             gate: Box::new(crate::agent_tools::AutoAllowGate),
             ask_gate: Box::new(AskFirstGate::new(std::sync::Arc::new(ApprovalBroker::default()), None)),
             task_id: Mutex::new(None),            prompt_trace: Mutex::new(Vec::new()),
+            ..AgentKit::empty()
         };
         kit.trace("round1:candidates=1".into());
         let out = execute_audited(
@@ -1376,6 +1389,7 @@ pub(crate) mod tests {
             gate: Box::new(crate::agent_tools::AutoAllowGate),
             ask_gate: Box::new(AskFirstGate::new(std::sync::Arc::new(ApprovalBroker::default()), None)),
             task_id: Mutex::new(None),            prompt_trace: Mutex::new(Vec::new()),
+            ..AgentKit::empty()
         };
         let err = execute_audited(&s, &kit_broken, "weather", serde_json::json!({})).unwrap_err();
         assert_eq!(err, crate::mcp::ERR_TIMEOUT);
@@ -1399,6 +1413,7 @@ pub(crate) mod tests {
             gate: Box::new(crate::agent_tools::AutoAllowGate),
             ask_gate: Box::new(AskFirstGate::new(std::sync::Arc::new(ApprovalBroker::default()), None)),
             task_id: Mutex::new(None),            prompt_trace: Mutex::new(Vec::new()),
+            ..AgentKit::empty()
         };
 
         // missing required → rejected, provider never called.
@@ -1515,6 +1530,7 @@ pub(crate) mod tests {
             gate: Box::new(crate::agent_tools::AutoAllowGate),
             ask_gate: Box::new(AskFirstGate::new(std::sync::Arc::new(ApprovalBroker::default()), None)),
             task_id: Mutex::new(None),            prompt_trace: Mutex::new(Vec::new()),
+            ..AgentKit::empty()
         };
         let names: Vec<String> = kit.catalog().into_iter().map(|d| d.name).collect();
         assert_eq!(names, vec!["alpha".to_string(), "zebra".to_string()]);
@@ -1543,6 +1559,7 @@ pub(crate) mod tests {
             gate: Box::new(crate::agent_tools::AutoAllowGate),
             ask_gate: Box::new(AskFirstGate::new(std::sync::Arc::new(ApprovalBroker::default()), None)),
             task_id: Mutex::new(None),            prompt_trace: Mutex::new(Vec::new()),
+            ..AgentKit::empty()
         }
     }
 
@@ -1580,6 +1597,7 @@ pub(crate) mod tests {
             gate: Box::new(crate::agent_tools::AutoAllowGate),
             ask_gate: Box::new(AllowAllGate),
             task_id: Mutex::new(None),            prompt_trace: Mutex::new(Vec::new()),
+            ..AgentKit::empty()
         };
         let out = execute_audited(&s, &kit, "send_mail", serde_json::json!({})).unwrap();
         assert_eq!(out.summary, "已执行");

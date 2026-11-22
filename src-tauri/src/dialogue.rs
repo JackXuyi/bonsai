@@ -977,6 +977,20 @@ fn chat_turn_inner(
         (s, h)
     };
 
+    // 总结意图（plan-summary-skill）：规则命中就接管这一轮——素材由 Rust
+    // 聚合，模型只负责成文；模型挂了还有确定性回落，所以本地/云端同一条
+    // 路，不需要工具调用能力。放在日历路由之后：tools.rs 的排除词已经把
+    // 「总结」类句子让出来了。
+    if let Some(kind) = crate::summary::intent(user_text) {
+        let packs: &[crate::skill::SkillPack] = kit
+            .as_deref()
+            .map(|k| k.engine_skills.as_slice())
+            .unwrap_or(&[]);
+        return summary_turn(
+            store, backend, session_id, user_text, kind, packs, &system, &mut rec, on_delta,
+        );
+    }
+
     // 工具调用（plan-task-card v0.2 §2 分流）：kit 有能力时分两条路——
     // 云端传输 → 原生 function calling 循环；本地传输 → 零模型工具调用
     // （recall 代码路由 + 直答）。Anything it returns is final for the
@@ -1115,6 +1129,105 @@ fn chat_turn_inner(
         model_used,
         crisis: false,
         tool: None,
+        task: None,
+        turn_id: Some(turn_id),
+    })
+}
+
+/// 总结模式温度：比对话低一档——总结要贴着素材，不需要发挥。
+const SUMMARY_TEMPERATURE: f64 = 0.4;
+
+/// 一轮总结（plan-summary-skill）。素材在锁内聚合，模型调用在锁外（可能
+/// 十几秒），结果照常落库并进 trace。素材为空时不叫模型：没有事实可依据
+/// 的总结只能是编造。
+#[allow(clippy::too_many_arguments)]
+fn summary_turn(
+    store: &MemoryStore,
+    backend: &mut dyn DialogueBackend,
+    session_id: &str,
+    user_text: &str,
+    kind: crate::summary::SummaryKind,
+    packs: &[crate::skill::SkillPack],
+    base_system: &str,
+    rec: &mut TraceRecorder,
+    mut on_delta: Option<&mut dyn FnMut(&str)>,
+) -> rusqlite::Result<DialogueOutcome> {
+    let now = crate::memory::clock::now_local();
+    let (digest, system, prompt) = {
+        let conn = lock_conn(store)?;
+        let d = crate::summary::collect(&conn, kind, now);
+        let contract = crate::summary::contract(kind, packs);
+        let (s, u) = crate::summary::prompts(kind, base_system, &contract, &d);
+        (d, s, u)
+    };
+    rec.simple("summary_intent", "总结意图路由", kind.action(), None);
+
+    let mut model_used = false;
+    let text = if digest.is_empty() {
+        crate::summary::empty_text(kind)
+    } else {
+        let t = std::time::Instant::now();
+        let raw = match on_delta.as_deref_mut() {
+            Some(cb) => backend.reply_streaming(&system, &[], &prompt, SUMMARY_TEMPERATURE, cb),
+            None => backend.reply(&system, &[], &prompt, SUMMARY_TEMPERATURE),
+        };
+        rec.llm_round("总结成文", &system, &raw, "answered", t.elapsed());
+        model_used = !raw.trim().is_empty();
+        if model_used {
+            raw.trim().to_string()
+        } else {
+            crate::summary::fallback(&digest)
+        }
+    };
+    // 流式路径下模型可能什么都没吐（挂了）——回落文本要补发一次，否则
+    // 气泡一直是空的。
+    if !model_used {
+        if let Some(cb) = on_delta.as_deref_mut() {
+            cb(&text);
+        }
+    }
+
+    let filter = generation::filter(&text);
+    rec.simple("filter", "反谄媚过滤", "pass", None);
+    let tool = format!("builtin:{}", kind.action());
+    let conn = lock_conn(store)?;
+    // 总结也记一次工具使用：调用记录页可见，周报的「用过工具」也有据。
+    // detail 只放计数，不放内容。
+    let _ = db::log_tool_call(
+        &conn,
+        "summary",
+        kind.action(),
+        "ok",
+        Some(&format!(
+            "turns={} facts={}",
+            digest.turns.len(),
+            digest.facts.len()
+        )),
+        None,
+    );
+    let user_id =
+        db::add_event_meta(&conn, "dialogue", user_text, Some("user"), Some(session_id))?;
+    let asst_id = db::add_event_meta(&conn, "dialogue", &text, Some("assistant"), Some(session_id))?;
+    let turn_id = rec.persist(
+        &conn,
+        session_id,
+        Some(user_id),
+        Some(asst_id),
+        "model",
+        model_used,
+        Some(tool.clone()),
+        Some(filter_json(&filter)),
+        Some(user_text),
+        Some(&text),
+    )?;
+    // 总结不是立场表达：filter 报告照记，但不写 disagreement 事件——那是
+    // 关系线「顶嘴」的证据，总结里出现「不同意」字样不该算数。
+    Ok(DialogueOutcome {
+        reply: text,
+        filter,
+        model_used,
+        crisis: false,
+        tool: Some(tool),
         task: None,
         turn_id: Some(turn_id),
     })
@@ -1504,6 +1617,135 @@ mod tests {
         assert!(with_conn(&s, |conn| db::dialogue_history(conn, "s2", 6).unwrap()).is_empty());
     }
 
+    // ---- 总结意图（plan-summary-skill）-------------------------------
+
+    /// Deps-free backend that records what the model was actually told.
+    struct PromptSink {
+        seen: std::sync::Arc<std::sync::Mutex<(String, String)>>,
+        reply: String,
+    }
+
+    impl DialogueBackend for PromptSink {
+        fn reply(
+            &mut self,
+            system: &str,
+            _history: &[crate::persona::eval::Turn],
+            user: &str,
+            _t: f64,
+        ) -> String {
+            *self.seen.lock().unwrap() = (system.to_string(), user.to_string());
+            self.reply.clone()
+        }
+    }
+
+    #[test]
+    fn summary_intent_takes_the_turn_and_labels_the_tool() {
+        let s = mem();
+        let c = card();
+        with_conn(&s, |conn| {
+            db::add_event_meta(conn, "dialogue", "在调 GMP 供应商 SOP", Some("user"), Some("s1"))
+                .unwrap();
+        });
+        let seen = std::sync::Arc::new(std::sync::Mutex::new((String::new(), String::new())));
+        let mut backend = PromptSink {
+            seen: seen.clone(),
+            reply: "今天主要在弄供应商 SOP，签字那块又卡住了。".into(),
+        };
+        let out = chat_turn(
+            &s,
+            &mut backend,
+            &c,
+            "s1",
+            "总结一下今天",
+            20,
+            false,
+            crate::calendar::CalendarAccess::Denied,
+        )
+        .unwrap();
+
+        assert_eq!(out.tool.as_deref(), Some("builtin:daily_summary"));
+        assert!(out.model_used);
+        assert!(out.reply.contains("供应商 SOP"));
+
+        // Material reaches the model (user turn), the contract rides in the
+        // system turn — a 2B model follows a short user prompt far better.
+        let (system, user) = {
+            let g = seen.lock().unwrap();
+            (g.0.clone(), g.1.clone())
+        };
+        assert!(user.contains("GMP 供应商 SOP"), "material must be in the user prompt");
+        assert!(user.contains("不要编"), "no-fabrication rule must reach the model");
+        assert!(system.contains("总结模式"));
+        assert!(system.contains("输出契约"));
+
+        // The route is visible in the trace.
+        let turn = with_conn(&s, |conn| {
+            db::turn_trace_get(conn, out.turn_id.expect("turn id")).unwrap()
+        })
+        .expect("trace exists");
+        assert!(turn.steps.iter().any(|st| st.step_kind == "summary_intent"));
+
+        // One audit row for the summary tool, counts only.
+        let (n, detail): (i64, Option<String>) = with_conn(&s, |conn| {
+            conn.query_row(
+                "SELECT COUNT(*), MAX(detail) FROM tool_calls WHERE tool = 'summary'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+        });
+        assert_eq!(n, 1);
+        let detail = detail.unwrap_or_default();
+        assert!(detail.contains("turns=1"));
+        assert!(!detail.contains("GMP"), "audit detail never carries content");
+    }
+
+    #[test]
+    fn weekly_utterance_routes_to_the_weekly_tool() {
+        let s = mem();
+        let c = card();
+        let mut backend = MockBackend::new("这周都在收 SOP 的尾。");
+        let out = chat_turn(
+            &s,
+            &mut backend,
+            &c,
+            "s1",
+            "这周总结一下",
+            20,
+            false,
+            crate::calendar::CalendarAccess::Denied,
+        )
+        .unwrap();
+        assert_eq!(out.tool.as_deref(), Some("builtin:weekly_summary"));
+    }
+
+    #[test]
+    fn summary_with_no_material_never_touches_the_model() {
+        let s = mem();
+        let c = card();
+        // Dead transport: any model call would return empty, and the honest
+        // empty line must appear anyway (nothing to summarise is not a
+        // failure — it is the answer).
+        let mut backend = crate::persona::eval::LocalBackend::with_client(
+            std::sync::Arc::new(crate::llm::OllamaClient::new("http://127.0.0.1:1", "test")),
+            crate::llm::ClientKind::Ollama,
+        );
+        let out = chat_turn(
+            &s,
+            &mut backend,
+            &c,
+            "s1",
+            "总结一下今天",
+            9,
+            false,
+            crate::calendar::CalendarAccess::Denied,
+        )
+        .unwrap();
+        assert!(!out.model_used);
+        assert!(out.reply.contains("没有可总结的"));
+        assert_eq!(out.tool.as_deref(), Some("builtin:daily_summary"));
+    }
+
     /// Anti-sycophancy evidence (plan-relationship.md §3.6): the filter used
     /// to be report-only, so the relationship line could never count push-
     /// backs. Both shapes must land as events, and a plain reply must not.
@@ -1680,6 +1922,7 @@ mod tests {
             gate: Box::new(crate::agent_tools::AutoAllowGate),
             ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
             task_id: std::sync::Mutex::new(None),            prompt_trace: std::sync::Mutex::new(Vec::new()),
+            ..crate::mcp_admin::AgentKit::empty()
         }
     }
 
@@ -1888,6 +2131,7 @@ mod tests {
             gate: Box::new(crate::agent_tools::AutoAllowGate),
             ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
             task_id: std::sync::Mutex::new(None),            prompt_trace: std::sync::Mutex::new(Vec::new()),
+            ..crate::mcp_admin::AgentKit::empty()
         };
 
         // Crisis text with a skill enabled → still the fixed resource card,
@@ -1935,6 +2179,7 @@ mod tests {
             gate: Box::new(crate::agent_tools::AutoAllowGate),
             ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
             task_id: std::sync::Mutex::new(None),            prompt_trace: std::sync::Mutex::new(Vec::new()),
+            ..crate::mcp_admin::AgentKit::empty()
         };
         // 云端循环（v0.2 §7）：skill 全文进 system prompt（untrusted 声明），
         // 模型直接以 skill 内容作答——无执行环节，audit 记 answered。
@@ -1978,6 +2223,7 @@ mod tests {
             gate: Box::new(crate::agent_tools::AutoAllowGate),
             ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
             task_id: std::sync::Mutex::new(None),            prompt_trace: std::sync::Mutex::new(Vec::new()),
+            ..crate::mcp_admin::AgentKit::empty()
         };
         let (client, seen) = tool_client(vec![content_reply("直接用技能里的做法回答。")]);
         let mut backend =
@@ -2061,6 +2307,7 @@ mod tests {
                 None,
             )),
             task_id: std::sync::Mutex::new(None),            prompt_trace: std::sync::Mutex::new(Vec::new()),
+            ..crate::mcp_admin::AgentKit::empty()
         };
         let out = chat_turn_with_kit(
             &s, &mut backend, &c, "s1", "天气", 10, false,
@@ -2088,6 +2335,7 @@ mod tests {
             gate: Box::new(crate::agent_tools::AutoAllowGate),
             ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
             task_id: std::sync::Mutex::new(None),            prompt_trace: std::sync::Mutex::new(Vec::new()),
+            ..crate::mcp_admin::AgentKit::empty()
         }
     }
 
@@ -2205,6 +2453,7 @@ mod tests {
             gate: Box::new(crate::agent_tools::AutoAllowGate),
             ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
             task_id: std::sync::Mutex::new(None),            prompt_trace: std::sync::Mutex::new(Vec::new()),
+            ..crate::mcp_admin::AgentKit::empty()
         };
         let (client, seen) = tool_client(vec![
             tool_calls_reply(&[("weather", serde_json::json!({}))]),
@@ -2309,6 +2558,7 @@ mod tests {
             gate: Box::new(crate::agent_tools::AutoAllowGate),
             ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
             task_id: std::sync::Mutex::new(None),            prompt_trace: std::sync::Mutex::new(Vec::new()),
+            ..crate::mcp_admin::AgentKit::empty()
         };
         let mut backend = SeqBackend::new(&["（检索挂了，直答兜底。）"]);
         let out = chat_turn_with_kit(
@@ -2366,6 +2616,7 @@ mod tests {
             gate: Box::new(crate::agent_tools::AutoAllowGate),
             ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
             task_id: std::sync::Mutex::new(None),            prompt_trace: std::sync::Mutex::new(Vec::new()),
+            ..crate::mcp_admin::AgentKit::empty()
         };
         assert_eq!(kit.catalog().len(), 100);
         assert_eq!(kit.catalog_all().len(), 120);
