@@ -35,6 +35,10 @@ rmcp = { version = "3.11", features = [
 # Version-locked to rmcp's streamable-http-client-reqwest backend.
 http = "1"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+# P3-2 文件工具（plan-files.md §3.6）：授权目录用系统目录选择器，不接受
+# 手输路径（防注入任意路径）。AsyncFileDialog 在 Tauri 命令的 tokio 上下文
+# 里安全（macOS 走 NSOpenPanel 主线程派发）。
+rfd = "0.15"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 active-win-pos-rs = "0.9"

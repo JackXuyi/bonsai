@@ -6,6 +6,7 @@ import { ActionRow } from "./ActionRow";
 import { PersonaCard } from "./PersonaCard";
 import { PerceptionCard } from "./PerceptionCard";
 import { CalendarCard } from "./CalendarCard";
+import { FileCard } from "./FileCard";
 import { BoundaryCard } from "./BoundaryCard";
 import { RelationshipCard } from "./RelationshipCard";
 import { ToolResult } from "./ToolResult";
@@ -28,6 +29,7 @@ export function ToolsPane() {
       <PersonaCard />
       <PerceptionCard active />
       <CalendarCard active />
+      <FileCard active />
       <BoundaryCard active />
       <RelationshipCard />
       <ToolCallRecords />

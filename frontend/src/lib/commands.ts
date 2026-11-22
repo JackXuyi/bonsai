@@ -13,6 +13,7 @@ import type {
   DialogueOutcome,
   DialogueBubble,
   DiscoveredServer,
+  FsStatus,
   GrowthStatus,
   LlmConfigView,
   McpSaveInput,
@@ -101,6 +102,18 @@ export const calendarClearCache = () =>
   call<CalendarStatus>("calendar_clear_cache");
 export const calendarMuteToday = () => call<void>("calendar_mute_today");
 export const calendarOpenSettings = () => call<void>("calendar_open_settings");
+
+// ---------- filetools（P3-2，plan-files.md §3.6） ----------
+export const fsStatus = () => call<FsStatus>("fs_status");
+export const fsSetConfig = (opts: { enabled?: boolean; cloud_read?: boolean }) =>
+  call<FsStatus>("fs_set_config", opts);
+export const fsRootAdd = (path: string) =>
+  call<FsStatus>("fs_root_add", { path });
+export const fsRootRemove = (path: string) =>
+  call<FsStatus>("fs_root_remove", { path });
+/** 系统目录选择器；null = 用户取消。拿到路径后必须再走 fsRootAdd 校验。 */
+export const fsPickDirectory = () =>
+  call<string | null>("fs_pick_directory");
 
 // ---------- onboarding / boundaries ----------
 export const onboardingStatus = () => call<OnboardingStatus>("onboarding_status");

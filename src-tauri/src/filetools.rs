@@ -703,6 +703,18 @@ pub(crate) fn fs_root_remove_inner(conn: &Connection, path: &str) -> Result<(), 
     save_roots(conn, &roots)
 }
 
+/// 系统目录选择器（plan §3.6：不接受手输路径）。None = 用户取消。
+/// 前端拿到路径后必须再走 fs_root_add 做校验/去重/上限——这里只负责选。
+#[tauri::command]
+pub async fn fs_pick_directory() -> Result<Option<String>, String> {
+    let picked = rfd::AsyncFileDialog::new()
+        .set_title("选择允许阿盆读写的目录")
+        .pick_folder()
+        .await
+        .map(|handle| handle.path().display().to_string());
+    Ok(picked)
+}
+
 // ---------------------------------------------------------------- tests
 
 #[cfg(test)]

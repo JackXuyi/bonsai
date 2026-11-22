@@ -91,6 +91,13 @@ export interface CalendarRemindPayload {
   minutes_left: number;
 }
 
+/** P3-2 文件工具状态（src-tauri/src/filetools.rs FsStatus）。 */
+export interface FsStatus {
+  enabled: boolean;
+  roots: string[];
+  cloud_read: boolean;
+}
+
 // ── onboarding（onboarding.rs）────────────────────────────────
 export interface OnboardingQuestion {
   id: string;

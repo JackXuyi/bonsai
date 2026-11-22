@@ -310,6 +310,7 @@ pub fn run() {
             filetools::fs_set_config,
             filetools::fs_root_add,
             filetools::fs_root_remove,
+            filetools::fs_pick_directory,
         ])
         .build(tauri::generate_context!())
         .expect("error while running bonsai")
