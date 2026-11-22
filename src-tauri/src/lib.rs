@@ -16,6 +16,7 @@ pub mod debug;
 pub mod decision;
 pub mod dialogue;
 pub mod face;
+pub mod filetools;
 pub mod generation;
 pub mod llm;
 pub mod llm_admin;
