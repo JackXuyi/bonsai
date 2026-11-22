@@ -106,3 +106,17 @@ Iso 串供事件表（`events`/`tool_calls`），日期串供日键表（`predic
 | 日程素材进总结 | 需接 `CalendarSource`（TCC + 主线程），且日报已有 `TomorrowAgenda` | 复用 `report::tomorrow_agenda`，素材块加一行 |
 | 归档页（历史总结可回看） | 需要 schema v13 与前端新路由，本轮判断为超范围 | 现在已按 `reports/2026-W48.md` 落盘，够手工回看 |
 | 真机验收 | 本地 2B 成文质量、周报在真实 7 天数据上的表现 | `cargo tauri dev` 后说「总结一下今天」「这周总结一下」各一次，再看 `/trace` |
+
+## 真机修复：具体日期开窗（f718b56，2026-11-22）
+
+真机 trace 暴露的问题：用户说「生成 20 日的日报」，意图命中 Daily，但窗口只支持
+今天/本周，`20日` 被忽略 → 按今天开窗，素材全错；且总结路由刻意不叫工具
+（素材由 Rust 聚合），模型无从自救，也没有任何工具调用痕迹。
+
+修复：`resolve_window()` 复用 `memory_search::parse_window` 的日期解析——
+裸 D 日/M月D日/昨天/周X/N天前/整周短语全部生效，命中即按那个日期开窗
+（纯过去窗口上限 = 次日零点，不偷跑后面几天的事件）；没命中回落今天/本周默认。
+`collect` 拆出 `collect_in(conn, kind, window)`，对话路由先解析再聚合。
+`WEEK_WORDS` 补 `上周/上上周`（配合 parse_window 的整周窗口）。
+
+新增测试：`a_pinned_date_beats_the_default_window`、`pinned_weeks_and_default_fallback`。
