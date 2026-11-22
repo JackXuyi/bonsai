@@ -149,3 +149,15 @@ Iso 串供事件表（`events`/`tool_calls`），日期串供日键表（`predic
 facts`），trace 步骤的返回直接用它——前端复用同一张 memory_search 结构化
 卡片渲染，零前端改动。lines 是喂给模型的素材原文（80 字截断、总结请求行
 已滤），不比模型看到的多也不少；`tool_calls` 审计行照旧只存计数。
+
+## 执行层统一：素材走 provider 正式入口（用户裁决「不要维护两套」）
+
+`collect_in` 不再私下调 `memory_search::recall_in_window`，改为构造
+`ToolCall{name:"memory_search", args:{date_from,date_to}}` 走
+`MemorySearchProvider::execute_with_conn`——与云端 tool_calls、本地强制
+召回**同一段执行代码**，args 契约一致。trace 返回直接用 provider 的
+`full` JSON（存进 `Digest.recall_full`），`digest_detail_json` 删除：
+总结的 trace 与真工具调用永远同形状，不再手工对齐。素材的对话/新记忆
+单一来源 = 工具返回 JSON；感知计数、预测/关系统计仍由引擎聚合
+（memory_search 工具本就不含这些）。对话/记忆事件的 importance 排序
+让位给形状统一（facts 取工具返回原序）。
