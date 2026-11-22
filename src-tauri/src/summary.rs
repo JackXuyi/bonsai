@@ -108,7 +108,8 @@ const SUMMARY_VERBS: &[&str] = &[
 ];
 
 const WEEK_WORDS: &[&str] = &[
-    "本周", "这周", "这一周", "这礼拜", "近7天", "最近7天", "最近七天", "近七天", "一周", "周报",
+    "本周", "这周", "这一周", "这礼拜", "上周", "上上周", "近7天", "最近7天", "最近七天", "近七天",
+    "一周", "周报",
 ];
 
 const DAY_WORDS: &[&str] = &["今天", "今日", "今儿", "日报", "这一天"];
@@ -235,6 +236,31 @@ pub fn window(kind: SummaryKind, now: DateTime<Local>) -> Window {
     }
 }
 
+/// 具体日期优先（plan-summary-skill 真机反馈：`生成 20 日的日报` 之前被
+/// 当成今天开窗，素材全错）。复用 memory_search 的日期解析——那里已经
+/// 处理了昨天/前天/周X/N天前/M月D日/裸D日（超当月回上月）/整周短语。
+/// 命中即按那个日期开窗；没命中回落到今天/本周默认窗口。
+pub fn resolve_window(text: &str, kind: SummaryKind, now: DateTime<Local>) -> Window {
+    let today = now.date_naive();
+    if let Some((start, end_excl, _phrase)) = crate::memory_search::parse_window(text, today) {
+        let end = end_excl.pred_opt().unwrap_or(start);
+        // 上限语义：窗口碰到今天 → 截到 now（与默认窗口一致）；纯过去窗口
+        // → 当天末尾（次日零点），不偷跑后面几天的事件。
+        let end_iso = if end >= today {
+            now.with_timezone(&Utc).to_rfc3339()
+        } else {
+            midnight_iso(end.succ_opt().unwrap_or(end))
+        };
+        return Window {
+            start,
+            end,
+            start_iso: midnight_iso(start),
+            end_iso,
+        };
+    }
+    window(kind, now)
+}
+
 // ---------------------------------------------------------------- material
 
 /// Everything one summary may talk about, already bounded.
@@ -330,7 +356,12 @@ fn clip(s: &str, max: usize) -> String {
 
 /// Aggregate the window. One event scan; the three rollups come from db.
 pub fn collect(conn: &Connection, kind: SummaryKind, now: DateTime<Local>) -> Digest {
-    let w = window(kind, now);
+    collect_in(conn, kind, window(kind, now))
+}
+
+/// Same as [`collect`], but the caller owns the window — used by the dialogue
+/// route, where the user's own words may pin a specific date (`20 日的日报`).
+pub fn collect_in(conn: &Connection, kind: SummaryKind, w: Window) -> Digest {
     let events = db::events_in_window(conn, &w.start_iso, &w.end_iso).unwrap_or_default();
 
     let mut turns: Vec<String> = Vec::new();
@@ -706,6 +737,49 @@ mod tests {
         // Monday itself → one day so far.
         let mon = at(2026, 11, 16, 8, 0);
         assert_eq!(window(SummaryKind::Weekly, mon).days(), 1);
+    }
+
+    #[test]
+    fn a_pinned_date_beats_the_default_window() {
+        // 真机反馈（2026-11-22）：`生成 20 日的日报` 之前被当成今天开窗，
+        // 素材全错。裸 D 日要落到 11-20 当天。
+        let now = at(2026, 11, 22, 21, 44);
+        let w = resolve_window("生成 20 日的日报", SummaryKind::Daily, now);
+        assert_eq!(w.start, NaiveDate::from_ymd_opt(2026, 11, 20).unwrap());
+        assert_eq!(w.days(), 1);
+        // 纯过去窗口的上限是当天末尾，不许偷跑后面几天的事件。
+        let end = DateTime::parse_from_rfc3339(&w.end_iso).unwrap();
+        assert_eq!(
+            end.with_timezone(&Local).format("%m-%d %H:%M").to_string(),
+            "11-21 00:00"
+        );
+
+        // M月D日、昨天、周X 同样生效。
+        let w = resolve_window("总结一下11月18日", SummaryKind::Daily, now);
+        assert_eq!(w.start, NaiveDate::from_ymd_opt(2026, 11, 18).unwrap());
+        let w = resolve_window("昨天干了啥", SummaryKind::Daily, now);
+        assert_eq!(w.start, NaiveDate::from_ymd_opt(2026, 11, 21).unwrap());
+        // 2026-11-22 是周日：「周四」指 11-19。
+        let w = resolve_window("周四的日报", SummaryKind::Daily, now);
+        assert_eq!(w.start, NaiveDate::from_ymd_opt(2026, 11, 19).unwrap());
+    }
+
+    #[test]
+    fn pinned_weeks_and_default_fallback() {
+        let now = at(2026, 11, 22, 21, 44);
+        // 上周总结 → 上上周一整周（11-09 ~ 11-15）。
+        assert_eq!(intent("上周总结一下"), Some(SummaryKind::Weekly));
+        let w = resolve_window("上周总结一下", SummaryKind::Weekly, now);
+        assert_eq!(w.start, NaiveDate::from_ymd_opt(2026, 11, 9).unwrap());
+        assert_eq!(w.end, NaiveDate::from_ymd_opt(2026, 11, 15).unwrap());
+
+        // 没有日期短语 → 原默认窗口（今天 / 本周）。
+        let w = resolve_window("总结一下今天", SummaryKind::Daily, now);
+        assert_eq!(w, window(SummaryKind::Daily, now));
+        let w = resolve_window("这周总结一下", SummaryKind::Weekly, now);
+        assert_eq!(w, window(SummaryKind::Weekly, now));
+        let w = resolve_window("周报", SummaryKind::Weekly, now);
+        assert_eq!(w, window(SummaryKind::Weekly, now));
     }
 
     // ---- collect -----------------------------------------------------

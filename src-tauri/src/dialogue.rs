@@ -1155,7 +1155,9 @@ fn summary_turn(
     let now = crate::memory::clock::now_local();
     let (digest, system, prompt) = {
         let conn = lock_conn(store)?;
-        let d = crate::summary::collect(&conn, kind, now);
+        // 「20 日的日报」这类带具体日期的请求按那个日期开窗，不是永远今天。
+        let w = crate::summary::resolve_window(user_text, kind, now);
+        let d = crate::summary::collect_in(&conn, kind, w);
         let contract = crate::summary::contract(kind, packs);
         let (s, u) = crate::summary::prompts(kind, base_system, &contract, &d);
         (d, s, u)
