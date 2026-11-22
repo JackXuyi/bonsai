@@ -112,6 +112,10 @@ pub fn chat_body(
 /// 思考模式不支持 `tool_choice` 的 required/指定工具（协议 400），且
 /// DeepSeek 扩展字段（thinking/title/safety_check）一概不碰——只发
 /// 标准 OpenAI 兼容三件套。
+///
+/// `tools` 为空（强制收尾轮）时整个省略 `tools`/`tool_choice` 键——
+/// 协议语义「没有 tool 时默认 tool_choice=none」，模型只能散文作答；
+/// 不发空数组（部分实现会拒绝）。
 pub fn tool_chat_body(
     model: &str,
     messages: &[crate::llm::ToolMsg],
@@ -119,15 +123,18 @@ pub fn tool_chat_body(
     temperature: f64,
     max_tokens: u32,
 ) -> serde_json::Value {
-    serde_json::json!({
+    let mut body = serde_json::json!({
         "model": model,
         "messages": messages,
-        "tools": tools,
-        "tool_choice": "auto",
         "stream": false,
         "temperature": temperature,
         "max_tokens": max_tokens,
-    })
+    });
+    if !tools.is_empty() {
+        body["tools"] = serde_json::json!(tools);
+        body["tool_choice"] = serde_json::json!("auto");
+    }
+    body
 }
 
 /// 工具轮响应解析（纯函数，形状有测试）。`finish_reason` 取
@@ -424,6 +431,10 @@ mod tests {
         let no_args = vec![ToolSpec { name: "t".into(), description: "d".into(), parameters: None }];
         let b2 = tool_chat_body("m", &msgs, &no_args, 0.7, CLOUD_MAX_TOKENS);
         assert!(b2["tools"][0]["function"].get("parameters").is_none());
+        // 空 tools（强制收尾轮）→ 整个省略 tools/tool_choice 键
+        let b3 = tool_chat_body("m", &msgs, &[], 0.7, CLOUD_MAX_TOKENS);
+        assert!(b3.get("tools").is_none());
+        assert!(b3.get("tool_choice").is_none());
     }
 
     #[test]

@@ -2544,7 +2544,7 @@ mod tests {
 
     #[test]
     fn v9_creates_trace_tables() {
-        let conn = mem();
+        let _conn = mem();
         // Fresh schema carries the v9 tables; migrate on a legacy v1 db too.
         let legacy = Connection::open_in_memory().unwrap();
         legacy

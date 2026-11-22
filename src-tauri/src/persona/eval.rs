@@ -79,6 +79,14 @@ pub trait DialogueBackend: Send {
         }
         full
     }
+
+    /// 工具调用客户端（plan-task-card v0.2 §2 分流，2026-11-22 用户裁决）：
+    /// 只有支持 function calling 的云端传输返回 Some，工具循环走原生
+    /// 协议；本地模型永远 None——「本地不做工具调用」由 trait 形状
+    /// 强制，Mock 桩默认 None 保持本地路径。
+    fn tool_client(&self) -> Option<std::sync::Arc<dyn crate::llm::ChatClient>> {
+        None
+    }
 }
 
 /// CI backend: maps scripted user turns to scripted replies; everything
@@ -114,11 +122,19 @@ pub struct LocalBackend {
     /// spec-m2 §1.1: 传输层可替换（本地 sidecar / 云端 OpenAI 兼容），
     /// 人格卡渲染与判定完全不知道背后是哪种模型。
     pub client: std::sync::Arc<dyn crate::llm::ChatClient>,
+    /// 传输类别（plan-task-card v0.2 §2）：只有 Cloud 走 function calling。
+    pub kind: crate::llm::ClientKind,
 }
 
 impl LocalBackend {
     pub fn new() -> Self {
-        LocalBackend { client: crate::llm::current_client() }
+        let (client, kind) = crate::llm::current_client_with_kind();
+        LocalBackend { client, kind }
+    }
+
+    /// 测试/工具桩注入：指定传输类别与客户端（如云端 kind + 脚本桩）。
+    pub fn with_client(client: std::sync::Arc<dyn crate::llm::ChatClient>, kind: crate::llm::ClientKind) -> Self {
+        LocalBackend { client, kind }
     }
 }
 
@@ -140,6 +156,15 @@ fn build_msgs(system: &str, history: &[Turn], user: &str) -> Vec<crate::llm::Msg
 }
 
 impl DialogueBackend for LocalBackend {
+    fn tool_client(&self) -> Option<std::sync::Arc<dyn crate::llm::ChatClient>> {
+        match self.kind {
+            crate::llm::ClientKind::Cloud => Some(self.client.clone()),
+            // 本地模型不做工具调用（用户裁决 2026-11-22）；Claude 原生
+            // 工具协议本版不实现（D7）——一律回落本地路径。
+            _ => None,
+        }
+    }
+
     fn reply(&mut self, system: &str, history: &[Turn], user: &str, temperature: f64) -> String {
         self.client
             .chat(&build_msgs(system, history, user), temperature, crate::llm::CHAT_TIMEOUT_SECS)
