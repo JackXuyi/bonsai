@@ -35,6 +35,7 @@ pub mod predict;
 pub mod relationship;
 pub mod report;
 pub mod skill;
+pub mod summary;
 pub mod tools;
 pub mod tray;
 
@@ -124,6 +125,27 @@ pub fn run() {
             // admin commands and the dialogue turn.
             let skills_dir = db_path.parent().unwrap().join("skills");
             std::fs::create_dir_all(&skills_dir)?;
+
+            // 内置总结 skill 包（plan-summary-skill）：只种一次。之后用户
+            // 改过/删掉都尊重现状，不再复活。引擎不依赖文件存在——缺失时
+            // 回落到编译进二进制的契约副本。
+            {
+                let store = app.state::<MemoryStore>();
+                let conn = store.0.lock().map_err(|e| e.to_string())?;
+                let seeded = memory::db::get_setting(&conn, "summary_skills_seeded")
+                    .ok()
+                    .flatten();
+                if seeded.is_none() {
+                    match skill::seed_builtin_packs(&skills_dir) {
+                        Ok(created) => {
+                            log::info!("summary skills seeded: {created:?}");
+                            let _ = memory::db::set_setting(&conn, "summary_skills_seeded", "1");
+                        }
+                        Err(e) => log::warn!("summary skills seed failed: {e}"),
+                    }
+                }
+            }
+
             app.manage(mcp_admin::AgentState {
                 manager: mcp::McpManager::default(),
                 skills_dir,
@@ -255,6 +277,7 @@ pub fn run() {
             dialogue::turn_trace_get,
             dialogue::turn_trace_find_by_event,
             report::daily_report,
+            summary::weekly_report,
             llm_admin::llm_config_get,
             llm_admin::llm_config_set_active,
             llm_models::llm_model_list_installed,

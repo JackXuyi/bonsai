@@ -19,6 +19,75 @@ pub const REFERENCES_MAX_COUNT: usize = 5;
 /// Whole-body budget across simultaneously injected skills (spec-s5 §3).
 pub const SIMULTANEOUS_SKILLS: usize = 2;
 
+/// Engine packs (plan-summary-skill): prompt bundles owned by a Rust engine
+/// rather than by the generic skill section. `summary.rs` reads exactly one
+/// of them when a summary intent hits and injects it in place; they never
+/// enter `skill_section`, because two engine packs would otherwise fill the
+/// whole `SIMULTANEOUS_SKILLS` budget and starve the user's own skills.
+pub const ENGINE_PACK_IDS: &[&str] = &["daily-summary", "weekly-summary"];
+
+pub fn is_engine_pack(id: &str) -> bool {
+    ENGINE_PACK_IDS.contains(&id)
+}
+
+/// Disk bodies for the engine packs. Two `stat`s, no directory sweep: this
+/// runs on every chat turn. A missing or broken pack is simply absent — the
+/// engine falls back to its built-in contract.
+pub fn load_engine_packs(root: &Path) -> Vec<SkillPack> {
+    ENGINE_PACK_IDS
+        .iter()
+        .filter_map(|id| {
+            let dir = root.join(id);
+            if !dir.join("SKILL.md").is_file() {
+                return None;
+            }
+            load_skill(&dir).ok()
+        })
+        .collect()
+}
+
+/// Built-in bodies, compiled into the binary. Seeds write these to the
+/// skills directory once (see `seed_builtin_packs`) so the two packs are
+/// visible/editable in the settings UI like any other skill.
+const BUILTIN_PACKS: &[(&str, &str)] = &[
+    (
+        "daily-summary",
+        include_str!("../resources/skills/daily-summary/SKILL.md"),
+    ),
+    (
+        "weekly-summary",
+        include_str!("../resources/skills/weekly-summary/SKILL.md"),
+    ),
+];
+
+/// Built-in body for `id` with the frontmatter stripped — the authoring
+/// source of truth for engine packs, used when the on-disk copy is absent.
+pub fn builtin_body(id: &str) -> Option<String> {
+    BUILTIN_PACKS
+        .iter()
+        .find(|(pid, _)| *pid == id)
+        .and_then(|(_, text)| parse_frontmatter(text).ok())
+        .map(|(_, _, body)| body.trim().to_string())
+}
+
+/// Write the engine packs into `root` when absent. Never overwrites: a pack
+/// the user edited (or deleted on purpose) stays theirs. Returns the ids it
+/// actually created.
+pub fn seed_builtin_packs(root: &Path) -> std::io::Result<Vec<String>> {
+    let mut created = Vec::new();
+    for (id, body) in BUILTIN_PACKS {
+        let dir = root.join(id);
+        let path = dir.join("SKILL.md");
+        if path.is_file() {
+            continue;
+        }
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(&path, body)?;
+        created.push((*id).to_string());
+    }
+    Ok(created)
+}
+
 /// Injection blacklist (spec-s5 §2): static samples only; the reviewer
 /// grows this list, the model never sees a rejected pack at all.
 const INJECTION_PATTERNS: &[&str] = &[
@@ -380,6 +449,54 @@ mod tests {
             enabled_ids(Some(r#"["a","b"]"#.into())),
             vec!["a", "b"]
         );
+    }
+
+    #[test]
+    fn builtin_engine_packs_pass_their_own_validator() {
+        // The compiled-in bodies must satisfy the same caps/blacklist the
+        // loader enforces on disk — otherwise seeding ships a broken pack.
+        for (id, body) in BUILTIN_PACKS {
+            assert!(is_engine_pack(id), "{id} must be declared an engine pack");
+            assert!(body.len() <= SKILL_MD_MAX, "{id} exceeds SKILL_MD_MAX");
+            let root = tmp_root(&format!("builtin-{id}"));
+            write_pack(&root, id, body);
+            let pack = load_skill(&root.join(id)).unwrap_or_else(|e| panic!("{id}: {e}"));
+            assert_eq!(pack.id, *id);
+            assert!(!pack.body.trim().is_empty());
+        }
+    }
+
+    #[test]
+    fn seed_is_idempotent_and_never_overwrites_edits() {
+        let root = tmp_root("seed");
+        let created = seed_builtin_packs(&root).unwrap();
+        assert_eq!(created.len(), ENGINE_PACK_IDS.len());
+        assert!(root.join("daily-summary/SKILL.md").is_file());
+
+        // User edit survives a re-seed.
+        let edited = "---\nname: 我改的\n事物: x\ndescription: 自定义\n---\n正文\n";
+        fs::write(root.join("daily-summary/SKILL.md"), edited).unwrap();
+        let again = seed_builtin_packs(&root).unwrap();
+        assert!(again.is_empty(), "nothing left to create");
+        assert_eq!(
+            fs::read_to_string(root.join("daily-summary/SKILL.md")).unwrap(),
+            edited
+        );
+
+        // A deliberately deleted pack is not resurrected by seed order —
+        // callers gate the whole seed behind a one-shot settings flag.
+        fs::remove_dir_all(root.join("weekly-summary")).unwrap();
+        assert!(load_engine_packs(&root).iter().all(|p| p.id != "weekly-summary"));
+    }
+
+    #[test]
+    fn load_engine_packs_ignores_missing_and_broken_dirs() {
+        let root = tmp_root("engine-missing");
+        assert!(load_engine_packs(&root).is_empty());
+        write_pack(&root, "daily-summary", "没有 frontmatter");
+        assert!(load_engine_packs(&root).is_empty(), "broken pack is skipped");
+        write_pack(&root, "daily-summary", GOOD);
+        assert_eq!(load_engine_packs(&root).len(), 1);
     }
 
     #[test]

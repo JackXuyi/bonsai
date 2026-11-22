@@ -2021,8 +2021,69 @@ pub fn facts_in_window(
     rows.collect()
 }
 
-// ------------------------------------------------- retrieval (M4: decayed hybrid)
+/// Window rollup for the summary engine (plan-summary-skill). Three signals
+/// a summary may *talk about* without inventing anything: which tools were
+/// used, how the guesses went, and how the relationship line moved. Counts
+/// only — no content leaves this struct, so a summary prompt can never leak
+/// calendar titles or tool arguments.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct WindowStats {
+    /// `tool:action` → count, top 5 by frequency.
+    pub tools: Vec<(String, i64)>,
+    pub predictions_asked: i64,
+    pub predictions_hit: i64,
+    pub predictions_miss: i64,
+    pub relationship_score: i64,
+    pub relationship_days: i64,
+}
 
+/// `start_iso`/`end_iso` bound the event-time tables (tool_calls); the two
+/// day strings bound the day-keyed tables (predictions, relationship_progress).
+/// Both windows come from the same local span, so they always agree.
+pub fn window_stats(
+    conn: &Connection,
+    start_iso: &str,
+    end_iso: &str,
+    start_day: &str,
+    end_day: &str,
+) -> rusqlite::Result<WindowStats> {
+    let mut out = WindowStats::default();
+
+    let mut stmt = conn.prepare(
+        "SELECT tool || ':' || action AS name, COUNT(*) FROM tool_calls
+         WHERE ts >= ?1 AND ts < ?2 GROUP BY tool, action ORDER BY 2 DESC, name ASC LIMIT 5",
+    )?;
+    let rows = stmt.query_map(params![start_iso, end_iso], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    out.tools = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let (asked, hit, miss): (i64, i64, i64) = conn.query_row(
+        "SELECT
+           COALESCE(SUM(CASE WHEN asked_at IS NOT NULL THEN 1 ELSE 0 END), 0),
+           COALESCE(SUM(CASE WHEN feedback = 'hit' THEN 1 ELSE 0 END), 0),
+           COALESCE(SUM(CASE WHEN feedback = 'miss' THEN 1 ELSE 0 END), 0)
+         FROM predictions WHERE date >= ?1 AND date <= ?2",
+        params![start_day, end_day],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    out.predictions_asked = asked;
+    out.predictions_hit = hit;
+    out.predictions_miss = miss;
+
+    let (score, days): (i64, i64) = conn.query_row(
+        "SELECT COALESCE(SUM(score), 0), COUNT(*) FROM relationship_progress
+         WHERE date >= ?1 AND date <= ?2",
+        params![start_day, end_day],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    out.relationship_score = score;
+    out.relationship_days = days;
+
+    Ok(out)
+}
+
+// ------------------------------------------------- retrieval (M4: decayed hybrid)
 /// Parse an RFC3339 ts; unparsable strings are treated as "fresh" (age 0).
 fn age_days(ts: &str) -> f64 {
     let now = chrono::DateTime::parse_from_rfc3339(&clock::now_iso()).ok();
@@ -2709,5 +2770,61 @@ mod tests {
         assert_eq!(turn_trace_find_by_event(&conn, aid).unwrap(), Some(turn_id));
         assert_eq!(turn_trace_find_by_event(&conn, 999_999).unwrap(), None);
         assert!(turn_trace_get(&conn, 999_999).unwrap().is_none());
+    }
+
+    #[test]
+    fn window_stats_rolls_up_tools_predictions_and_relationship() {
+        let conn = mem();
+        // In-window tool calls: same action twice, another once.
+        log_tool_call(&conn, "calendar", "agenda_today", "ok", None, None).unwrap();
+        log_tool_call(&conn, "calendar", "agenda_today", "ok", None, None).unwrap();
+        log_tool_call(&conn, "memory_search", "search", "ok", None, None).unwrap();
+        // Out-of-window call (1990) must not be counted.
+        conn.execute(
+            "INSERT INTO tool_calls (ts, tool, action, outcome) VALUES ('1990-01-01T00:00:00+00:00','x','y','ok')",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO predictions (date, guess, basis, ask_after_hour, asked_at, feedback)
+             VALUES ('2026-11-17','g','[]',9,'2026-11-17T09:00:00+00:00','hit'),
+                    ('2026-11-18','g','[]',9,'2026-11-18T09:00:00+00:00','miss'),
+                    ('2026-11-19','g','[]',9,NULL,NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO relationship_progress (date, present, score, computed_at)
+             VALUES ('2026-11-17',1,1,'x'), ('2026-11-18',1,2,'x')",
+            [],
+        )
+        .unwrap();
+
+        let s = window_stats(
+            &conn,
+            "2020-01-01T00:00:00+00:00",
+            "2030-01-01T00:00:00+00:00",
+            "2026-11-17",
+            "2026-11-19",
+        )
+        .unwrap();
+        assert_eq!(s.tools[0], ("calendar:agenda_today".to_string(), 2));
+        assert_eq!(s.tools.len(), 2);
+        assert_eq!(s.predictions_asked, 2, "unasked row is not a guess made");
+        assert_eq!((s.predictions_hit, s.predictions_miss), (1, 1));
+        assert_eq!(s.relationship_score, 3);
+        assert_eq!(s.relationship_days, 2);
+
+        // Empty window → zeroed, never an error.
+        let empty = window_stats(
+            &conn,
+            "1995-01-01T00:00:00+00:00",
+            "1995-02-01T00:00:00+00:00",
+            "1995-01-01",
+            "1995-01-31",
+        )
+        .unwrap();
+        assert_eq!(empty, WindowStats::default());
     }
 }
