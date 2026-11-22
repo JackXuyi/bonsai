@@ -138,3 +138,14 @@ Iso 串供事件表（`events`/`tool_calls`），日期串供日键表（`predic
 - `is_empty` 改看 `dialogue`（有对话就不算空日子）。
 
 测试 358 绿（新增 material_carries_the_memory_search_transcript），clippy 无新增。
+
+## trace 返回升级：与真工具同形状的素材详情（a1bc71e，2026-11-22）
+
+用户裁决：总结路径的 memory_search 工具调用不能只回计数（`dialogue: 46`），
+要和真工具调用一样返回详细信息，否则看不出总结到底基于哪些消息。
+
+落地：`summary::digest_detail_json(digest)` 产出与 `Recall::full()` 同形状
+的 JSON（`window / dialogue_count / fact_count / lines[{ts,who,text}] /
+facts`），trace 步骤的返回直接用它——前端复用同一张 memory_search 结构化
+卡片渲染，零前端改动。lines 是喂给模型的素材原文（80 字截断、总结请求行
+已滤），不比模型看到的多也不少；`tool_calls` 审计行照旧只存计数。
