@@ -157,8 +157,10 @@ export interface ProactiveReply {
 export interface TraceStep {
   seq: number;
   stepKind:
+    | "user_input"
     | "crisis_check"
     | "tool_intent"
+    | "summary_intent"
     | "llm_round"
     | "tool_call"
     | "json_retry"

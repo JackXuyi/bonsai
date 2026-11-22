@@ -868,6 +868,11 @@ fn chat_turn_inner(
     // （2026-11-21：user message 不在 system prompt 里，trace 必须自带）。
     let mut rec = TraceRecorder::with_user(user_text);
 
+    // 链路第 0 步（用户裁决 2026-11-22）：追踪必须从输入的对话开始。全文
+    // 进 output（trace 是本地调试面），展开即见；每步的 user_text 字段
+    // 照旧冗余携带。
+    rec.simple("user_input", "用户输入", "", Some(user_text));
+
     // Crisis intercept (plan-onboarding.md §3.3): rule-level, BEFORE any
     // model call — a dead model must not change this behavior. Both sides
     // are still recorded (compliance audit), no streaming deltas are sent.
@@ -1158,20 +1163,31 @@ fn summary_turn(
         let conn = lock_conn(store)?;
         // 「20 日的日报」这类带具体日期的请求按那个日期开窗，不是永远今天。
         let w = crate::summary::resolve_window(user_text, kind, now);
-        let d = crate::summary::collect_in(&conn, kind, w);
-        // 素材召回是流程第 2 步（memory_search 整窗召回），必须在 trace
-        // 里可见——窗口是几号、召回了多少，否则「没调工具」的观感就是
-        // 黑箱。窗口与计数进 output，原文永不落 trace。
-        rec.simple(
-            "summary_material",
-            "素材召回（memory_search）",
+        let t_recall = std::time::Instant::now();
+        let d = crate::summary::collect_in(&conn, kind, w.clone());
+        // 流程第 2 步（memory_search 整窗召回）记成正式 tool_call（用户
+        // 裁决：trace 要包含所有工具调用）。args 是解析出的窗口，summary
+        // 是计数 JSON；对话原文永不落 trace——成文步骤的 prompt 里已有。
+        rec.tool_call(
+            "memory_search",
             &format!(
-                "{} · 对话 {} 条 · 新记忆 {} 件",
-                d.window.describe(),
+                "{{\"kind\":\"{}\",\"start\":\"{}\",\"end_exclusive\":\"{}\"}}",
+                kind.action(),
+                w.start_day(),
+                w.end
+                    .succ_opt()
+                    .map(|e| e.format("%Y-%m-%d").to_string())
+                    .unwrap_or_default(),
+            ),
+            &format!(
+                "{{\"window\":\"{}\",\"dialogue\":{},\"facts\":{}}}",
+                w.describe(),
                 d.dialogue.len(),
                 d.facts.len()
             ),
+            "ok",
             None,
+            t_recall.elapsed(),
         );
         let contract = crate::summary::contract(kind, packs);
         let (s, u) = crate::summary::prompts(kind, base_system, &contract, &d);
@@ -1700,23 +1716,18 @@ mod tests {
         })
         .expect("trace exists");
         assert!(turn.steps.iter().any(|st| st.step_kind == "summary_intent"));
-        // 流程第 2 步（memory_search 整窗召回）必须在 trace 可见，带窗口
-        // 与计数；原文不落 trace。
+        // 流程第 2 步（memory_search 整窗召回）记成正式 tool_call：args 是
+        // 解析出的窗口，summary 是计数 JSON；原文不落 trace。
         let material = turn
             .steps
             .iter()
-            .find(|st| st.step_kind == "summary_material")
-            .expect("material recall step");
-        assert!(material
-            .outcome
-            .as_deref()
-            .unwrap_or("")
-            .contains("对话 1 条"));
-        assert!(!material
-            .output
-            .as_deref()
-            .unwrap_or("")
-            .contains("供应商 SOP"));
+            .find(|st| st.step_kind == "tool_call" && st.title.contains("memory_search"))
+            .expect("material recall tool_call");
+        let args = material.args_json.as_deref().unwrap_or("");
+        assert!(args.contains("daily_summary") && args.contains("end_exclusive"));
+        let counts = material.summary.as_deref().unwrap_or("");
+        assert!(counts.contains("\"dialogue\":1") && counts.contains("\"facts\":0"));
+        assert!(!counts.contains("GMP"), "counts never carry content");
 
         // One audit row for the summary tool, counts only.
         let (n, detail): (i64, Option<String>) = with_conn(&s, |conn| {
@@ -2835,7 +2846,13 @@ mod tests {
         assert!(!trace.model_used);
         assert!(trace.user_event_id.is_some() && trace.assistant_event_id.is_some());
         let steps = steps_of(&s, tid);
-        assert_eq!(steps, vec![("crisis_check".into(), "hit".into())]);
+        assert_eq!(
+            steps,
+            vec![
+                ("user_input".into(), "".into()),
+                ("crisis_check".into(), "hit".into())
+            ]
+        );
     }
 
     #[test]
@@ -2851,16 +2868,19 @@ mod tests {
         assert!(trace.filter_report.is_some());
         let steps = steps_of(&s, tid);
         let kinds: Vec<&str> = steps.iter().map(|(k, _)| k.as_str()).collect();
-        assert_eq!(kinds, ["crisis_check", "tool_intent", "llm_round", "filter"]);
-        assert_eq!(steps[0].1, "miss");
+        assert_eq!(
+            kinds,
+            ["user_input", "crisis_check", "tool_intent", "llm_round", "filter"]
+        );
         assert_eq!(steps[1].1, "miss");
-        assert_eq!(steps[2].1, "answered");
+        assert_eq!(steps[2].1, "miss");
+        assert_eq!(steps[3].1, "answered");
         // Full prompt stored (D1): the llm_round carries the whole system prompt.
         with_conn(&s, |conn| {
             let t = db::turn_trace_get(conn, tid).unwrap().unwrap();
-            let prompt = t.steps[2].prompt.as_deref().expect("prompt stored");
+            let prompt = t.steps[3].prompt.as_deref().expect("prompt stored");
             assert!(prompt.contains("# 环境（系统注入，不可变）"));
-            assert!(t.steps[2].output.as_deref().unwrap().contains("我知道了"));
+            assert!(t.steps[3].output.as_deref().unwrap().contains("我知道了"));
         });
     }
 
@@ -2878,10 +2898,10 @@ mod tests {
         assert_eq!(trace.kind, "model");
         assert!(!trace.model_used);
         let steps = steps_of(&s, tid);
-        assert_eq!(steps[2].1, "answered"); // round ran, output empty
+        assert_eq!(steps[3].1, "answered"); // round ran, output empty
         with_conn(&s, |conn| {
             let t = db::turn_trace_get(conn, tid).unwrap().unwrap();
-            assert_eq!(t.steps[2].output.as_deref(), Some(""));
+            assert_eq!(t.steps[3].output.as_deref(), Some(""));
         });
     }
 
@@ -2901,8 +2921,8 @@ mod tests {
         );
         let steps = steps_of(&s, tid);
         let kinds: Vec<&str> = steps.iter().map(|(k, _)| k.as_str()).collect();
-        assert_eq!(kinds, ["crisis_check", "tool_intent"]);
-        assert_eq!(steps[1].1, "hit");
+        assert_eq!(kinds, ["user_input", "crisis_check", "tool_intent"]);
+        assert_eq!(steps[2].1, "hit");
     }
 
     #[test]
@@ -2925,15 +2945,15 @@ mod tests {
         assert_eq!(trace.tool_label.as_deref(), Some("mcp:weather"));
         let steps = steps_of(&s, tid);
         let kinds: Vec<&str> = steps.iter().map(|(k, _)| k.as_str()).collect();
-        // 云端循环 trace：请求 1（tool_calls）→ 执行 → 请求 2（最终作答）。
+        // 云端循环 trace：输入 → 请求 1（tool_calls）→ 执行 → 请求 2（最终作答）。
         assert_eq!(
             kinds,
-            ["crisis_check", "tool_intent", "llm_round", "tool_call", "llm_round", "filter"]
+            ["user_input", "crisis_check", "tool_intent", "llm_round", "tool_call", "llm_round", "filter"]
         );
-        assert_eq!(steps[1].1, "miss");
-        assert_eq!(steps[2].1, "tool_calls");
-        assert_eq!(steps[3].1, "ok");
-        assert_eq!(steps[4].1, "answered");
+        assert_eq!(steps[2].1, "miss");
+        assert_eq!(steps[3].1, "tool_calls");
+        assert_eq!(steps[4].1, "ok");
+        assert_eq!(steps[5].1, "answered");
         // 每轮请求的完整消息序列都存（spec-s8 D1），user_text 随步携带。
         with_conn(&s, |conn| {
             let t = db::turn_trace_get(conn, tid).unwrap().unwrap();

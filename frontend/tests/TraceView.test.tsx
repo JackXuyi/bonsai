@@ -189,6 +189,44 @@ describe("TraceView（spec-s8 追踪页）", () => {
     fireEvent.click(await screen.findByText(/工具调用 · legacy/));
     expect(screen.getByText("杭州今天多云 18 度")).toBeTruthy();
   });
+
+  it("链路从用户输入开始：user_input 卡折叠显摘要、展开显全文（2026-11-22）", async () => {
+    getMock.mockResolvedValue(
+      trace({
+        steps: [
+          {
+            seq: 1,
+            stepKind: "user_input",
+            title: "用户输入",
+            output: "生成 20 日的日报",
+            userText: "生成 20 日的日报",
+            outcome: "",
+            ts: "2026-11-22T21:59:00+08:00",
+          },
+          { seq: 2, stepKind: "summary_intent", title: "总结意图路由", outcome: "daily_summary", ts: "2026-11-22T21:59:00+08:00" },
+          {
+            seq: 3,
+            stepKind: "tool_call",
+            title: "工具调用 · memory_search",
+            argsJson: '{"kind":"daily_summary","start":"2026-11-20","end_exclusive":"2026-11-21"}',
+            summary: '{"window":"11-20","dialogue":2,"facts":1}',
+            outcome: "ok",
+            durationMs: 5,
+            ts: "2026-11-22T21:59:00+08:00",
+          },
+        ],
+      })
+    );
+    render(<TraceView turnId={412} />);
+    // 折叠态：第一步就是用户输入，且显示原文摘要
+    await screen.findByText("输入：生成 20 日的日报");
+    // 素材召回记成 tool_call，折叠态显示窗口参数
+    expect(screen.getByText(/参数：\{"kind":"daily_summary"/)).toBeTruthy();
+    // 展开：输入全文有独立标签，不再叫「模型原始输出」
+    fireEvent.click(screen.getByText("用户输入"));
+    expect(screen.getByText("对话输入全文")).toBeTruthy();
+    expect(screen.queryByText("模型原始输出")).toBeNull();
+  });
 });
 
 describe("PromptBlock（prompt 数组结构化渲染，2026-11-22）", () => {

@@ -10,8 +10,10 @@ import type { TraceStep } from "@/lib/types";
 import { TraceStepCard } from "./TraceStepCard";
 
 const STEP_TONE: Record<TraceStep["stepKind"], string> = {
+  user_input: "tone-ok",
   crisis_check: "tone-neutral",
   tool_intent: "tone-neutral",
+  summary_intent: "tone-neutral",
   llm_round: "tone-llm",
   tool_call: "tone-tool",
   filter: "tone-ok",
@@ -55,6 +57,7 @@ function TraceNode({ step }: { step: TraceStep }) {
   const expandable =
     step.stepKind === "llm_round" ||
     step.stepKind === "tool_call" ||
+    step.stepKind === "user_input" ||
     Boolean((step.stepKind === "json_retry" || step.stepKind === "prose_retry") && step.output);
 
   return (
@@ -74,13 +77,21 @@ function TraceNode({ step }: { step: TraceStep }) {
   );
 }
 
-/** 展开区：llm_round 看 prompt/output 全文；tool_call 看参数与返回摘要。 */
+/** 展开区：user_input 看输入全文；llm_round 看 prompt/output 全文；
+ * tool_call 看参数与返回摘要。 */
 function TraceStepDetail({ step }: { step: TraceStep }) {
   return (
     <div className="trace-detail">
-      {step.userText && <PreBlock label="当前输入（user message，不在 system prompt 里）" text={step.userText} />}
+      {step.userText && step.stepKind !== "user_input" && (
+        <PreBlock label="当前输入（user message，不在 system prompt 里）" text={step.userText} />
+      )}
+      {step.stepKind === "user_input" && step.output && (
+        <PreBlock label="对话输入全文" text={step.output} />
+      )}
       {step.prompt && <PromptBlock label="本轮 prompt（全文）" text={step.prompt} />}
-      {step.output && <PreBlock label="模型原始输出" text={step.output} />}
+      {step.output && step.stepKind !== "user_input" && (
+        <PreBlock label="模型原始输出" text={step.output} />
+      )}
       {step.argsJson && <PreBlock label="工具请求参数" text={step.argsJson} />}
       {step.summary && step.stepKind === "tool_call" && <ToolResultBlock text={step.summary} />}
       {step.summary && step.stepKind !== "tool_call" && <PreBlock label="工具返回摘要" text={step.summary} />}

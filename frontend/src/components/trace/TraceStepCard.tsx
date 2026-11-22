@@ -32,6 +32,9 @@ export function TraceStepCard({
       {step.stepKind === "llm_round" && firstOutput && !open && (
         <p className="trace-hint">输出：{firstOutput}</p>
       )}
+      {step.stepKind === "user_input" && !open && (
+        <p className="trace-hint">输入：{step.userText?.slice(0, 120)}</p>
+      )}
       {step.stepKind === "tool_call" && !open && step.argsJson && (
         <p className="trace-hint">参数：{step.argsJson.slice(0, 120)}</p>
       )}
