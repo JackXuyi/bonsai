@@ -3,7 +3,12 @@
 // 工具动作行（旧 tools 三按钮：日报 / 整理记忆 / 主动说一句）+ busy 态。
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { dailyReport, dialogueProactiveNow, memoryConsolidate } from "@/lib/commands";
+import {
+  dailyReport,
+  dialogueProactiveNow,
+  memoryConsolidate,
+  weeklyReport,
+} from "@/lib/commands";
 import { inTauri } from "@/lib/tauriInvoke";
 import { useChatStore } from "@/lib/stores/chatStore";
 import { toast, useUiStore, type ToolResult } from "@/lib/stores/uiStore";
@@ -28,6 +33,12 @@ const ICONS = {
   proactive: (
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path d="M21 11.5a8.4 8.4 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.4 8.4 0 0 1-3.8-.9L3 21l1.9-5.7a8.4 8.4 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.4 8.4 0 0 1 3.8-.9h.5a8.5 8.5 0 0 1 8 8v.5z" />
+    </svg>
+  ),
+  weekly: (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <polyline points="22 7 13.5 15.5 8.5 10.5 2 17" />
+      <polyline points="16 7 22 7 22 13" />
     </svg>
   ),
 };
@@ -80,6 +91,20 @@ export function ActionRow({ onReport }: { onReport: (md: string) => void }) {
         <span className="tool-ico">{ICONS.report}</span>
         <span className="tool-name">今日日报</span>
         <span className="tool-sub">今天聊了什么</span>
+      </button>
+      <button
+        className={`tool${busy === "weekly" ? " busy" : ""}`}
+        disabled={!!busy}
+        onClick={() =>
+          run("weekly", async () => {
+            const md = await weeklyReport();
+            onReport(md);
+          })
+        }
+      >
+        <span className="tool-ico">{ICONS.weekly}</span>
+        <span className="tool-name">本周总结</span>
+        <span className="tool-sub">这周都干了啥</span>
       </button>
       <button
         className={`tool${busy === "consolidate" ? " busy" : ""}`}

@@ -162,6 +162,8 @@ export const evaluate = (args: Record<string, unknown>) =>
   call<unknown>("evaluate", args);
 export const predictionStats = () => call<unknown>("prediction_stats");
 export const dailyReport = () => call<string>("daily_report");
+/** 本周总结（plan-summary-skill）：与对话里说「这周总结一下」同一套素材引擎。 */
+export const weeklyReport = () => call<string>("weekly_report");
 
 // ---------- 人格快照 / debug 日志（spec-m4）----------
 export const personaSnapshot = () => call<PersonaSnapshot>("persona_snapshot");
