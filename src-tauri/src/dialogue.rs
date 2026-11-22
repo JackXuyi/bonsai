@@ -1165,9 +1165,10 @@ fn summary_turn(
         let w = crate::summary::resolve_window(user_text, kind, now);
         let t_recall = std::time::Instant::now();
         let d = crate::summary::collect_in(&conn, kind, w.clone());
-        // 流程第 2 步（memory_search 整窗召回）记成正式 tool_call（用户
-        // 裁决：trace 要包含所有工具调用）。args 是解析出的窗口，summary
-        // 是计数 JSON；对话原文永不落 trace——成文步骤的 prompt 里已有。
+        // 流程第 2 步（memory_search 整窗召回）记成正式 tool_call，返回
+        // 与真工具同形状的详细 JSON（2026-11-22 用户裁决：否则看不出总结
+        // 基于哪些消息）。args 是解析出的窗口；lines 是喂给模型的素材
+        // 原文（80 字截断）；tool_calls 审计行照旧只存计数。
         rec.tool_call(
             "memory_search",
             &format!(
@@ -1179,12 +1180,7 @@ fn summary_turn(
                     .map(|e| e.format("%Y-%m-%d").to_string())
                     .unwrap_or_default(),
             ),
-            &format!(
-                "{{\"window\":\"{}\",\"dialogue\":{},\"facts\":{}}}",
-                w.describe(),
-                d.dialogue.len(),
-                d.facts.len()
-            ),
+            &crate::summary::digest_detail_json(&d),
             "ok",
             None,
             t_recall.elapsed(),
@@ -1725,9 +1721,11 @@ mod tests {
             .expect("material recall tool_call");
         let args = material.args_json.as_deref().unwrap_or("");
         assert!(args.contains("daily_summary") && args.contains("end_exclusive"));
-        let counts = material.summary.as_deref().unwrap_or("");
-        assert!(counts.contains("\"dialogue\":1") && counts.contains("\"facts\":0"));
-        assert!(!counts.contains("GMP"), "counts never carry content");
+        // 返回与真工具同形状：计数 + lines 原文（模型看到的 80 字截断版）。
+        let detail = material.summary.as_deref().unwrap_or("");
+        assert!(detail.contains("\"dialogue_count\":1"));
+        assert!(detail.contains("\"fact_count\":0"));
+        assert!(detail.contains("GMP 供应商 SOP"), "lines carry what fed the summary");
 
         // One audit row for the summary tool, counts only.
         let (n, detail): (i64, Option<String>) = with_conn(&s, |conn| {

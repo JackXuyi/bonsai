@@ -471,6 +471,30 @@ pub fn collect_in(conn: &Connection, kind: SummaryKind, w: Window) -> Digest {
 
 // ---------------------------------------------------------------- prompts
 
+/// Machine-readable view of the material, same shape as the memory_search
+/// tool's `full()` — the /trace page renders both with one structured card
+/// (2026-11-22 用户裁决：总结的工具调用和真工具一样返回详细信息，否则看
+/// 不出总结到底基于哪些消息). Lines carry what the model actually read
+/// (80-char clips), never more.
+pub fn digest_detail_json(d: &Digest) -> String {
+    serde_json::json!({
+        "window": d.window.describe(),
+        "dialogue_count": d.dialogue.len(),
+        "fact_count": d.facts.len(),
+        "lines": d
+            .dialogue
+            .iter()
+            .map(|(ts, who, text)| serde_json::json!({
+                "ts": ts,
+                "who": who,
+                "text": text,
+            }))
+            .collect::<Vec<_>>(),
+        "facts": d.facts,
+    })
+    .to_string()
+}
+
 /// The pack body from disk when present, else the compiled-in copy. An empty
 /// result only happens if the binary's own pack is malformed, in which case
 /// `prompts` still carries the hard rules — the contract is a bonus, never
