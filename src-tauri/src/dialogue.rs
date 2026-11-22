@@ -1180,7 +1180,7 @@ fn summary_turn(
                     .map(|e| e.format("%Y-%m-%d").to_string())
                     .unwrap_or_default(),
             ),
-            &crate::summary::digest_detail_json(&d),
+            &d.recall_full,
             "ok",
             None,
             t_recall.elapsed(),

@@ -18,6 +18,7 @@
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, TimeZone, Utc};
 use rusqlite::Connection;
 
+use crate::agent_tools::ToolProvider;
 use crate::memory::db;
 
 pub const DAILY_PACK: &str = "daily-summary";
@@ -67,14 +68,6 @@ impl SummaryKind {
         match self {
             SummaryKind::Daily => 24,
             SummaryKind::Weekly => 60,
-        }
-    }
-
-    /// How many turns are considered at all before sampling the latest.
-    fn turn_scan(self) -> usize {
-        match self {
-            SummaryKind::Daily => 60,
-            SummaryKind::Weekly => 300,
         }
     }
 
@@ -270,10 +263,13 @@ pub struct Digest {
     pub window: Window,
     /// User utterances, oldest → newest, deduped and capped.
     pub turns: Vec<String>,
-    /// Whole-window dialogue transcript via `memory_search::recall_in_window`:
+    /// Whole-window dialogue transcript via the memory_search provider:
     /// `(local stamp, who, clipped content)` oldest first, both sides of the
     /// chat. This is what the model actually reads; `turns` only feeds counts.
     pub dialogue: Vec<(String, String, String)>,
+    /// The provider's `full` JSON — the unified tool call's trace return,
+    /// byte-identical to what a real memory_search call records.
+    pub recall_full: String,
     /// Facts learned inside the window (content only).
     pub facts: Vec<String>,
     pub perceived: usize,
@@ -378,7 +374,6 @@ pub fn collect(conn: &Connection, kind: SummaryKind, now: DateTime<Local>) -> Di
 pub fn collect_in(conn: &Connection, kind: SummaryKind, w: Window) -> Digest {
     let events = db::events_in_window(conn, &w.start_iso, &w.end_iso).unwrap_or_default();
 
-    let mut turns: Vec<String> = Vec::new();
     let mut perceived = 0usize;
     let mut clipboards = 0usize;
     let mut downloads = 0usize;
@@ -386,70 +381,87 @@ pub fn collect_in(conn: &Connection, kind: SummaryKind, w: Window) -> Digest {
 
     for ev in &events {
         let content = ev.content.trim();
-        match ev.kind.as_str() {
-            "dialogue" => {
-                // Only what the user said: assistant replies are the model
-                // talking, and the summary request itself is noise.
-                if ev.role.as_deref() != Some("user") || content.is_empty() {
-                    continue;
-                }
-                if intent(content).is_some() {
-                    continue;
-                }
-                turns.push(clip(content, 60));
-            }
-            "perception" => {
-                perceived += 1;
-                if content.starts_with("clipboard: ") {
-                    clipboards += 1;
-                } else if content.starts_with("download: ") {
-                    downloads += 1;
-                } else if let Some(name) = content.strip_prefix("app: ") {
-                    let name = name.to_string();
-                    match apps.iter_mut().find(|(a, _)| *a == name) {
-                        Some((_, n)) => *n += 1,
-                        None => apps.push((name, 1)),
-                    }
+        // 对话原文不在这里取——统一走 memory_search provider（见下），
+        // 事件循环只负责感知计数；派生状态走 window_stats。
+        if ev.kind == "perception" {
+            perceived += 1;
+            if content.starts_with("clipboard: ") {
+                clipboards += 1;
+            } else if content.starts_with("download: ") {
+                downloads += 1;
+            } else if let Some(name) = content.strip_prefix("app: ") {
+                let name = name.to_string();
+                match apps.iter_mut().find(|(a, _)| *a == name) {
+                    Some((_, n)) => *n += 1,
+                    None => apps.push((name, 1)),
                 }
             }
-            // Everything else (predictions, relationship, face_state) is
-            // derived state — it arrives through `window_stats`, not here.
-            _ => {}
         }
     }
 
-    // Consecutive duplicates ("好" / "在吗" ×5) add nothing but noise.
-    turns.dedup();
-    if turns.len() > kind.turn_scan() {
-        turns = turns.split_off(turns.len() - kind.turn_scan());
-    }
+    // 第 2 步统一成一次工具调用（用户裁决 2026-11-22「不要维护两套」）：
+    // 走 memory_search provider 的正式入口——与云端 tool_calls / 本地强制
+    // 召回同一段执行代码，args 契约 = 显式日期窗整窗扫描；trace 返回直接
+    // 用 provider 的 full JSON，形状永不漂移。本地路径同样成立：调用方是
+    // 引擎，不是模型。
+    let call = crate::agent_tools::ToolCall {
+        name: "memory_search".into(),
+        args: serde_json::json!({
+            "date_from": w.start_day(),
+            "date_to": w.end_day(),
+        }),
+    };
+    let out = crate::memory_search::MemorySearchProvider
+        .execute_with_conn(conn, &call)
+        .unwrap_or(crate::agent_tools::ToolOutput {
+            summary: String::new(),
+            full: "{}".into(),
+        });
+    let parsed: serde_json::Value =
+        serde_json::from_str(&out.full).unwrap_or(serde_json::Value::Null);
 
-    // 第 2 步走 memory_search 的整窗召回（plan-summary-skill 流程更新）：
-    // 对话原文（含盆栽自己的话与时间戳）+ 当期新记忆，一次性、确定性，
-    // 不依赖模型会调工具——本地 2B 没有工具调用能力。总结请求本身不算
-    // 素材（和 turns 同一条纪律）。
-    let dialogue = crate::memory_search::recall_in_window(
-        conn,
-        w.start,
-        w.end.succ_opt().unwrap_or(w.end),
-    )
-    .lines
-        .into_iter()
-        .filter(|(_, _, content)| intent(content).is_none())
-        .map(|(stamp, who, content)| (stamp, who.to_string(), clip(&content, 80)))
-        .collect::<Vec<_>>();
+    // 对话原文（含盆栽的话与时间戳），provider 返回为时间正序。总结请求
+    // 本身不算素材；80 字截断 = 模型实际看到的上限。
+    let dialogue: Vec<(String, String, String)> = parsed
+        .get("lines")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|l| {
+                    let ts = l.get("ts")?.as_str()?.to_string();
+                    let who = l.get("who")?.as_str()?.to_string();
+                    let text = l.get("text")?.as_str()?;
+                    if intent(text).is_some() {
+                        return None;
+                    }
+                    Some((ts, who, clip(text, 80)))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // turns 只喂计数（fallback 的「聊了 N 轮」）：用户话，去连续重复。
+    // provider 封顶 60 行，天然 ≤ turn_scan，不再单独截断。
+    let mut turns: Vec<String> = dialogue
+        .iter()
+        .filter(|(_, who, _)| who == "用户")
+        .map(|(_, _, text)| clip(text, 60))
+        .collect();
+    turns.dedup();
 
     apps.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     apps.truncate(3);
 
-    let mut facts: Vec<db::ActiveFact> = db::facts_in_window(conn, &w.start_iso, &w.end_iso)
+    // 新记忆同样取自工具返回（单一来源）；importance 排序让位给形状统一。
+    let mut facts: Vec<String> = parsed
+        .get("facts")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|f| f.as_str().map(|s| clip(s, 60)))
+                .collect()
+        })
         .unwrap_or_default();
-    // Most important first, then chronological for reading.
-    facts.sort_by(|a, b| {
-        b.importance
-            .partial_cmp(&a.importance)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
     facts.truncate(kind.fact_sample().max(10));
 
     let stats = db::window_stats(conn, &w.start_iso, &w.end_iso, &w.start_day(), &w.end_day())
@@ -460,7 +472,8 @@ pub fn collect_in(conn: &Connection, kind: SummaryKind, w: Window) -> Digest {
         window: w,
         turns,
         dialogue,
-        facts: facts.into_iter().map(|f| clip(&f.content, 60)).collect(),
+        facts,
+        recall_full: out.full,
         perceived,
         clipboards,
         downloads,
@@ -470,30 +483,6 @@ pub fn collect_in(conn: &Connection, kind: SummaryKind, w: Window) -> Digest {
 }
 
 // ---------------------------------------------------------------- prompts
-
-/// Machine-readable view of the material, same shape as the memory_search
-/// tool's `full()` — the /trace page renders both with one structured card
-/// (2026-11-22 用户裁决：总结的工具调用和真工具一样返回详细信息，否则看
-/// 不出总结到底基于哪些消息). Lines carry what the model actually read
-/// (80-char clips), never more.
-pub fn digest_detail_json(d: &Digest) -> String {
-    serde_json::json!({
-        "window": d.window.describe(),
-        "dialogue_count": d.dialogue.len(),
-        "fact_count": d.facts.len(),
-        "lines": d
-            .dialogue
-            .iter()
-            .map(|(ts, who, text)| serde_json::json!({
-                "ts": ts,
-                "who": who,
-                "text": text,
-            }))
-            .collect::<Vec<_>>(),
-        "facts": d.facts,
-    })
-    .to_string()
-}
 
 /// The pack body from disk when present, else the compiled-in copy. An empty
 /// result only happens if the binary's own pack is malformed, in which case
