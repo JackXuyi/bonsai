@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { TraceView } from "@/components/trace/TraceView";
+import { PromptBlock, parsePromptMessages } from "@/components/trace/TraceTimeline";
 import type { TurnTrace } from "@/lib/types";
 
 const getMock = vi.fn();
@@ -187,5 +188,43 @@ describe("TraceView（spec-s8 追踪页）", () => {
     render(<TraceView turnId={413} />);
     fireEvent.click(await screen.findByText(/工具调用 · legacy/));
     expect(screen.getByText("杭州今天多云 18 度")).toBeTruthy();
+  });
+});
+
+describe("PromptBlock（prompt 数组结构化渲染，2026-11-22）", () => {
+  it("parsePromptMessages：合法 ToolMsg[] 才解析，其余 null", () => {
+    const good = JSON.stringify([
+      { role: "system", content: "# 人格宪法" },
+      { role: "user", content: "周四聊天原文" },
+    ]);
+    expect(parsePromptMessages(good)).toHaveLength(2);
+    expect(parsePromptMessages(good)![0].role).toBe("system");
+    // 非 JSON / 非 数组 / 字段缺失 / 空数组 → null
+    expect(parsePromptMessages("本地路径纯文本 prompt")).toBeNull();
+    expect(parsePromptMessages('{"role":"user"}')).toBeNull();
+    expect(parsePromptMessages('[{"role":123,"content":"x"}]')).toBeNull();
+    expect(parsePromptMessages("[]")).toBeNull();
+  });
+
+  it("数组形态：按角色分段渲染 + markdown 正文 + 复制原始全文", () => {
+    const prompt = JSON.stringify([
+      { role: "system", content: "# 环境\n不可变段" },
+      { role: "user", content: "看 **周四** 聊天原文" },
+      { role: "assistant", content: "好的。" },
+    ]);
+    render(<PromptBlock label="本轮 prompt（全文）" text={prompt} />);
+    expect(screen.getByText("系统")).toBeTruthy();
+    expect(screen.getByText("用户")).toBeTruthy();
+    expect(screen.getByText("助手")).toBeTruthy();
+    // markdown 渲染：# → 标题、** → strong
+    expect(document.querySelector(".trace-prompt-body h1")?.textContent).toBe("环境");
+    expect(document.querySelector(".trace-prompt-body strong")?.textContent).toBe("周四");
+    expect(screen.queryByText(/"role":"system"/)).toBeNull();
+  });
+
+  it("非 JSON prompt（本地路径）→ PreBlock 原样兜底", () => {
+    render(<PromptBlock label="本轮 prompt（全文）" text="SYS PROMPT 全文" />);
+    expect(screen.getByText("SYS PROMPT 全文")).toBeTruthy();
+    expect(document.querySelector(".trace-prompt")).toBeNull();
   });
 });

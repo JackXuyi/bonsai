@@ -2,7 +2,10 @@
 
 // 链路追踪时间线（spec-s8 S8-d）：trace_steps 按 seq 渲染垂直时间线。
 // 节点色按 step_kind 分组；llm_round / tool_call 可展开看全文。
+// prompt 数组结构化渲染（2026-11-22）：云端循环的 prompt 是 JSON 序列化的
+// ToolMsg[]，按角色分段 + markdown 渲染；本地路径纯文本 / 坏 JSON 回落原样。
 import { useState } from "react";
+import { renderMarkdown } from "@/lib/markdown";
 import type { TraceStep } from "@/lib/types";
 import { TraceStepCard } from "./TraceStepCard";
 
@@ -76,7 +79,7 @@ function TraceStepDetail({ step }: { step: TraceStep }) {
   return (
     <div className="trace-detail">
       {step.userText && <PreBlock label="当前输入（user message，不在 system prompt 里）" text={step.userText} />}
-      {step.prompt && <PreBlock label="本轮 prompt（全文）" text={step.prompt} />}
+      {step.prompt && <PromptBlock label="本轮 prompt（全文）" text={step.prompt} />}
       {step.output && <PreBlock label="模型原始输出" text={step.output} />}
       {step.argsJson && <PreBlock label="工具请求参数" text={step.argsJson} />}
       {step.summary && step.stepKind === "tool_call" && <ToolResultBlock text={step.summary} />}
@@ -176,6 +179,83 @@ function PreBlock({ label, text }: { label: string; text: string }) {
         </button>
       </div>
       <pre>{text}</pre>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------- prompt 数组结构化渲染
+
+/** prompt 消息条目（cloud_tool_loop 的 llm_round：`serde_json::to_string(&ToolMsg[])`）。 */
+interface PromptMsg {
+  role: string;
+  content: string;
+}
+
+const ROLE_LABEL: Record<string, string> = {
+  system: "系统",
+  user: "用户",
+  assistant: "助手",
+  tool: "工具返回",
+};
+
+/** 宽松解析 ToolMsg[]：合法的 {role,content} 字符串数组才走结构化；其余 null。 */
+export function parsePromptMessages(text: string): PromptMsg[] | null {
+  try {
+    const j = JSON.parse(text) as unknown;
+    if (!Array.isArray(j) || j.length === 0) return null;
+    const ok = j.every(
+      (m) =>
+        m &&
+        typeof m === "object" &&
+        typeof (m as { role?: unknown }).role === "string" &&
+        typeof (m as { content?: unknown }).content === "string"
+    );
+    return ok ? (j as PromptMsg[]) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** prompt 展示块：数组形态按角色分段、正文 markdown 渲染（renderMarkdown
+ * 先转义原文，无注入面扩大）；本地路径纯文本 / 坏 JSON 回落 PreBlock 原样。
+ * 复制按钮始终复制原始全文（排障语义）。导出以便单测。 */
+export function PromptBlock({ label, text }: { label: string; text: string }) {
+  const copy = () => {
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(text).then(
+        () => {},
+        () => {}
+      );
+    }
+  };
+  const msgs = parsePromptMessages(text);
+  if (!msgs) return <PreBlock label={label} text={text} />;
+  return (
+    <div className="trace-pre">
+      <div className="trace-pre-head">
+        <span className="trace-pre-label">{label}</span>
+        <button type="button" className="msg-act" onClick={copy}>
+          复制
+        </button>
+      </div>
+      <ol className="trace-prompt">
+        {msgs.map((m, i) => (
+          <li key={i} className={`trace-prompt-msg role-${m.role}`}>
+            <div className="trace-prompt-role">
+              <span className={`trace-prompt-badge role-${m.role}`}>
+                {ROLE_LABEL[m.role] ?? m.role}
+              </span>
+              <span className="trace-prompt-index">
+                {i + 1}/{msgs.length}
+              </span>
+            </div>
+            <div
+              className="trace-prompt-body"
+              dangerouslySetInnerHTML={{ __html: renderMarkdown(m.content) }}
+            />
+          </li>
+        ))}
+      </ol>
     </div>
   );
 }
