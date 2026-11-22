@@ -7,6 +7,7 @@
 
 - 主要作用于 `frontend/`（Next.js 14 + React 18 + TypeScript 5.7 + Tailwind CSS 3.4 + zustand 5）。
 - `src-tauri/`（Rust）遵循 cargo clippy / 现有模块分层约定，不受本文件样式类条款约束。
+- **§模型调用约束为全项目硬约束**，同时作用于 `frontend/` 与 `src-tauri/`，不受上述范围限定。
 
 ## 核心约束（硬性，违反不允许提交）
 
@@ -23,6 +24,12 @@
 5. **样式统一走 Tailwind**：项目使用 TypeScript + Tailwind CSS + React，**非必要不手写样式**。
    - 禁止 inline `style={{...}}`（动态值除外，且需注释原因）；禁止新建零散 CSS 文件。
    - 确需全局/动态样式写入 `src/app/globals.css` 或现有样式文件，使用语义化 CSS 变量 / Tailwind theme token（`tailwind.config.ts`），不硬编码颜色和间距。
+
+## 模型调用约束（全项目硬约束，2026-11-22 裁决）
+
+1. **工具（tool）与技能（skill）只在云端支持工具调用的模型上启用**（当前为 DeepSeek function calling，`cloud_tool_loop` 通道）：内置工具、MCP 工具、skill 注入均随云端管线挂载，本地管线一律不出现。
+2. **本地模型只做纯聊天，零工具调用**：本地路径（Ollama sidecar）不挂载任何 tool provider、不发 tools[]、不做规则路由兜底之外的工具执行。被问及需要工具的能力时，诚实回答需开启云端模式，绝不伪装执行。
+3. 违反形态示例（均不允许提交）：给本地 chat 管线接 `tools[]` 参数、在本地路径新增工具执行分支、把 skill 注入进本地 system prompt、为「让本地模型也能调工具」引入 JSON 协议 hack（三级渐进 JSON 管线已于 2026-11-22 整体退役，不得复活）。
 
 ## 通用规范（业界惯例，结合本项目采纳）
 
