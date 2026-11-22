@@ -262,6 +262,11 @@ fn uuid_v4() -> String {
     hex
 }
 
+/// 任务卡 id（v12 外壳：tasks 表主键，纯本地标识）。
+pub fn new_task_id() -> String {
+    uuid_v4()
+}
+
 static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 // ---------------------------------------------------------------- runtime state
@@ -410,6 +415,9 @@ pub struct AgentKit {
     /// 无视全局 approval_mode 强制走它——「危险动作审批覆盖率 100%」。
     /// 无 AppHandle 时（headless/单测）它拒绝一切（沉默不得变成同意）。
     pub ask_gate: Box<dyn ApprovalGate>,
+    /// 任务卡外壳（v12 §8）：云端循环创建 task 后写入，审计行随之关联
+    /// `tool_calls.task_id`。本地/无任务路径恒 None。
+    pub task_id: Mutex<Option<String>>,
     pub prompt_trace: Mutex<Vec<String>>,
 }
 
@@ -419,6 +427,7 @@ impl AgentKit {
             providers: Vec::new(),
             gate: Box::new(crate::agent_tools::AutoAllowGate),
             ask_gate: Box::new(AskFirstGate::new(Arc::new(ApprovalBroker::default()), None)),
+            task_id: Mutex::new(None),
             prompt_trace: Mutex::new(Vec::new()),
         }
     }
@@ -483,6 +492,11 @@ fn find_owner<'a>(
     None
 }
 
+/// 任务卡关联（v12）：kit.task_id 的只读快照，audit 行落库用。
+fn kit_task_id(kit: &AgentKit) -> Option<String> {
+    kit.task_id.lock().ok().and_then(|g| g.clone())
+}
+
 /// Execute a validated call through the gate + provider, fully audited.
 /// The store lock is held ONLY for audit-row writes and for providers that
 /// declare `needs_conn()` — MCP subprocess execution (up to ~10s timeout)
@@ -518,6 +532,7 @@ pub fn execute_audited(
             Some(kit.trace_ref().as_str()),
             descriptor.remote,
             Some(started.elapsed().as_millis() as i64),
+            kit_task_id(kit).as_deref(),
         );
         return Err(reason);
     }
@@ -535,6 +550,7 @@ pub fn execute_audited(
             Some(kit.trace_ref().as_str()),
             descriptor.remote,
             Some(started.elapsed().as_millis() as i64),
+            kit_task_id(kit).as_deref(),
         );
         return Err("forbidden".into());
     }
@@ -554,6 +570,7 @@ pub fn execute_audited(
             Some(kit.trace_ref().as_str()),
             descriptor.remote,
             Some(started.elapsed().as_millis() as i64),
+            kit_task_id(kit).as_deref(),
         );
         return Err("denied".into());
     }
@@ -583,6 +600,7 @@ pub fn execute_audited(
                 Some(kit.trace_ref().as_str()),
                 descriptor.remote,
                 duration,
+                kit_task_id(kit).as_deref(),
             );
             Ok(out)
         }
@@ -606,6 +624,7 @@ pub fn execute_audited(
                 Some(kit.trace_ref().as_str()),
                 descriptor.remote,
                 duration,
+                kit_task_id(kit).as_deref(),
             );
             Err(e)
         }
@@ -625,6 +644,7 @@ fn audit_log(
     trace: Option<&str>,
     remote: bool,
     duration_ms: Option<i64>,
+    task_id: Option<&str>,
 ) {
     let Ok(conn) = store.0.lock() else {
         log::warn!("audit_log: store lock poisoned — row dropped");
@@ -640,6 +660,7 @@ fn audit_log(
         trace,
         remote,
         duration_ms,
+        task_id,
     )
     .ok();
 }
@@ -707,7 +728,7 @@ pub fn build_agent_kit(conn: &Connection, state: &AgentState, user_text: &str) -
     let ask_gate: Box<dyn ApprovalGate> =
         Box::new(AskFirstGate::new(state.approvals.clone(), state.app.clone()));
 
-    AgentKit { providers, gate, ask_gate, prompt_trace: Mutex::new(Vec::new()) }
+    AgentKit { providers, gate, ask_gate, task_id: Mutex::new(None), prompt_trace: Mutex::new(Vec::new()) }
 }
 
 /// One-at-a-time approval handshake (spec-s4): the chat turn reserves a slot
@@ -1266,6 +1287,7 @@ pub(crate) mod tests {
             Some("trace-1"),
             true,
             Some(42),
+            None,
         )
         .unwrap();
         let records = db::tool_call_records(&conn, 10).unwrap();
@@ -1323,7 +1345,7 @@ pub(crate) mod tests {
             providers: vec![Box::new(ok)],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
             ask_gate: Box::new(AskFirstGate::new(std::sync::Arc::new(ApprovalBroker::default()), None)),
-            prompt_trace: Mutex::new(Vec::new()),
+            task_id: Mutex::new(None),            prompt_trace: Mutex::new(Vec::new()),
         };
         kit.trace("round1:candidates=1".into());
         let out = execute_audited(
@@ -1353,7 +1375,7 @@ pub(crate) mod tests {
             providers: vec![Box::new(broken)],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
             ask_gate: Box::new(AskFirstGate::new(std::sync::Arc::new(ApprovalBroker::default()), None)),
-            prompt_trace: Mutex::new(Vec::new()),
+            task_id: Mutex::new(None),            prompt_trace: Mutex::new(Vec::new()),
         };
         let err = execute_audited(&s, &kit_broken, "weather", serde_json::json!({})).unwrap_err();
         assert_eq!(err, crate::mcp::ERR_TIMEOUT);
@@ -1376,7 +1398,7 @@ pub(crate) mod tests {
             providers: vec![Box::new(provider)],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
             ask_gate: Box::new(AskFirstGate::new(std::sync::Arc::new(ApprovalBroker::default()), None)),
-            prompt_trace: Mutex::new(Vec::new()),
+            task_id: Mutex::new(None),            prompt_trace: Mutex::new(Vec::new()),
         };
 
         // missing required → rejected, provider never called.
@@ -1492,7 +1514,7 @@ pub(crate) mod tests {
             ],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
             ask_gate: Box::new(AskFirstGate::new(std::sync::Arc::new(ApprovalBroker::default()), None)),
-            prompt_trace: Mutex::new(Vec::new()),
+            task_id: Mutex::new(None),            prompt_trace: Mutex::new(Vec::new()),
         };
         let names: Vec<String> = kit.catalog().into_iter().map(|d| d.name).collect();
         assert_eq!(names, vec!["alpha".to_string(), "zebra".to_string()]);
@@ -1520,7 +1542,7 @@ pub(crate) mod tests {
             providers: vec![Box::new(p)],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
             ask_gate: Box::new(AskFirstGate::new(std::sync::Arc::new(ApprovalBroker::default()), None)),
-            prompt_trace: Mutex::new(Vec::new()),
+            task_id: Mutex::new(None),            prompt_trace: Mutex::new(Vec::new()),
         }
     }
 
@@ -1557,7 +1579,7 @@ pub(crate) mod tests {
             providers: vec![Box::new(p)],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
             ask_gate: Box::new(AllowAllGate),
-            prompt_trace: Mutex::new(Vec::new()),
+            task_id: Mutex::new(None),            prompt_trace: Mutex::new(Vec::new()),
         };
         let out = execute_audited(&s, &kit, "send_mail", serde_json::json!({})).unwrap();
         assert_eq!(out.summary, "已执行");

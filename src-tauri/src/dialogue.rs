@@ -44,6 +44,21 @@ pub const PROACTIVE_SESSION: &str = "proactive";
 /// How often the proactive loop checks the decision layer.
 pub const PROACTIVE_POLL_SECS: u64 = 60;
 
+/// 任务卡（v12 §8 外壳）：一次云端工具循环的摘要，前端渲染进度卡。
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskCard {
+    pub id: String,
+    pub status: String,
+    pub steps: Vec<TaskStep>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskStep {
+    pub seq: usize,
+    pub tool: String,
+    pub status: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct DialogueOutcome {
     pub reply: String,
@@ -57,6 +72,8 @@ pub struct DialogueOutcome {
     /// `"agenda_today" | "agenda_tomorrow" | "next" | "search"`. The frontend
     /// uses it to label the bubble instead of blaming a missing model.
     pub tool: Option<String>,
+    /// 任务卡（v12）：本轮发生云端工具循环时非空——步骤清单 + 终态。
+    pub task: Option<TaskCard>,
     /// Trace turn id (spec-s8): the frontend bubble links here for the
     /// generation-trace page. Always Some for turns recorded after the
     /// feature shipped.
@@ -335,8 +352,13 @@ fn tool_label(kit: &crate::mcp_admin::AgentKit, name: &str) -> Option<String> {
         .map(|d| format!("{}:{}", d.kind.as_str(), name))
 }
 
+/// 任务卡关联（v12）：kit.task_id 的只读快照，审计行落库用。
+fn kit_task_id(kit: &crate::mcp_admin::AgentKit) -> Option<String> {
+    kit.task_id.lock().ok().and_then(|g| g.clone())
+}
+
 /// 云端工具循环（v0.2 §4）：模型决定调什么，Rust 执行并回传，直到模型
-/// 给出最终散文或触发护栏上限。返回 (reply, tool_label, streamed=false)。
+/// 给出最终散文或触发护栏上限。返回 (reply, tool_label, 任务卡, streamed=false)。
 #[allow(clippy::too_many_lines)]
 fn cloud_tool_loop(
     store: &MemoryStore,
@@ -346,7 +368,8 @@ fn cloud_tool_loop(
     history: &[crate::persona::eval::Turn],
     user_text: &str,
     rec: &mut TraceRecorder,
-) -> rusqlite::Result<(String, Option<String>, bool)> {
+    mut on_task: Option<&mut dyn FnMut(serde_json::Value)>,
+) -> rusqlite::Result<(String, Option<String>, Option<TaskCard>, bool)> {
     // skill 段进 system prompt（D6：人格全程；skill 仅提示注入）。
     let (skill_text, skill_names) = skill_section(kit);
     let system = if skill_text.is_empty() {
@@ -368,6 +391,7 @@ fn cloud_tool_loop(
                 Some(&kit.trace_ref()),
                 false,
                 None,
+                kit_task_id(kit).as_deref(),
             )
             .ok();
         }
@@ -378,6 +402,11 @@ fn cloud_tool_loop(
         "cloud:tools:{}",
         tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join(",")
     ));
+
+    // 任务卡外壳（v12 §8）：**惰性开卡**——产生第 1 次工具调用才建行
+    // （模型直答不产生任务卡噪音）；id 写回 kit 让审计行关联。
+    let task = std::cell::RefCell::new(TaskCard { id: String::new(), status: "running".into(), steps: Vec::new() });
+    let task_open = std::cell::Cell::new(false);
 
     // 消息序列（Chat Completion 协议：工具轮必须是尾部连续结构，
     // tool 消息紧跟对应 assistant(tool_calls)，不得插在中段 system 里）。
@@ -394,7 +423,7 @@ fn cloud_tool_loop(
     let mut requests = 0usize;
     let mut summaries: Vec<String> = Vec::new();
     let mut forced_note_sent = false;
-    let reply;
+    let mut reply;
 
     loop {
         // 护栏触发 → 强制收尾：去掉 tools（协议默认 tool_choice=none），
@@ -425,7 +454,7 @@ fn cloud_tool_loop(
                     "error",
                     t.elapsed(),
                 );
-                return Ok((String::new(), label, false));
+                return Ok((String::new(), label, None, false));
             }
         };
         rec.llm_round(
@@ -458,6 +487,26 @@ fn cloud_tool_loop(
         ));
         for call in &reply_text.tool_calls {
             executed += 1;
+            if !task_open.get() {
+                let conn = lock_conn(store)?;
+                match db::task_start(&conn, user_text) {
+                    Ok(id) => {
+                        task.borrow_mut().id = id.clone();
+                        if let Ok(mut g) = kit.task_id.lock() {
+                            *g = Some(id);
+                        }
+                        task_open.set(true);
+                        if let Some(cb) = on_task.as_deref_mut() {
+                            cb(serde_json::json!({
+                                "event": "task_start",
+                                "id": task.borrow().id,
+                                "goal": task_goal(user_text),
+                            }));
+                        }
+                    }
+                    Err(e) => log::warn!("task_start failed (card degraded): {e}"),
+                }
+            }
             let args_text = call.arguments.to_string();
             let t_tool = std::time::Instant::now();
             match crate::mcp_admin::execute_audited(store, kit, &call.name, call.arguments.clone()) {
@@ -465,6 +514,11 @@ fn cloud_tool_loop(
                     rec.tool_call(&call.name, &args_text, &out.full, "ok", None, t_tool.elapsed());
                     summaries.push(format!("{}：{}", call.name, out.summary));
                     label = tool_label(kit, &call.name).or_else(|| label.clone());
+                    {
+                        let mut t = task.borrow_mut();
+                        let seq = t.steps.len();
+                        t.steps.push(TaskStep { seq, tool: call.name.clone(), status: "ok".into() });
+                    }
                     msgs.push(crate::llm::ToolMsg::tool_result(&call.id, &out.summary));
                 }
                 Err(e) => {
@@ -477,7 +531,24 @@ fn cloud_tool_loop(
                         format!("执行失败：{}", crate::agent_tools::clip_chars(&masked, 200)),
                     ));
                     label = tool_label(kit, &call.name).or_else(|| label.clone());
+                    {
+                        let mut t = task.borrow_mut();
+                        let seq = t.steps.len();
+                        let st = if e == "denied" { "denied".into() } else { "error".into() };
+                        t.steps.push(TaskStep { seq, tool: call.name.clone(), status: st });
+                    }
                 }
+            }
+            if let (Some(cb), true) = (on_task.as_deref_mut(), task_open.get()) {
+                let t = task.borrow();
+                let last = t.steps.last().unwrap();
+                cb(serde_json::json!({
+                    "event": "task_step",
+                    "id": t.id,
+                    "seq": last.seq,
+                    "tool": last.tool,
+                    "status": last.status,
+                }));
             }
         }
     }
@@ -490,13 +561,30 @@ fn cloud_tool_loop(
     // 全程没拿到正文（护栏内始终 tool_calls / 全空）→ 摘要模板兜底，
     // 绝不带模型没说的话。流式交给调用方统一发射（返回 streamed=false）。
     if reply.trim().is_empty() && !summaries.is_empty() {
-        return Ok((
-            format!("（查到的先放这儿：{}——盆栽这会儿没组织好语言。）", summaries.join("；")),
-            label,
-            false,
-        ));
+        reply = format!("（查到的先放这儿：{}——盆栽这会儿没组织好语言。）", summaries.join("；"));
     }
-    Ok((reply, label, false))
+    // 任务卡收尾：有产出（正文或摘要）= done；全程颗粒无收 = failed。
+    let status = if reply.trim().is_empty() { "failed" } else { "done" };
+    let mut card = None;
+    if task_open.get() {
+        let t = task.borrow();
+        let conn = lock_conn(store)?;
+        let _ = db::task_finish(&conn, &t.id, status, executed as i64, Some(&reply));
+        if let Ok(mut g) = kit.task_id.lock() {
+            *g = None;
+        }
+        card = Some(TaskCard { id: t.id.clone(), status: status.to_string(), steps: t.steps.clone() });
+        drop(t);
+        if let Some(cb) = on_task.as_deref_mut() {
+            cb(serde_json::json!({ "event": "task_done", "id": card.as_ref().unwrap().id, "status": status }));
+        }
+    }
+    Ok((reply, label, card, false))
+}
+
+/// 任务卡目标（用户原话前 80 字，人工可读）。
+fn task_goal(user_text: &str) -> String {
+    user_text.chars().take(80).collect()
 }
 
 /// 本地模式的 recall 路由（v0.2 §5，D1 裁决）：本地模型不做工具调用，
@@ -705,7 +793,7 @@ pub fn chat_turn(
     raining: bool,
     access: crate::calendar::CalendarAccess,
 ) -> rusqlite::Result<DialogueOutcome> {
-    chat_turn_inner(store, backend, card, session_id, user_text, hour, raining, access, None, None)
+    chat_turn_inner(store, backend, card, session_id, user_text, hour, raining, access, None, None, None)
 }
 
 /// Same turn, with the agent pipeline (spec-s3): three-stage progressive
@@ -721,7 +809,7 @@ pub fn chat_turn_with_kit(
     access: crate::calendar::CalendarAccess,
     kit: &mut crate::mcp_admin::AgentKit,
 ) -> rusqlite::Result<DialogueOutcome> {
-    chat_turn_inner(store, backend, card, session_id, user_text, hour, raining, access, Some(kit), None)
+    chat_turn_inner(store, backend, card, session_id, user_text, hour, raining, access, Some(kit), None, None)
 }
 
 /// Same turn with incremental delivery: every model chunk goes to `on_delta`
@@ -737,7 +825,7 @@ pub fn chat_turn_streaming(
     access: crate::calendar::CalendarAccess,
     on_delta: &mut dyn FnMut(&str),
 ) -> rusqlite::Result<DialogueOutcome> {
-    chat_turn_inner(store, backend, card, session_id, user_text, hour, raining, access, None, Some(on_delta))
+    chat_turn_inner(store, backend, card, session_id, user_text, hour, raining, access, None, Some(on_delta), None)
 }
 
 /// Streaming + agent pipeline: deltas fire on the final round only
@@ -753,8 +841,12 @@ pub fn chat_turn_streaming_with_kit(
     access: crate::calendar::CalendarAccess,
     kit: &mut crate::mcp_admin::AgentKit,
     on_delta: &mut dyn FnMut(&str),
+    on_task: &mut dyn FnMut(serde_json::Value),
 ) -> rusqlite::Result<DialogueOutcome> {
-    chat_turn_inner(store, backend, card, session_id, user_text, hour, raining, access, Some(kit), Some(on_delta))
+    chat_turn_inner(
+        store, backend, card, session_id, user_text, hour, raining, access,
+        Some(kit), Some(on_delta), Some(on_task),
+    )
 }
 
 fn chat_turn_inner(
@@ -768,6 +860,7 @@ fn chat_turn_inner(
     access: crate::calendar::CalendarAccess,
     mut kit: Option<&mut crate::mcp_admin::AgentKit>,
     mut on_delta: Option<&mut dyn FnMut(&str)>,
+    mut on_task: Option<&mut dyn FnMut(serde_json::Value)>,
 ) -> rusqlite::Result<DialogueOutcome> {
     // Trace collector (spec-s8): lives for the whole turn; every path below
     // records its steps and persists the draft together with the dialogue
@@ -810,6 +903,7 @@ fn chat_turn_inner(
             model_used: false,
             crisis: true,
             tool: None,
+            task: None,
             turn_id: Some(turn_id),
         });
     }
@@ -867,6 +961,7 @@ fn chat_turn_inner(
             model_used: false,
             crisis: false,
             tool: Some(tool.action.to_string()),
+            task: None,
             turn_id: Some(turn_id),
         });
     }
@@ -888,10 +983,10 @@ fn chat_turn_inner(
     // turn — record both sides, filter, out.
     if let Some(kit) = kit.take().filter(|k| k.has_capabilities()) {
         let reborrow = on_delta.as_mut().map(|f| &mut **f as &mut dyn FnMut(&str));
-        let (raw, tool_label, streamed) = match backend.tool_client() {
+        let (raw, tool_label, task_card, streamed) = match backend.tool_client() {
             Some(client) => {
                 kit.trace("mode:cloud".into());
-                cloud_tool_loop(store, client, kit, &system, &history, user_text, &mut rec)?
+                cloud_tool_loop(store, client, kit, &system, &history, user_text, &mut rec, on_task.take())?
             }
             None => {
                 kit.trace("mode:local".into());
@@ -900,7 +995,7 @@ fn chat_turn_inner(
                 match local_recall_answer(
                     store, backend, kit, &system, &history, user_text, &mut rec, reborrow,
                 )? {
-                    Some(triple) => triple,
+                    Some(triple) => (triple.0, triple.1, None, triple.2),
                     None => {
                         // 直答（原有单轮路径，人格全程在）。
                         let raw = match on_delta.as_deref_mut() {
@@ -909,7 +1004,7 @@ fn chat_turn_inner(
                             ),
                             None => backend.reply(&system, &history, user_text, CHAT_TEMPERATURE),
                         };
-                        (raw, None, true)
+                        (raw, None, None, true)
                     }
                 }
             }
@@ -956,6 +1051,7 @@ fn chat_turn_inner(
             model_used,
             crisis: false,
             tool: tool_label,
+            task: task_card,
             turn_id: Some(turn_id),
         });
     }
@@ -1019,6 +1115,7 @@ fn chat_turn_inner(
         model_used,
         crisis: false,
         tool: None,
+        task: None,
         turn_id: Some(turn_id),
     })
 }
@@ -1250,6 +1347,11 @@ pub async fn dialogue_chat_stream(
         let mut emit = |delta: &str| {
             let _ = on_delta.send(serde_json::json!({ "delta": delta }));
         };
+        // 任务卡进度（v12）：同一 Channel 上的结构化消息——前端按
+        // msg.task_step 分流渲染，不进正文气泡。
+        let mut emit_task = |v: serde_json::Value| {
+            let _ = on_delta.send(serde_json::json!({ "task_step": v }));
+        };
         chat_turn_streaming_with_kit(
             store.inner(),
             backend.as_mut(),
@@ -1261,6 +1363,7 @@ pub async fn dialogue_chat_stream(
             calendar.inner().source().access(),
             &mut kit,
             &mut emit,
+            &mut emit_task,
         )
         .map_err(|e| e.to_string())
     })
@@ -1576,7 +1679,7 @@ mod tests {
             providers: vec![Box::new(p)],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
             ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
-            prompt_trace: std::sync::Mutex::new(Vec::new()),
+            task_id: std::sync::Mutex::new(None),            prompt_trace: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -1697,7 +1800,7 @@ mod tests {
 
         // 云端模式（v0.2 分流）：工具进 tools[] 参数，system prompt 不再有
         // 三级管线的 candidates 协议段。
-        let mut client = tool_client(vec![content_reply("我不需要工具。")]);
+        let client = tool_client(vec![content_reply("我不需要工具。")]);
         let mut backend = crate::persona::eval::LocalBackend::with_client(
             client.0.clone(),
             crate::llm::ClientKind::Cloud,
@@ -1784,7 +1887,7 @@ mod tests {
             })],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
             ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
-            prompt_trace: std::sync::Mutex::new(Vec::new()),
+            task_id: std::sync::Mutex::new(None),            prompt_trace: std::sync::Mutex::new(Vec::new()),
         };
 
         // Crisis text with a skill enabled → still the fixed resource card,
@@ -1831,7 +1934,7 @@ mod tests {
             providers: vec![Box::new(crate::skill::SkillProvider { packs: vec![pack] })],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
             ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
-            prompt_trace: std::sync::Mutex::new(Vec::new()),
+            task_id: std::sync::Mutex::new(None),            prompt_trace: std::sync::Mutex::new(Vec::new()),
         };
         // 云端循环（v0.2 §7）：skill 全文进 system prompt（untrusted 声明），
         // 模型直接以 skill 内容作答——无执行环节，audit 记 answered。
@@ -1874,7 +1977,7 @@ mod tests {
             })],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
             ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
-            prompt_trace: std::sync::Mutex::new(Vec::new()),
+            task_id: std::sync::Mutex::new(None),            prompt_trace: std::sync::Mutex::new(Vec::new()),
         };
         let (client, seen) = tool_client(vec![content_reply("直接用技能里的做法回答。")]);
         let mut backend =
@@ -1957,7 +2060,7 @@ mod tests {
                 std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()),
                 None,
             )),
-            prompt_trace: std::sync::Mutex::new(Vec::new()),
+            task_id: std::sync::Mutex::new(None),            prompt_trace: std::sync::Mutex::new(Vec::new()),
         };
         let out = chat_turn_with_kit(
             &s, &mut backend, &c, "s1", "天气", 10, false,
@@ -1984,7 +2087,7 @@ mod tests {
             providers: vec![Box::new(crate::memory_search::MemorySearchProvider)],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
             ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
-            prompt_trace: std::sync::Mutex::new(Vec::new()),
+            task_id: std::sync::Mutex::new(None),            prompt_trace: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -2052,9 +2155,10 @@ mod tests {
         ]);
         let deltas: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
         let mut emit = |d: &str| deltas.lock().unwrap().push(d.to_string());
+        let mut no_task = |_v: serde_json::Value| {};
         let out = chat_turn_streaming_with_kit(
             &s, &mut backend, &c, "s1", "总结一下我18号说了啥", 10, false,
-            crate::calendar::CalendarAccess::Denied, &mut kit, &mut emit,
+            crate::calendar::CalendarAccess::Denied, &mut kit, &mut emit, &mut no_task,
         )
         .unwrap();
         assert_eq!(out.reply, "18 号聊了报销流程，找谁审批都记着呢。");
@@ -2100,7 +2204,7 @@ mod tests {
             ))],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
             ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
-            prompt_trace: std::sync::Mutex::new(Vec::new()),
+            task_id: std::sync::Mutex::new(None),            prompt_trace: std::sync::Mutex::new(Vec::new()),
         };
         let (client, seen) = tool_client(vec![
             tool_calls_reply(&[("weather", serde_json::json!({}))]),
@@ -2204,7 +2308,7 @@ mod tests {
             providers: vec![Box::new(p)],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
             ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
-            prompt_trace: std::sync::Mutex::new(Vec::new()),
+            task_id: std::sync::Mutex::new(None),            prompt_trace: std::sync::Mutex::new(Vec::new()),
         };
         let mut backend = SeqBackend::new(&["（检索挂了，直答兜底。）"]);
         let out = chat_turn_with_kit(
@@ -2261,7 +2365,7 @@ mod tests {
             providers,
             gate: Box::new(crate::agent_tools::AutoAllowGate),
             ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
-            prompt_trace: std::sync::Mutex::new(Vec::new()),
+            task_id: std::sync::Mutex::new(None),            prompt_trace: std::sync::Mutex::new(Vec::new()),
         };
         assert_eq!(kit.catalog().len(), 100);
         assert_eq!(kit.catalog_all().len(), 120);
@@ -2310,6 +2414,54 @@ mod tests {
         assert_eq!(cap[..5].iter().filter(|(_, tools, _)| tools.len() == 1).count(), 5);
         let records = with_conn(&s, |conn| db::tool_call_records(conn, 10).unwrap());
         assert_eq!(records.len(), 5, "每次执行都落审计");
+    }
+
+    /// 任务卡外壳（v12 §8）：云端循环落 tasks 行（done + 步骤数），审计行
+    /// 带 task_id 关联；模型直答（未执行任何工具）不产生任务卡噪音。
+    #[test]
+    fn cloud_loop_opens_and_finishes_a_task_card() {
+        let s = mem();
+        let c = card();
+        // 直答（tools 有但模型不调）→ 无任务行。
+        let mut backend = cloud_backend(vec![content_reply("我不需要工具。")]);
+        let mut kit = weather_kit();
+        chat_turn_with_kit(
+            &s, &mut backend, &c, "s1", "在吗", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit,
+        )
+        .unwrap();
+        assert_eq!(with_conn(&s, |conn| db::task_list(conn, 5).unwrap().len()), 0);
+
+        // 一次工具调用 → tasks 行 done，tool_calls.task_id 关联。
+        let mut backend = cloud_backend(vec![
+            tool_calls_reply(&[("weather", serde_json::json!({"city": "杭州"}))]),
+            content_reply("杭州多云。"),
+        ]);
+        let out = chat_turn_with_kit(
+            &s, &mut backend, &c, "s1", "今天杭州天气怎么样", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit,
+        )
+        .unwrap();
+        let card = out.task.expect("task card present");
+        assert_eq!(card.status, "done");
+        assert_eq!(card.steps.len(), 1);
+        assert_eq!(card.steps[0].tool, "weather");
+        let tasks = with_conn(&s, |conn| db::task_list(conn, 5).unwrap());
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].status, "done");
+        assert_eq!(tasks[0].tool_calls, 1);
+        assert!(tasks[0].goal.contains("杭州"));
+        let audit = with_conn(&s, |conn| db::tool_call_records(conn, 10).unwrap());
+        let linked = with_conn(&s, |conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM tool_calls WHERE task_id IS NOT NULL",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+        });
+        assert_eq!(linked, 1, "audit row carries the task_id");
+        assert_eq!(audit.len(), 1);
     }
 
     // ---- lock-narrowing regressions (2026-11-20)

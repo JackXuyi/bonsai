@@ -17,6 +17,9 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use super::clock;
 
+/// SCHEMA_VERSION = 12（2026-11-22）：任务卡外壳（plan-task-card v0.2 §8）——
+/// `tasks` 表（一次云端工具循环一行）+ `tool_calls.task_id` 关联列。
+/// 审计行不进 ACTIVITY_KINDS（自己陪自己防线的延伸）。
 /// SCHEMA_VERSION = 11（2026-11-21）：trace_steps 补 user_text 列——当前
 /// 输入作为 user message 传给模型（不在 system prompt 里），step 级 trace
 /// 此前看不到它（turn 级 turn_trace.user_text 一直有）。
@@ -25,7 +28,7 @@ use super::clock;
 /// EXISTS 不会给已有表加列；v9→v9 不触发 migrate，INSERT 带 user_text 直接
 /// 报 "table turn_trace has no column named user_text"。教训：改 SCHEMA 必
 /// 须同时 bump 此版本号。
-pub(crate) const SCHEMA_VERSION: i64 = 11;
+pub(crate) const SCHEMA_VERSION: i64 = 12;
 
 /// Test-only: materialise the full schema on a bare in-memory connection.
 /// Other modules' tests build their own `Connection::open_in_memory()` and
@@ -240,7 +243,20 @@ CREATE TABLE IF NOT EXISTS tool_calls (
     params_summary TEXT,
     result_status  TEXT,
     prompt_trace   TEXT,
-    remote         INTEGER DEFAULT 0
+    remote         INTEGER DEFAULT 0,
+    -- 任务卡外壳（v12）：本行属于哪次云端工具循环（tasks.id，TEXT uuid）
+    task_id        TEXT
+);
+
+-- 任务卡外壳（plan-task-card v0.2 §8，v12）：一次云端工具循环一行；
+-- 步骤明细在 tool_calls（task_id 关联）。审计不进 ACTIVITY_KINDS。
+CREATE TABLE IF NOT EXISTS tasks (
+    id           TEXT PRIMARY KEY,   -- uuid
+    created_at   TEXT NOT NULL,      -- clock::now_iso()
+    goal         TEXT NOT NULL,      -- 用户原话前 80 字（人工可读）
+    status       TEXT NOT NULL,      -- running / done / failed
+    tool_calls   INTEGER NOT NULL DEFAULT 0,
+    final_reply  TEXT
 );
 
 -- MCP servers (plan-agent-mcp-skill.md §3.2, spec-s2). Secrets in
@@ -375,6 +391,8 @@ pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         add_column_if_missing(conn, "turn_trace", "reply_text", "TEXT")?;
         // v11: step 级当前输入（user message 不在 system prompt 里，trace 盲点）
         add_column_if_missing(conn, "trace_steps", "user_text", "TEXT")?;
+        // v12: 任务卡外壳（tasks 表由 SCHEMA 的 IF NOT EXISTS 建出）。
+        add_column_if_missing(conn, "tool_calls", "task_id", "TEXT")?;
     }
 
     set_user_version(conn, SCHEMA_VERSION)?;
@@ -1435,11 +1453,12 @@ pub fn log_agent_tool_call(
     prompt_trace: Option<&str>,
     remote: bool,
     duration_ms: Option<i64>,
+    task_id: Option<&str>,
 ) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT INTO tool_calls
-           (ts, tool, action, outcome, result_status, params_summary, prompt_trace, remote, duration_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+           (ts, tool, action, outcome, result_status, params_summary, prompt_trace, remote, duration_ms, task_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             clock::now_iso(),
             tool,
@@ -1449,10 +1468,70 @@ pub fn log_agent_tool_call(
             params_summary,
             prompt_trace,
             remote as i64,
-            duration_ms
+            duration_ms,
+            task_id
         ],
     )?;
     Ok(())
+}
+
+// ---------------------------------------------------------------- tasks（任务卡外壳，v12）
+
+/// 一次云端工具循环开始：落 running 行，返回 id（tool_calls.task_id 关联用）。
+pub fn task_start(conn: &Connection, goal: &str) -> rusqlite::Result<String> {
+    let id = crate::mcp_admin::new_task_id();
+    let clipped: String = goal.chars().take(80).collect();
+    conn.execute(
+        "INSERT INTO tasks (id, created_at, goal, status) VALUES (?1, ?2, ?3, 'running')",
+        params![id, clock::now_iso(), clipped],
+    )?;
+    Ok(id)
+}
+
+/// 循环结束：写终态。`tool_calls_count` 为本次循环执行的调用数（模板兜底
+/// 路径也如实记）。
+pub fn task_finish(
+    conn: &Connection,
+    id: &str,
+    status: &str,
+    tool_calls_count: i64,
+    final_reply: Option<&str>,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE tasks SET status = ?2, tool_calls = ?3, final_reply = ?4 WHERE id = ?1",
+        params![id, status, tool_calls_count, final_reply],
+    )?;
+    Ok(())
+}
+
+/// 任务卡读取（UI 只读总览，沿 tool_call_records 惯例：最新在前）。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskRow {
+    pub id: String,
+    pub created_at: String,
+    pub goal: String,
+    pub status: String,
+    pub tool_calls: i64,
+    pub final_reply: Option<String>,
+}
+
+pub fn task_list(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<TaskRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, created_at, goal, status, tool_calls, final_reply
+         FROM tasks ORDER BY rowid DESC LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(params![limit], |r| {
+        Ok(TaskRow {
+            id: r.get(0)?,
+            created_at: r.get(1)?,
+            goal: r.get(2)?,
+            status: r.get(3)?,
+            tool_calls: r.get(4)?,
+            final_reply: r.get(5)?,
+        })
+    })?;
+    rows.collect()
 }
 
 /// One audit row as the UI reads it (spec-s6 tool-call records card).
@@ -2208,6 +2287,7 @@ mod tests {
                 None,
                 false,
                 Some(n),
+                None,
             )
             .unwrap();
         }
