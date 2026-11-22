@@ -61,12 +61,12 @@ impl SummaryKind {
         }
     }
 
-    /// How many user utterances the material block may show. Weekly needs a
-    /// wider sample; both are capped so a 2B model still gets a short prompt.
-    fn turn_sample(self) -> usize {
+    /// Transcript lines the model may see (of the ≤60 recalled rows). Daily
+    /// stays lean; a weekly report needs the whole week's shape.
+    fn dialogue_sample(self) -> usize {
         match self {
-            SummaryKind::Daily => 6,
-            SummaryKind::Weekly => 12,
+            SummaryKind::Daily => 24,
+            SummaryKind::Weekly => 60,
         }
     }
 
@@ -270,6 +270,10 @@ pub struct Digest {
     pub window: Window,
     /// User utterances, oldest → newest, deduped and capped.
     pub turns: Vec<String>,
+    /// Whole-window dialogue transcript via `memory_search::recall_in_window`:
+    /// `(local stamp, who, clipped content)` oldest first, both sides of the
+    /// chat. This is what the model actually reads; `turns` only feeds counts.
+    pub dialogue: Vec<(String, String, String)>,
     /// Facts learned inside the window (content only).
     pub facts: Vec<String>,
     pub perceived: usize,
@@ -281,7 +285,7 @@ pub struct Digest {
 
 impl Digest {
     pub fn is_empty(&self) -> bool {
-        self.turns.is_empty()
+        self.dialogue.is_empty()
             && self.facts.is_empty()
             && self.perceived == 0
             && self.stats.predictions_asked == 0
@@ -292,9 +296,19 @@ impl Digest {
     /// week cannot blow the prompt budget.
     pub fn material(&self) -> String {
         let mut out = String::new();
-        out.push_str(&format!("- 聊天轮次：{}（下面只是节选）\n", self.turns.len()));
-        for t in self.turns.iter().rev().take(self.kind.turn_sample()).rev() {
-            out.push_str(&format!("  · {t}\n"));
+        // 对话记录：memory_search 整窗召回的原文，带时间与说话人。
+        out.push_str(&format!(
+            "- 对话记录（{} 条，最早在前）：\n",
+            self.dialogue.len()
+        ));
+        for (stamp, who, content) in self
+            .dialogue
+            .iter()
+            .rev()
+            .take(self.kind.dialogue_sample())
+            .rev()
+        {
+            out.push_str(&format!("  · {stamp} {who}：{content}\n"));
         }
         if !self.facts.is_empty() {
             out.push_str(&format!("- 新记住的事：{} 件\n", self.facts.len()));
@@ -410,6 +424,21 @@ pub fn collect_in(conn: &Connection, kind: SummaryKind, w: Window) -> Digest {
         turns = turns.split_off(turns.len() - kind.turn_scan());
     }
 
+    // 第 2 步走 memory_search 的整窗召回（plan-summary-skill 流程更新）：
+    // 对话原文（含盆栽自己的话与时间戳）+ 当期新记忆，一次性、确定性，
+    // 不依赖模型会调工具——本地 2B 没有工具调用能力。总结请求本身不算
+    // 素材（和 turns 同一条纪律）。
+    let dialogue = crate::memory_search::recall_in_window(
+        conn,
+        w.start,
+        w.end.succ_opt().unwrap_or(w.end),
+    )
+    .lines
+        .into_iter()
+        .filter(|(_, _, content)| intent(content).is_none())
+        .map(|(stamp, who, content)| (stamp, who.to_string(), clip(&content, 80)))
+        .collect::<Vec<_>>();
+
     apps.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     apps.truncate(3);
 
@@ -430,6 +459,7 @@ pub fn collect_in(conn: &Connection, kind: SummaryKind, w: Window) -> Digest {
         kind,
         window: w,
         turns,
+        dialogue,
         facts: facts.into_iter().map(|f| clip(&f.content, 60)).collect(),
         perceived,
         clipboards,
@@ -475,7 +505,7 @@ pub fn prompts(kind: SummaryKind, base_system: &str, contract: &str, d: &Digest)
     }
 
     let mut user = format!(
-        "时间范围：{}（{} 天，到今天此刻为止）。\n下面是我记录到的素材：\n{}\n",
+        "时间范围：{}（{} 天）。\n下面是我记录到的素材：\n{}\n",
         d.window.describe(),
         d.window.days(),
         d.material()
@@ -849,6 +879,25 @@ mod tests {
         assert!(text.contains("没有可总结的"));
         assert!(!text.contains("辛苦了"), "no filler on an empty day");
         assert!(!text.contains("今天聊了"), "counts only appear when real");
+    }
+
+    #[test]
+    fn material_carries_the_memory_search_transcript() {
+        // 流程更新（用户裁决）：第 2 步走 memory_search 整窗召回——对话
+        // 原文双方都在、带时间戳；总结请求本身被滤掉，不喂给模型。
+        let conn = mem();
+        let now = at(2026, 11, 18, 20, 0);
+        let w = window(SummaryKind::Daily, now);
+        seed_dialogue(&conn, &w.start_iso, "user", "在弄供应商 SOP");
+        seed_dialogue(&conn, &w.start_iso, "assistant", "哪一条卡住了？");
+        seed_dialogue(&conn, &w.start_iso, "user", "生成今天的日报");
+        let d = collect(&conn, SummaryKind::Daily, now);
+        assert_eq!(d.dialogue.len(), 2, "the summary request itself is out");
+        let m = d.material();
+        assert!(m.contains("对话记录"));
+        assert!(m.contains("用户：在弄供应商 SOP"));
+        assert!(m.contains("盆栽：哪一条卡住了？"));
+        assert!(!m.contains("生成今天的日报"));
     }
 
     #[test]
