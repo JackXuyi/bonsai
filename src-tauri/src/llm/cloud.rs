@@ -106,6 +106,72 @@ pub fn chat_body(
     })
 }
 
+/// 工具轮请求体（plan-task-card v0.2 §1.1）。与 `chat_body` 分开：
+/// 带 `tools` + `tool_choice:"auto"`，恒非流式（工具轮的响应是
+/// tool_calls JSON，流式展示会闪 JSON；最终作答轮 v1 也非流式）。
+/// 思考模式不支持 `tool_choice` 的 required/指定工具（协议 400），且
+/// DeepSeek 扩展字段（thinking/title/safety_check）一概不碰——只发
+/// 标准 OpenAI 兼容三件套。
+pub fn tool_chat_body(
+    model: &str,
+    messages: &[crate::llm::ToolMsg],
+    tools: &[crate::llm::ToolSpec],
+    temperature: f64,
+    max_tokens: u32,
+) -> serde_json::Value {
+    serde_json::json!({
+        "model": model,
+        "messages": messages,
+        "tools": tools,
+        "tool_choice": "auto",
+        "stream": false,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    })
+}
+
+/// 工具轮响应解析（纯函数，形状有测试）。`finish_reason` 取
+/// `choices[0].finish_reason`；`tool_calls` 的 `arguments` 按协议是
+/// JSON 字符串，解析失败时保留 `Value::String(原文)` 交给本地校验拒绝。
+pub fn parse_tool_response(body: &serde_json::Value) -> Result<crate::llm::ToolReply, LlmError> {
+    let choice = body
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .ok_or_else(|| LlmError::Decode("missing choices".into()))?;
+    let finish_reason = choice
+        .get("finish_reason")
+        .and_then(|f| f.as_str())
+        .unwrap_or("stop")
+        .to_string();
+    let message = choice.get("message");
+    let content = message
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_str())
+        .map(str::to_string)
+        .filter(|c| !c.trim().is_empty());
+    let mut tool_calls = Vec::new();
+    if let Some(calls) = message.and_then(|m| m.get("tool_calls")).and_then(|t| t.as_array()) {
+        for call in calls {
+            let id = call.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            let name = call
+                .get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let raw_args = call
+                .get("function")
+                .and_then(|f| f.get("arguments"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("{}");
+            let arguments = serde_json::from_str(raw_args)
+                .unwrap_or(serde_json::Value::String(raw_args.to_string()));
+            tool_calls.push(crate::llm::ToolCallReq { id, name, arguments });
+        }
+    }
+    Ok(crate::llm::ToolReply { content, tool_calls, finish_reason })
+}
+
 #[derive(Debug, Deserialize)]
 struct CloudResponse {
     #[serde(default)]
@@ -174,6 +240,21 @@ impl ChatClient for CloudClient {
 
     fn label(&self) -> String {
         format!("cloud:{}", self.model)
+    }
+
+    /// 工具轮（plan-task-card v0.2 §4）：非流式 POST + 响应解析。
+    fn chat_with_tools(
+        &self,
+        messages: &[crate::llm::ToolMsg],
+        tools: &[crate::llm::ToolSpec],
+        temperature: f64,
+        timeout: u64,
+    ) -> Result<crate::llm::ToolReply, LlmError> {
+        let body = tool_chat_body(&self.model, messages, tools, temperature, CLOUD_MAX_TOKENS);
+        let resp = self.post(&body, timeout, false)?;
+        let parsed: serde_json::Value =
+            resp.into_json().map_err(|e| LlmError::Decode(e.to_string()))?;
+        parse_tool_response(&parsed)
     }
 }
 
@@ -315,5 +396,82 @@ mod tests {
         );
         assert_eq!(error_message("<html>502</html>"), "<html>502</html>");
         assert!(error_message(&"x".repeat(500)).chars().count() <= 200);
+    }
+
+    // ---------- 工具轮（plan-task-card v0.2 §1.1，形状对齐官方文档样例）
+
+    #[test]
+    fn tool_body_carries_tools_and_choice() {
+        use crate::llm::{ToolMsg, ToolSpec};
+        let msgs = vec![ToolMsg::system("s"), ToolMsg::user("杭州天气？")];
+        let tools = vec![ToolSpec {
+            name: "weather".into(),
+            description: "查天气".into(),
+            parameters: Some(serde_json::json!({"type":"object"})),
+        }];
+        let body = tool_chat_body("deepseek-flash", &msgs, &tools, 0.7, CLOUD_MAX_TOKENS);
+        assert_eq!(body["model"], serde_json::json!("deepseek-flash"));
+        assert_eq!(body["tool_choice"], serde_json::json!("auto"));
+        assert_eq!(body["stream"], serde_json::json!(false), "工具轮恒非流式");
+        assert_eq!(body["tools"][0]["type"], serde_json::json!("function"));
+        assert_eq!(body["tools"][0]["function"]["name"], serde_json::json!("weather"));
+        assert_eq!(body["tools"][0]["function"]["parameters"]["type"], serde_json::json!("object"));
+        // 不携带 DeepSeek 扩展字段（thinking/title/safety_check）
+        assert!(body.get("thinking").is_none());
+        assert!(body.get("title").is_none());
+        assert!(body.get("safety_check").is_none());
+        // 无参数工具：parameters 省略（协议规定省略即空参数表）
+        let no_args = vec![ToolSpec { name: "t".into(), description: "d".into(), parameters: None }];
+        let b2 = tool_chat_body("m", &msgs, &no_args, 0.7, CLOUD_MAX_TOKENS);
+        assert!(b2["tools"][0]["function"].get("parameters").is_none());
+    }
+
+    #[test]
+    fn tool_response_parses_calls_and_stop() {
+        // finish_reason=tool_calls（官方文档样例形状）
+        let body: serde_json::Value = serde_json::from_str(
+            r#"{"choices":[{"finish_reason":"tool_calls","message":{
+                "role":"assistant","content":null,
+                "tool_calls":[{"id":"call_abc","type":"function",
+                    "function":{"name":"get_weather","arguments":"{\"location\":\"杭州\"}"}}]}}],
+              "created":1,"model":"deepseek-flash","object":"chat.completion"}"#,
+        )
+        .unwrap();
+        let reply = parse_tool_response(&body).unwrap();
+        assert_eq!(reply.finish_reason, "tool_calls");
+        assert_eq!(reply.tool_calls.len(), 1);
+        assert_eq!(reply.tool_calls[0].id, "call_abc");
+        assert_eq!(reply.tool_calls[0].name, "get_weather");
+        assert_eq!(reply.tool_calls[0].arguments["location"], serde_json::json!("杭州"));
+        assert!(reply.content.is_none());
+
+        // finish_reason=stop → 正文
+        let stop: serde_json::Value = serde_json::from_str(
+            r#"{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"多云 18 度。"}}]}"#,
+        )
+        .unwrap();
+        let reply = parse_tool_response(&stop).unwrap();
+        assert_eq!(reply.finish_reason, "stop");
+        assert!(reply.tool_calls.is_empty());
+        assert_eq!(reply.content.as_deref(), Some("多云 18 度。"));
+    }
+
+    #[test]
+    fn tool_response_keeps_invalid_argument_json_as_string() {
+        // 协议明说「模型并不总是生成有效的 JSON」：解析失败的 arguments
+        // 保留原文成 Value::String，交给 validate_args 产出 bad_args 回传。
+        let body: serde_json::Value = serde_json::from_str(
+            r#"{"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant",
+                "tool_calls":[{"id":"x","type":"function","function":{"name":"t","arguments":"不是json"}}]}}]}"#,
+        )
+        .unwrap();
+        let reply = parse_tool_response(&body).unwrap();
+        assert_eq!(reply.tool_calls[0].arguments, serde_json::Value::String("不是json".into()));
+    }
+
+    #[test]
+    fn tool_response_garbage_is_an_error() {
+        assert!(parse_tool_response(&serde_json::json!({"choices":[]})).is_err());
+        assert!(parse_tool_response(&serde_json::json!({})).is_err());
     }
 }

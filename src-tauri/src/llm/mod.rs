@@ -58,6 +58,150 @@ pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// uncapped stream is how you get a 40k-token bill from one typo.
 pub const CLOUD_MAX_TOKENS: u32 = 4096;
 
+// -------------------------------------------------------------- tool calling
+//
+// 工具调用分流（plan-task-card v0.2，2026-11-22 用户裁决）：本地模型
+// **永远不做**工具调用——只有支持 function calling 的云端传输实现
+// `chat_with_tools`；其余实现走 trait 默认 Err，`tool_unsupported` 由
+// 类型系统强制，而非运行时约定。协议对齐 DeepSeek Chat Completion
+// （api-docs.deepseek.com/zh-cn/guides/tool_calls）：
+//   请求 tools[] = {type:"function", function:{name, description, parameters}}
+//   响应 finish_reason="tool_calls" + message.tool_calls[]{id, function:{name, arguments}}
+//   结果回传 {"role":"tool","tool_call_id":<id>,"content":<摘要>}
+
+/// 一个可被模型调用的工具定义（由 `ToolDescriptor` 生成）。`parameters`
+/// 是 JSON Schema；`None` = 无参数（协议规定：省略 parameters 即空参数表）。
+/// 序列化成协议要求的 `{type:"function", function:{name, description, parameters}}`。
+#[derive(Debug, Clone)]
+pub struct ToolSpec {
+    pub name: String,
+    pub description: String,
+    pub parameters: Option<serde_json::Value>,
+}
+
+impl serde::Serialize for ToolSpec {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut st = serializer.serialize_struct("ToolSpec", 2)?;
+        st.serialize_field("type", "function")?;
+        st.serialize_field(
+            "function",
+            &ToolSpecFunc { name: &self.name, description: &self.description, parameters: &self.parameters },
+        )?;
+        st.end()
+    }
+}
+
+struct ToolSpecFunc<'a> {
+    name: &'a str,
+    description: &'a str,
+    parameters: &'a Option<serde_json::Value>,
+}
+
+impl serde::Serialize for ToolSpecFunc<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut st = serializer.serialize_struct("ToolSpecFunc", 3)?;
+        st.serialize_field("name", self.name)?;
+        st.serialize_field("description", self.description)?;
+        if let Some(p) = self.parameters {
+            st.serialize_field("parameters", p)?;
+        }
+        st.end()
+    }
+}
+
+/// 助手消息携带的「我调用了这些工具」记录（回传时的形状）。
+/// `arguments` 保持协议原样——JSON 字符串，不是解析后的 Value。
+/// 序列化成协议要求的 `{id, type:"function", function:{name, arguments}}`。
+#[derive(Debug, Clone)]
+pub struct ToolCallOut {
+    pub id: String,
+    pub name: String,
+    pub arguments: String,
+}
+
+struct ToolCallFunc<'a> {
+    name: &'a str,
+    arguments: &'a str,
+}
+
+impl serde::Serialize for ToolCallOut {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut st = serializer.serialize_struct("ToolCallOut", 3)?;
+        st.serialize_field("id", &self.id)?;
+        st.serialize_field("type", "function")?;
+        st.serialize_field("function", &ToolCallFunc { name: &self.name, arguments: &self.arguments })?;
+        st.end()
+    }
+}
+
+impl<'a> serde::Serialize for ToolCallFunc<'a> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut st = serializer.serialize_struct("ToolCallFunc", 2)?;
+        st.serialize_field("name", self.name)?;
+        st.serialize_field("arguments", self.arguments)?;
+        st.end()
+    }
+}
+
+/// 工具循环的消息（`Msg` 的工具扩展）。role ∈ system|user|assistant|tool。
+/// 刻意不复用 `Msg`：工具轮的消息形状不同（assistant 可带 tool_calls、
+/// tool 消息带 tool_call_id），单独结构避免污染全部既有调用点。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ToolMsg {
+    pub role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCallOut>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+impl ToolMsg {
+    pub fn system(content: impl Into<String>) -> Self {
+        ToolMsg { role: "system".into(), content: Some(content.into()), tool_calls: Vec::new(), tool_call_id: None }
+    }
+    pub fn user(content: impl Into<String>) -> Self {
+        ToolMsg { role: "user".into(), content: Some(content.into()), tool_calls: Vec::new(), tool_call_id: None }
+    }
+    pub fn assistant(content: impl Into<String>) -> Self {
+        ToolMsg { role: "assistant".into(), content: Some(content.into()), tool_calls: Vec::new(), tool_call_id: None }
+    }
+    /// assistant 的工具调用声明（Chat Completion 协议：assistant 消息的
+    /// content 可为空，tool_calls 必须原样回传）。
+    pub fn assistant_tool_calls(calls: Vec<ToolCallOut>) -> Self {
+        ToolMsg { role: "assistant".into(), content: None, tool_calls: calls, tool_call_id: None }
+    }
+    /// 工具执行结果。`tool_call_id` 必须对应上一次 assistant 消息里的 id。
+    pub fn tool_result(call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        ToolMsg { role: "tool".into(), content: Some(content.into()), tool_calls: Vec::new(), tool_call_id: Some(call_id.into()) }
+    }
+}
+
+/// 模型要求的一次工具调用。`arguments` 已从协议的 JSON 字符串解析；
+/// 解析失败时是 `Value::String(原文)`——交给 `validate_args` 产出
+/// `bad_args:not-an-object`，错误以 tool 消息回传（协议明说模型可能
+/// 臆造参数，本地校验是硬兜底）。
+#[derive(Debug, Clone)]
+pub struct ToolCallReq {
+    pub id: String,
+    pub name: String,
+    pub arguments: serde_json::Value,
+}
+
+/// 一次工具轮的响应。`tool_calls` 非空 ⇒ 继续循环；空且 `content` 有值
+/// ⇒ `finish_reason="stop"`，content 即最终回复。
+#[derive(Debug, Clone)]
+pub struct ToolReply {
+    pub content: Option<String>,
+    pub tool_calls: Vec<ToolCallReq>,
+    pub finish_reason: String,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum LlmError {
     #[error("http transport error: {0}")]
@@ -87,6 +231,19 @@ pub trait ChatClient: Send + Sync {
     /// 且 trait object 无法 downcast。
     fn label(&self) -> String {
         "llm".to_string()
+    }
+
+    /// 工具调用轮（plan-task-card v0.2 §3）。默认 `tool_unsupported`：
+    /// 本地模型不做工具调用，`DialogueBackend::tool_client` 只在云端
+    /// 传输上返回 Some——「本地不执行工具调用」由类型形状强制。
+    fn chat_with_tools(
+        &self,
+        _messages: &[ToolMsg],
+        _tools: &[ToolSpec],
+        _temperature: f64,
+        _timeout: u64,
+    ) -> Result<ToolReply, LlmError> {
+        Err(LlmError::Decode("tool_unsupported".into()))
     }
 }
 
@@ -174,8 +331,14 @@ pub(crate) fn choose(
 /// The one factory the model legs use (spec-m2 §1.1). Read per call, so a
 /// provider/model switch takes effect on the next message.
 pub fn current_client() -> Arc<dyn ChatClient> {
+    current_client_with_kind().0
+}
+
+/// Same factory, plus the transport kind — the dialogue layer's tool path
+/// needs it (只有云端传输走 function calling；本地/Anthropic 走本地路径)。
+pub fn current_client_with_kind() -> (Arc<dyn ChatClient>, ClientKind) {
     let cfg = crate::llm_admin::current();
-    choose(cfg.as_ref(), &crate::llm_cloud::entries()).0
+    choose(cfg.as_ref(), &crate::llm_cloud::entries())
 }
 
 #[cfg(test)]
@@ -242,5 +405,61 @@ mod tests {
         let (client, kind) = choose(Some(&cloud_cfg("cloud:c1")), &entries);
         assert_eq!(kind, ClientKind::Anthropic);
         assert!(client.label().starts_with("claude:"), "label 要能区分协议");
+    }
+
+    // ---------- 工具协议（plan-task-card v0.2 §3）
+
+    #[test]
+    fn tool_msg_serializes_tool_round_shapes() {
+        // user → assistant(tool_calls) → tool 回传：DeepSeek 协议三件套。
+        let msgs = vec![
+            ToolMsg::system("s"),
+            ToolMsg::user("杭州天气？"),
+            ToolMsg::assistant_tool_calls(vec![ToolCallOut {
+                id: "call_1".into(),
+                name: "weather".into(),
+                arguments: r#"{"city":"杭州"}"#.into(),
+            }]),
+            ToolMsg::tool_result("call_1", "多云 18 度"),
+        ];
+        let json = serde_json::to_value(&msgs).unwrap();
+        assert_eq!(json[0]["role"], serde_json::json!("system"));
+        assert_eq!(json[1]["role"], serde_json::json!("user"));
+        // assistant: content 为空时省略（协议允许 null content + tool_calls）
+        assert!(json[2].get("content").is_none(), "empty content must be omitted");
+        assert_eq!(json[2]["tool_calls"][0]["id"], serde_json::json!("call_1"));
+        assert_eq!(json[2]["tool_calls"][0]["function"]["name"], serde_json::json!("weather"));
+        assert_eq!(json[2]["tool_calls"][0]["function"]["arguments"], serde_json::json!(r#"{"city":"杭州"}"#));
+        // tool 消息：tool_call_id 对应
+        assert_eq!(json[3]["role"], serde_json::json!("tool"));
+        assert_eq!(json[3]["tool_call_id"], serde_json::json!("call_1"));
+        assert_eq!(json[3]["content"], serde_json::json!("多云 18 度"));
+        assert!(json[3].get("tool_calls").is_none(), "tool 结果消息不带 tool_calls");
+    }
+
+    #[test]
+    fn default_chat_with_tools_is_unsupported() {
+        // 「本地模型不做工具调用」的强制点：任何未实现的传输（含测试桩）
+        // 拿到 Err，不产生任何 HTTP 往返。
+        struct NoTools;
+        impl ChatClient for NoTools {
+            fn chat(&self, _m: &[Msg], _t: f64, _to: u64) -> Result<String, LlmError> {
+                Ok(String::new())
+            }
+            fn chat_stream(
+                &self,
+                _m: &[Msg],
+                _t: f64,
+                _to: u64,
+                _d: &mut dyn FnMut(&str),
+            ) -> Result<String, LlmError> {
+                Ok(String::new())
+            }
+            fn is_up(&self) -> bool {
+                true
+            }
+        }
+        let err = NoTools.chat_with_tools(&[], &[], 0.7, 10).unwrap_err();
+        assert!(err.to_string().contains("tool_unsupported"), "got: {err}");
     }
 }
