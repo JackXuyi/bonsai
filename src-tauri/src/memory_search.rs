@@ -23,7 +23,7 @@
 use chrono::{Datelike, NaiveDate, NaiveTime, TimeZone, Weekday};
 use rusqlite::Connection;
 
-use crate::agent_tools::{ToolCall, ToolDescriptor, ToolKind, ToolOutput, ToolProvider};
+use crate::agent_tools::{ToolAccess, ToolCall, ToolDescriptor, ToolKind, ToolOutput, ToolProvider};
 use crate::memory::clock;
 
 /// Hard caps: how many dialogue rows / fact lines enter one answer.
@@ -588,6 +588,7 @@ pub fn builtin_descriptor() -> ToolDescriptor {
         detail: r#"{"type":"object","properties":{"query":{"type":"string","description":"用户原话，日期与关键词由系统解析；给了 date_from/date_to 时可省"},"date_from":{"type":"string","description":"显式开始日期 YYYY-MM-DD（含）；给出日期时按整窗扫描，忽略关键词。date_from 与 date_to 成对给出，可与 query 二选一"},"date_to":{"type":"string","description":"显式结束日期 YYYY-MM-DD（含）"}}}"#.into(),
         kind: ToolKind::Builtin,
         remote: false,
+        access: ToolAccess::Read,
     }
 }
 

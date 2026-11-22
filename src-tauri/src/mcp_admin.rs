@@ -406,6 +406,10 @@ impl ToolProvider for McpToolProvider {
 pub struct AgentKit {
     pub providers: Vec<Box<dyn ToolProvider>>,
     pub gate: Box<dyn ApprovalGate>,
+    /// 权限三档的 ask 档专用门（plan-task-card v0.2 §6）：write 工具
+    /// 无视全局 approval_mode 强制走它——「危险动作审批覆盖率 100%」。
+    /// 无 AppHandle 时（headless/单测）它拒绝一切（沉默不得变成同意）。
+    pub ask_gate: Box<dyn ApprovalGate>,
     pub prompt_trace: Mutex<Vec<String>>,
 }
 
@@ -414,6 +418,7 @@ impl AgentKit {
         AgentKit {
             providers: Vec::new(),
             gate: Box::new(crate::agent_tools::AutoAllowGate),
+            ask_gate: Box::new(AskFirstGate::new(Arc::new(ApprovalBroker::default()), None)),
             prompt_trace: Mutex::new(Vec::new()),
         }
     }
@@ -517,7 +522,27 @@ pub fn execute_audited(
         return Err(reason);
     }
     let call = ToolCall { name: name.to_string(), args };
-    let decision = kit.gate.check(&call, &descriptor.name, descriptor.remote);
+    // 权限三档（plan-task-card v0.2 §6）：forbidden 永拒（不进审批）；
+    // ask 档无视全局 approval_mode 强制走 ask_gate；read 走全局门。
+    if descriptor.access == crate::agent_tools::ToolAccess::Forbidden {
+        audit_log(
+            store,
+            descriptor.kind.as_str(),
+            &descriptor.name,
+            "denied",
+            "forbidden_tool",
+            Some(&args_summary),
+            Some(kit.trace_ref().as_str()),
+            descriptor.remote,
+            Some(started.elapsed().as_millis() as i64),
+        );
+        return Err("forbidden".into());
+    }
+    let gate: &dyn ApprovalGate = match descriptor.access {
+        crate::agent_tools::ToolAccess::Ask => kit.ask_gate.as_ref(),
+        _ => kit.gate.as_ref(),
+    };
+    let decision = gate.check(&call, &descriptor.name, descriptor.remote);
     if decision == ApprovalDecision::Deny {
         audit_log(
             store,
@@ -532,6 +557,13 @@ pub fn execute_audited(
         );
         return Err("denied".into());
     }
+    let gate_status = if descriptor.access == crate::agent_tools::ToolAccess::Ask {
+        "asked_allowed"
+    } else if descriptor.remote {
+        "auto_allowed_remote"
+    } else {
+        "auto_allowed"
+    };
     let result = if provider.needs_conn() {
         let conn = store.0.lock().map_err(|_| "store_poisoned".to_string())?;
         provider.execute_with_conn(&conn, &call)
@@ -546,7 +578,7 @@ pub fn execute_audited(
                 descriptor.kind.as_str(),
                 &descriptor.name,
                 "ok",
-                if descriptor.remote { "auto_allowed_remote" } else { "auto_allowed" },
+                gate_status,
                 Some(&args_summary),
                 Some(kit.trace_ref().as_str()),
                 descriptor.remote,
@@ -671,8 +703,11 @@ pub fn build_agent_kit(conn: &Connection, state: &AgentState, user_text: &str) -
         Some("ask") => Box::new(AskFirstGate::new(state.approvals.clone(), state.app.clone())),
         _ => Box::new(crate::agent_tools::AutoAllowGate),
     };
+    // ask 档专用门永远存在（write 工具无视 approval_mode 强制询问）。
+    let ask_gate: Box<dyn ApprovalGate> =
+        Box::new(AskFirstGate::new(state.approvals.clone(), state.app.clone()));
 
-    AgentKit { providers, gate, prompt_trace: Mutex::new(Vec::new()) }
+    AgentKit { providers, gate, ask_gate, prompt_trace: Mutex::new(Vec::new()) }
 }
 
 /// One-at-a-time approval handshake (spec-s4): the chat turn reserves a slot
@@ -1287,6 +1322,7 @@ pub(crate) mod tests {
         let kit = AgentKit {
             providers: vec![Box::new(ok)],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
+            ask_gate: Box::new(AskFirstGate::new(std::sync::Arc::new(ApprovalBroker::default()), None)),
             prompt_trace: Mutex::new(Vec::new()),
         };
         kit.trace("round1:candidates=1".into());
@@ -1316,6 +1352,7 @@ pub(crate) mod tests {
         let kit_broken = AgentKit {
             providers: vec![Box::new(broken)],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
+            ask_gate: Box::new(AskFirstGate::new(std::sync::Arc::new(ApprovalBroker::default()), None)),
             prompt_trace: Mutex::new(Vec::new()),
         };
         let err = execute_audited(&s, &kit_broken, "weather", serde_json::json!({})).unwrap_err();
@@ -1338,6 +1375,7 @@ pub(crate) mod tests {
         let kit = AgentKit {
             providers: vec![Box::new(provider)],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
+            ask_gate: Box::new(AskFirstGate::new(std::sync::Arc::new(ApprovalBroker::default()), None)),
             prompt_trace: Mutex::new(Vec::new()),
         };
 
@@ -1417,6 +1455,7 @@ pub(crate) mod tests {
                 detail: "{}".into(),
                 kind: crate::agent_tools::ToolKind::Mcp,
                 remote: false,
+                        access: crate::agent_tools::ToolAccess::Read,
             }])
             .unwrap();
             conn.execute(
@@ -1452,11 +1491,91 @@ pub(crate) mod tests {
                 Box::new(crate::mcp::MockMcpProvider::with_tool("alpha", "a", "{}")),
             ],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
+            ask_gate: Box::new(AskFirstGate::new(std::sync::Arc::new(ApprovalBroker::default()), None)),
             prompt_trace: Mutex::new(Vec::new()),
         };
         let names: Vec<String> = kit.catalog().into_iter().map(|d| d.name).collect();
         assert_eq!(names, vec!["alpha".to_string(), "zebra".to_string()]);
         assert!(kit.has_capabilities());
         assert!(!AgentKit::empty().has_capabilities());
+    }
+
+    // ---- 权限三档（plan-task-card v0.2 §6，roadmap G-10）
+
+    /// Always-allow gate, for the ask-branch allow-side assertion.
+    struct AllowAllGate;
+    impl ApprovalGate for AllowAllGate {
+        fn check(&self, _c: &ToolCall, _s: &str, _r: bool) -> ApprovalDecision {
+            ApprovalDecision::Allow
+        }
+    }
+
+    fn kit_with_access(name: &str, access: crate::agent_tools::ToolAccess) -> AgentKit {
+        let mut p = crate::mcp::MockMcpProvider::with_tool(name, "测试工具", "{}");
+        p.replies.insert(name.to_string(), "执行结果".into());
+        let mut d = p.tools[0].clone();
+        d.access = access;
+        p.tools[0] = d;
+        AgentKit {
+            providers: vec![Box::new(p)],
+            gate: Box::new(crate::agent_tools::AutoAllowGate),
+            ask_gate: Box::new(AskFirstGate::new(std::sync::Arc::new(ApprovalBroker::default()), None)),
+            prompt_trace: Mutex::new(Vec::new()),
+        }
+    }
+
+    #[test]
+    fn forbidden_tool_never_executes_and_audits_rejection() {
+        let s = crate::memory::MemoryStore::open(&std::env::temp_dir().join("mcp-admin-t3a.sqlite3")).unwrap();
+        let kit = kit_with_access("rm_rf", crate::agent_tools::ToolAccess::Forbidden);
+        let err = execute_audited(&s, &kit, "rm_rf", serde_json::json!({})).unwrap_err();
+        assert_eq!(err, "forbidden");
+        // 沉默不得变成执行：审计记录拒绝，状态 forbidden_tool。
+        let rec = &with_conn(&s, |conn| db::tool_call_records(conn, 10).unwrap())[0];
+        assert_eq!(rec.outcome, "denied");
+        assert_eq!(rec.result_status.as_deref(), Some("forbidden_tool"));
+    }
+
+    #[test]
+    fn ask_access_forces_the_ask_gate_even_in_auto_mode() {
+        let s = crate::memory::MemoryStore::open(&std::env::temp_dir().join("mcp-admin-t3b.sqlite3")).unwrap();
+        // kit.gate 是 AutoAllowGate（approval_mode=auto 的形状），但 ask 档
+        // 工具必须走 ask_gate——headless 无 AppHandle ⇒ 立即拒绝。
+        let kit = kit_with_access("send_mail", crate::agent_tools::ToolAccess::Ask);
+        let err = execute_audited(&s, &kit, "send_mail", serde_json::json!({})).unwrap_err();
+        assert_eq!(err, "denied");
+        let rec = &with_conn(&s, |conn| db::tool_call_records(conn, 10).unwrap())[0];
+        assert_eq!(rec.result_status.as_deref(), Some("denied_by_gate"));
+
+        // ask 门放行（用户点了允许）→ 执行 + asked_allowed 审计。
+        let mut p = crate::mcp::MockMcpProvider::with_tool("send_mail", "测试工具", "{}");
+        p.replies.insert("send_mail".into(), "已执行".into());
+        let mut d = p.tools[0].clone();
+        d.access = crate::agent_tools::ToolAccess::Ask;
+        p.tools[0] = d;
+        let kit = AgentKit {
+            providers: vec![Box::new(p)],
+            gate: Box::new(crate::agent_tools::AutoAllowGate),
+            ask_gate: Box::new(AllowAllGate),
+            prompt_trace: Mutex::new(Vec::new()),
+        };
+        let out = execute_audited(&s, &kit, "send_mail", serde_json::json!({})).unwrap();
+        assert_eq!(out.summary, "已执行");
+        let rec = &with_conn(&s, |conn| db::tool_call_records(conn, 10).unwrap())
+            .into_iter()
+            .find(|r| r.result_status.as_deref() == Some("asked_allowed"))
+            .expect("asked_allowed audit row");
+        assert_eq!(rec.outcome, "ok");
+    }
+
+    #[test]
+    fn access_defaults_to_read_for_legacy_caches() {
+        // 旧 tool_cache 反序列化（无 access 字段）→ Read，行为零回归。
+        let old: crate::agent_tools::ToolDescriptor = serde_json::from_str(
+            r#"{"name":"weather","summary":"查天气","detail":"{}","kind":"mcp","remote":false}"#,
+        )
+        .unwrap();
+        assert_eq!(old.access, crate::agent_tools::ToolAccess::Read);
+        assert_eq!(old.access.as_str(), "read");
     }
 }

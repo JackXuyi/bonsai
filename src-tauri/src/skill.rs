@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::agent_tools::{ToolDescriptor, ToolKind, ToolProvider, ToolCall, ToolOutput};
+use crate::agent_tools::{ToolAccess, ToolDescriptor, ToolKind, ToolProvider, ToolCall, ToolOutput};
 
 pub const SKILL_MD_MAX: usize = 8 * 1024;
 pub const REFERENCE_MAX: usize = 4 * 1024;
@@ -237,6 +237,7 @@ impl ToolProvider for SkillProvider {
                 },
                 kind: ToolKind::Skill,
                 remote: false,
+                access: ToolAccess::Read,
             })
             .collect()
     }

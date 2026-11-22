@@ -16,7 +16,7 @@ use rmcp::model::{
 use rmcp::service::{RoleClient, RunningService, ServiceExt};
 use rmcp::transport::TokioChildProcess;
 
-use crate::agent_tools::{clip_chars, mask_secrets, ToolCall, ToolDescriptor, ToolKind, ToolOutput, ToolProvider};
+use crate::agent_tools::{clip_chars, mask_secrets, ToolAccess, ToolCall, ToolDescriptor, ToolKind, ToolOutput, ToolProvider};
 
 /// Hard timeouts (spec-s1 §2): connect 10s, list/call 60s.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -144,7 +144,7 @@ impl McpClient {
                 .map(|d| clip_chars(&mask_secrets(d), 40))
                 .unwrap_or_default();
             let detail = serde_json::to_string(&tool.input_schema).unwrap_or_default();
-            out.push(ToolDescriptor { name, summary, detail, kind: ToolKind::Mcp, remote: false });
+            out.push(ToolDescriptor { name, summary, detail, kind: ToolKind::Mcp, remote: false, access: ToolAccess::Read });
         }
         out.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(out)
@@ -282,6 +282,7 @@ impl MockMcpProvider {
                 detail: detail.into(),
                 kind: ToolKind::Mcp,
                 remote: false,
+                access: ToolAccess::Read,
             }],
             ..Default::default()
         }

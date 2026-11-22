@@ -44,6 +44,29 @@ pub fn builtin_tools() -> Vec<ToolDescriptor> {
     vec![crate::memory_search::builtin_descriptor()]
 }
 
+/// 权限三档（plan-task-card v0.2 §6，roadmap G-10）：只读直行、写操作
+/// 强制 ask（无视全局 approval_mode——「危险动作审批覆盖率 100%」）、
+/// 危险类永拒。默认 Read：存量工具反序列化旧缓存（无该字段）与所有
+/// 既有构造点都落到只读，行为零回归。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolAccess {
+    #[default]
+    Read,
+    Ask,
+    Forbidden,
+}
+
+impl ToolAccess {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ToolAccess::Read => "read",
+            ToolAccess::Ask => "ask",
+            ToolAccess::Forbidden => "forbidden",
+        }
+    }
+}
+
 /// Three disclosure levels in one struct (spec-s3 §1): the pipeline shows
 /// `name` by default, `summary` after the name-selection round, `detail`
 /// only for the finalists.
@@ -54,6 +77,9 @@ pub struct ToolDescriptor {
     pub detail: String,
     pub kind: ToolKind,
     pub remote: bool,
+    /// 权限档（v0.2 §6）。旧 tool_cache 缓存无此字段 → serde default = Read。
+    #[serde(default)]
+    pub access: ToolAccess,
 }
 
 #[derive(Debug, Clone)]
@@ -315,6 +341,7 @@ mod tests {
             detail: format!("{name} 的完整说明"),
             kind,
             remote: false,
+            access: ToolAccess::Read,
         }
     }
 

@@ -1623,6 +1623,7 @@ mod tests {
         crate::mcp_admin::AgentKit {
             providers: vec![Box::new(p)],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
+            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
             prompt_trace: std::sync::Mutex::new(Vec::new()),
         }
     }
@@ -1739,6 +1740,7 @@ mod tests {
                 }],
             })],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
+            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
             prompt_trace: std::sync::Mutex::new(Vec::new()),
         };
 
@@ -1785,6 +1787,7 @@ mod tests {
         let mut kit = crate::mcp_admin::AgentKit {
             providers: vec![Box::new(crate::skill::SkillProvider { packs: vec![pack] })],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
+            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
             prompt_trace: std::sync::Mutex::new(Vec::new()),
         };
         let mut backend = SeqBackend::new(&[
@@ -1824,6 +1827,7 @@ mod tests {
                 packs: vec![pack("a"), pack("b"), pack("c")],
             })],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
+            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
             prompt_trace: std::sync::Mutex::new(Vec::new()),
         };
         let mut backend = SeqBackend::new(&[
@@ -1891,6 +1895,10 @@ mod tests {
                 std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()),
                 None,
             )),
+            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(
+                std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()),
+                None,
+            )),
             prompt_trace: std::sync::Mutex::new(Vec::new()),
         };
         let mut backend = SeqBackend::new(&[
@@ -1915,6 +1923,7 @@ mod tests {
         crate::mcp_admin::AgentKit {
             providers: vec![Box::new(crate::memory_search::MemorySearchProvider)],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
+            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
             prompt_trace: std::sync::Mutex::new(Vec::new()),
         }
     }
@@ -2037,6 +2046,7 @@ mod tests {
                 r#"{"type":"object"}"#,
             ))],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
+            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
             prompt_trace: std::sync::Mutex::new(Vec::new()),
         };
         let mut backend = SeqBackend::new(&[
@@ -2098,6 +2108,7 @@ mod tests {
                 Box::new(p),
             ],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
+            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
             prompt_trace: std::sync::Mutex::new(Vec::new()),
         };
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -2160,6 +2171,7 @@ mod tests {
         let mut kit = crate::mcp_admin::AgentKit {
             providers: vec![Box::new(crate::memory_search::MemorySearchProvider)],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
+            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
             prompt_trace: std::sync::Mutex::new(Vec::new()),
         };
         let mut backend = SeqBackend::new(&[
@@ -2199,6 +2211,7 @@ mod tests {
         let mut kit = crate::mcp_admin::AgentKit {
             providers: vec![Box::new(crate::memory_search::MemorySearchProvider)],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
+            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
             prompt_trace: std::sync::Mutex::new(Vec::new()),
         };
         let mut backend = SeqBackend::new(&[
@@ -2284,6 +2297,7 @@ mod tests {
                         detail: "{}".into(),
                         kind: crate::agent_tools::ToolKind::Mcp,
                         remote: false,
+                        access: crate::agent_tools::ToolAccess::Read,
                     }],
                     replies: [(name, "tail tool 结果".to_string())].into_iter().collect(),
                     fail_for: vec![],
@@ -2293,6 +2307,7 @@ mod tests {
         let mut kit = crate::mcp_admin::AgentKit {
             providers,
             gate: Box::new(crate::agent_tools::AutoAllowGate),
+            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
             prompt_trace: std::sync::Mutex::new(Vec::new()),
         };
         assert_eq!(kit.catalog().len(), 100);
