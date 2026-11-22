@@ -120,3 +120,21 @@ Iso 串供事件表（`events`/`tool_calls`），日期串供日键表（`predic
 `WEEK_WORDS` 补 `上周/上上周`（配合 parse_window 的整周窗口）。
 
 新增测试：`a_pinned_date_beats_the_default_window`、`pinned_weeks_and_default_fallback`。
+
+## 流程更新：素材走 memory_search 整窗召回（2026-11-22 晚，用户裁决）
+
+用户拍板的执行流程：确定时间 → 调 memory_search 取当期数据（对话+事件等
+应用收集的全部信息）→ 基于信息总结 → 输出。落地方式：
+
+- 第 2 步由**引擎代调** `memory_search::recall_in_window(start, end_excl)`，
+  而不是让模型自己发起工具调用——本地 2B 没有工具调用能力，云端走工具
+  循环要多轮 HTTP 且窗口语义会丢；引擎已持有解析好的窗口，直接整窗召回
+  是确定性、零轮次、离线可用的同一条路。
+- `Digest` 新增 `dialogue`（(时间戳, 说话人, 80字截断) 列表）：对话**原文**
+  用户/盆栽双方都在列，取代原先只有 user 轮 60 字截断的节选；`turns` 保留
+  只喂计数（fallback 的「聊了 N 轮」）。
+- 纪律不变：总结请求本身（intent 命中的行）不进素材；每日最多展示 24 行
+  （`dialogue_sample`），召回本身 ≤60 行封顶。
+- `is_empty` 改看 `dialogue`（有对话就不算空日子）。
+
+测试 358 绿（新增 material_carries_the_memory_search_transcript），clippy 无新增。
