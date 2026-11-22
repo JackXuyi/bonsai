@@ -139,7 +139,7 @@ pub trait ChatClient: Send + Sync {
 云端循环天然就是「多步执行」，独立任务卡实体收缩为**审计与 UI 外壳**：
 
 - schema v12 `tasks`：一次云端循环（产生 ≥1 次工具调用的对话轮）落一行——goal 取用户原话前 80 字、status（done/failed/canceled）、工具调用数；步骤明细仍在 `tool_calls`（增 task_id 关联列）。**不再让 LLM 预填步骤 JSON**——循环里的每步就是真实步骤。
-- 前端任务卡：循环期间实时展示「第 N 步 · 工具名 · 状态」（Channel 事件沿 v0.1），ask 档确认卡嵌入卡内。
+- ~~前端任务卡：循环期间实时展示「第 N 步 · 工具名 · 状态」~~（2026-11-22 用户裁决**改判**）：**调用过程不进消息流**——消息气泡只展示结果（🔧 徽标注不变），工具调用明细只在气泡「查看详情」的 `/trace` 页展示（后端 `rec.tool_call` 每次执行落 `trace_steps`，详情页时间线已含 `工具调用 · <name>` 步骤卡，前端零改动可见）。Channel `task_step` 事件照发、前端忽略（协议兼容，未来需要进度 UI 时可直接复用）。
 - `tasks` 审计不进 ACTIVITY_KINDS（自己陪自己防线的延伸）。
 
 ## 9. 里程碑
@@ -202,3 +202,5 @@ pub trait ChatClient: Send + Sync {
 - token 成本记录（usage 落审计的实际读数）
 
 **遗留裁决兑现说明**：D7 未做 Claude tool_use——AnthropicClient 的 `chat_with_tools` 走默认 Err，工具请求自动回落本地路径。
+
+**改判（2026-11-22 晚，真机验收反馈）**：任务卡气泡退出消息流——`MessageBubble` 删 task 渲染分支、`useChat` 忽略 `task_step` 事件与 `outcome.task`、chatStore/types/chat.css 清理任务卡结构与样式；调用明细改由「查看详情」`/trace` 页唯一承载（后端零改动）。前端 tsc + vitest 91 过。

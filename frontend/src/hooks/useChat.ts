@@ -2,8 +2,9 @@
 
 // 发送 + 流式接收（旧 sendMessage：Channel onDelta 渐增气泡，typing 占位
 // 首块替换；无 delta 时整段渲染；错误撤气泡）。
-// 任务卡（v12）：同一 Channel 上的 task_step 结构化消息——分流渲染任务卡，
-// 不进正文气泡；终态以 DialogueOutcome.task 为准。
+// 工具调用过程不进消息流（2026-11-22 用户裁决）：Channel 上的 task_step
+// 事件直接忽略，消息只展示结果；调用明细在气泡「查看详情」的 /trace 页
+// （后端 rec.tool_call 已把每次调用落进 trace_steps，前端零改动可见）。
 import { useCallback, useRef, useState } from "react";
 import { Channel } from "@tauri-apps/api/core";
 import { dialogueChatStream, facePreview } from "@/lib/commands";
@@ -11,32 +12,8 @@ import { inTauri } from "@/lib/tauriInvoke";
 import { noteFor } from "@/components/face/frames";
 import { useChatStore } from "@/lib/stores/chatStore";
 import { toast } from "@/lib/stores/uiStore";
-import type { TaskEvent, TaskInfo } from "@/lib/types";
 
 const SESSION_ID = "default";
-
-/** 任务卡事件 → 消息流（实时进度；找不到卡片时按事件类型补建）。 */
-function applyTaskEvent(ev: TaskEvent) {
-  const store = useChatStore.getState();
-  const existing = store.messages.find((m) => m.task?.id === ev.id);
-  if (!existing) {
-    // 漏了 task_start（如重连）：按当前事件最小补建。
-    const task: TaskInfo =
-      ev.event === "task_step"
-        ? { id: ev.id, status: "running", steps: [{ seq: ev.seq, tool: ev.tool, status: ev.status }] }
-        : { id: ev.id, status: ev.event === "task_done" ? ev.status : "running", steps: [] };
-    store.add({ kind: "task", text: "", task });
-    return;
-  }
-  if (ev.event === "task_step") {
-    const steps = existing.task!.steps.some((s) => s.seq === ev.seq)
-      ? existing.task!.steps
-      : [...existing.task!.steps, { seq: ev.seq, tool: ev.tool, status: ev.status }];
-    store.patch(existing.id, { task: { ...existing.task!, steps } });
-  } else if (ev.event === "task_done") {
-    store.patch(existing.id, { task: { ...existing.task!, status: ev.status } });
-  }
-}
 
 export function useChat() {
   const [chatting, setChatting] = useState(false);
@@ -64,14 +41,11 @@ export function useChat() {
 
     // Streaming: deltas arrive while the model is still generating; the
     // typing placeholder is swapped for a real bubble on the first chunk.
-    // task_step 事件分流到任务卡（同一 Channel，不进正文气泡）。
+    // task_step 事件忽略（调用过程不进消息流，明细走 /trace 查看详情）。
     let bubbleId: number | null = null;
-    const onDelta = new Channel<{ delta?: string; task_step?: TaskEvent }>();
+    const onDelta = new Channel<{ delta?: string; task_step?: unknown }>();
     onDelta.onmessage = (msg) => {
-      if (msg?.task_step) {
-        applyTaskEvent(msg.task_step);
-        return;
-      }
+      if (msg?.task_step) return;
       if (!msg?.delta) return;
       if (bubbleId === null) {
         store.remove(typingId);
@@ -94,15 +68,6 @@ export function useChat() {
       if (outcome.turn_id) {
         store.patch(bubbleId, { turnId: outcome.turn_id });
         store.patch(userId, { turnId: outcome.turn_id });
-      }
-      // 任务卡终态对齐（v12）：实时事件可能漏步，终态以后端 outcome 为准。
-      if (outcome.task?.id) {
-        const existing = store.messages.find((m) => m.task?.id === outcome.task!.id);
-        if (existing) {
-          store.patch(existing.id, { task: outcome.task });
-        } else {
-          store.add({ kind: "task", text: "", task: outcome.task, ts: finishedAt });
-        }
       }
       // Speaking counts as "being talked to": flash the greeted face.
       facePreview("greeted").catch(() => {});

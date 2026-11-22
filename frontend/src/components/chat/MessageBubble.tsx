@@ -37,31 +37,8 @@ export function MessageBubble({
     return <ReminderBubble message={message} onStick={onStick} />;
   }
 
-  // 任务卡（v12）：云端工具循环的步骤进度 + 终态。
-  if (message.kind === "task" && message.task) {
-    const t = message.task;
-    const label = t.status === "running" ? "执行中" : t.status === "done" ? "完成" : "失败";
-    return (
-      <div className={`bubble bot task-card task-${t.status}`}>
-        <span className="task-title">🔧 任务 · {label}</span>
-        {t.steps.length > 0 ? (
-          <ul className="task-steps">
-            {t.steps.map((s) => (
-              <li key={s.seq}>
-                <span className={`task-dot task-dot-${s.status}`} />
-                <span className="task-tool">{s.tool}</span>
-                <span className="task-status">
-                  {s.status === "ok" ? "完成" : s.status === "denied" ? "待确认" : "失败"}
-                </span>
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <span className="task-status">正在调度工具…</span>
-        )}
-      </div>
-    );
-  }
+  // 工具调用过程不进消息流（2026-11-22 用户裁决）：调用明细只在
+  // 「查看详情」/trace 页展示，消息气泡只展示结果 + 🔧 徽标注。
 
   const isUser = message.kind === "user";
   const variant =

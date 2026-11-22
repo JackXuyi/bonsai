@@ -1,18 +1,19 @@
 "use client";
 
 import { create } from "zustand";
-import type { CalendarRemindPayload, TaskInfo } from "@/lib/types";
+import type { CalendarRemindPayload } from "@/lib/types";
 
 // 消息流（旧 main.js 直接操作 #messages 的 DOM，这里改为可跨组件推送的
 // store——proactive / prediction / 提醒事件到达时，ChatPane 不一定可见）。
+// 工具调用过程不进消息流（2026-11-22 用户裁决）：消息只展示结果，
+// 调用明细统一走气泡「查看详情」的 /trace 页（后端 trace_steps 落库）。
 export type MessageKind =
   | "user"
   | "bot"
   | "typing"
   | "prediction"
   | "announcement"
-  | "reminder"
-  | "task";
+  | "reminder";
 
 export interface ChatMessage {
   id: number;
@@ -26,8 +27,6 @@ export interface ChatMessage {
   streaming?: boolean;
   prediction?: { id: number; guess: string };
   reminder?: CalendarRemindPayload;
-  /** 任务卡（v12）：云端工具循环的实时进度 + 终态 */
-  task?: TaskInfo;
   /** 消息时间（ISO；实时路径发送/落库时记录，回放路径取 events.ts） */
   ts?: string;
   /** events 表 id（spec-s8）：历史回放直接带，实时路径落库后补 */

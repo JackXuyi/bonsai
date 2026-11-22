@@ -91,25 +91,6 @@ export interface CalendarRemindPayload {
   minutes_left: number;
 }
 
-// ── 任务卡（plan-task-card v0.2 §8，后端 dialogue.rs TaskCard）────────────
-export interface TaskStep {
-  seq: number;
-  tool: string;
-  status: string; // ok / denied / error
-}
-
-export interface TaskInfo {
-  id: string;
-  status: string; // running / done / failed
-  steps: TaskStep[];
-}
-
-/** 流式 Channel 上的任务事件（dialogue_chat_stream 的 task_step 分支） */
-export type TaskEvent =
-  | { event: "task_start"; id: string; goal: string }
-  | { event: "task_step"; id: string; seq: number; tool: string; status: string }
-  | { event: "task_done"; id: string; status: string };
-
 // ── onboarding（onboarding.rs）────────────────────────────────
 export interface OnboardingQuestion {
   id: string;
@@ -155,8 +136,6 @@ export interface DialogueOutcome {
   tool?: string | null;
   model_used?: boolean;
   filter?: DialogueFilter;
-  /** 任务卡（v12）：本轮云端工具循环的终态摘要 */
-  task?: TaskInfo | null;
   /** 本回合链路追踪 id（spec-s8），气泡「查看详情」入口 */
   turn_id?: number | null;
 }
