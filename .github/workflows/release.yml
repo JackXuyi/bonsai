@@ -14,9 +14,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: macos-latest
-            args: ""
-            sidecar: macos
+          # macOS bundle already published; this retry only rebuilds Windows.
           - platform: windows-latest
             args: ""
             sidecar: windows
