@@ -15,28 +15,22 @@ function nearBottom(el: HTMLElement) {
   return el.scrollHeight - el.scrollTop - el.clientHeight < 56;
 }
 
-/** 把 DB 里的最近消息流映射成气泡：assistant 行若无前导 user 行即主动搭话；
- *  非今天的消息在徽标注里带日期（回放体感需要，实时流不需要）。
+/** 把 DB 里的最近消息流映射成气泡：assistant 行若无前导 user 行即主动搭话。
+ *  时间不进气泡体（2026-11-23 用户裁决）：日期只在操作条的 msg-time 里。
  *  eventId / ts 透传（spec-s8）：操作条的时间显示与「查看详情」反查入口。 */
 function bubblesFromHistory(
   rows: { id: number; ts: string; role: "user" | "assistant"; content: string }[]
 ): Omit<ChatMessage, "id">[] {
-  const today = new Date().toDateString();
   const out: Omit<ChatMessage, "id">[] = [];
   let pendingUser = false;
   for (const r of rows) {
-    const d = new Date(r.ts);
-    const note =
-      !Number.isNaN(d.getTime()) && d.toDateString() !== today
-        ? `${d.getMonth() + 1}-${d.getDate()}`
-        : undefined;
     if (r.role === "user") {
       pendingUser = true;
-      out.push({ kind: "user", text: r.content, note, ts: r.ts, eventId: r.id });
+      out.push({ kind: "user", text: r.content, ts: r.ts, eventId: r.id });
     } else {
       const proactive = !pendingUser;
       pendingUser = false;
-      out.push({ kind: "bot", text: r.content, proactive, note, ts: r.ts, eventId: r.id });
+      out.push({ kind: "bot", text: r.content, proactive, ts: r.ts, eventId: r.id });
     }
   }
   return out;
@@ -58,11 +52,15 @@ export function ChatPane() {
   const restoreRef = useRef<{ prevHeight: number; prevTop: number } | null>(null);
   /** 首次有内容时直接跳到底部（prefill 后 nearBottom 条件会误判停在顶部）。 */
   const jumpedRef = useRef(false);
+  /** 用户是否贴底：贴底时流式增量涨多少都跟着滚（2026-11-23 用户裁决：
+   *  流式内容要自动出现在可见区，不能因为一次增量超过 56px 就脱底）；
+   *  用户往上翻就看别打扰。onScroll 里维护，渲染 effect 里消费。 */
+  const pinnedRef = useRef(true);
 
   const stick = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
-    if (nearBottom(el)) el.scrollTop = el.scrollHeight;
+    el.scrollTop = el.scrollHeight;
     syncToBottom();
   }, []);
 
@@ -72,24 +70,30 @@ export function ChatPane() {
     setShowToBottom(!nearBottom(el) && el.scrollHeight > el.clientHeight);
   }
 
-  // 消息变化时的滚动策略：前插历史页 → 按差值复位；首次有内容 → 跳到最新；
-  // 其余（新消息 / 流式）→ 原有贴底逻辑。
+  // 消息变化时的滚动策略：前插历史页 → 按差值复位（用户在顶部翻旧消息，
+  // 不贴底）；首次有内容 → 跳到最新；贴底（含流式增量）→ 始终跟到最新；
+  // 不贴底 → 只同步「回到底部」按钮显隐，不打扰用户阅读。
   useEffect(() => {
     const el = scrollRef.current;
     if (!el || messages.length === 0) return;
     if (restoreRef.current) {
       const { prevHeight, prevTop } = restoreRef.current;
       restoreRef.current = null;
+      pinnedRef.current = false;
       el.scrollTop = el.scrollHeight - prevHeight + prevTop;
       syncToBottom();
     } else if (!jumpedRef.current) {
       jumpedRef.current = true;
+      pinnedRef.current = true;
+      el.scrollTop = el.scrollHeight;
+      syncToBottom();
+    } else if (pinnedRef.current) {
       el.scrollTop = el.scrollHeight;
       syncToBottom();
     } else {
-      stick();
+      syncToBottom();
     }
-  }, [messages, stick]);
+  }, [messages]);
 
   // 向上分页：滚近顶部时拉更早的一页（游标 = 已加载最旧的 db id）。
   const loadOlder = useCallback(async () => {
@@ -116,8 +120,9 @@ export function ChatPane() {
   }, []);
 
   function onMessagesScroll() {
-    syncToBottom();
     const el = scrollRef.current;
+    if (el) pinnedRef.current = nearBottom(el);
+    syncToBottom();
     if (el && el.scrollTop <= SCROLL_TOP_TRIGGER) void loadOlder();
   }
 

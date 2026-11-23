@@ -5,6 +5,7 @@ import type { ChatMessage } from "@/lib/stores/chatStore";
 import { PredictionCard } from "./PredictionCard";
 import { ReminderBubble } from "./ReminderBubble";
 import { MessageActions } from "./MessageActions";
+import { MarkdownText } from "./MarkdownText";
 
 export function MessageBubble({
   message,
@@ -51,7 +52,9 @@ export function MessageBubble({
   return (
     <>
       <div className={`bubble ${isUser ? "user" : "bot"}${variant ? " " + variant : ""}`}>
-        <span className="body">{message.text}</span>
+        {/* bot 侧按 markdown 渲染（模型输出带粗体/列表等标记）；
+            用户消息保持原样显示自己打的字。 */}
+        {isUser ? <span className="body">{message.text}</span> : <MarkdownText text={message.text} />}
         {message.streaming && <span className="caret" />}
         {message.note ? (
           <>

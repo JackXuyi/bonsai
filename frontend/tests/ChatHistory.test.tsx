@@ -60,9 +60,9 @@ describe("ChatPane 启动回放", () => {
     expect(msgs[1].proactive).toBeFalsy();
     expect(msgs[2].proactive).toBe(true); // 无前导 user → 主动搭话
     expect(msgs[3].proactive).toBeFalsy();
-    // 跨天日期徽标：昨天的带日期，今天的不带。
-    const d = yesterday;
-    expect(msgs[0].note).toBe(`${d.getMonth() + 1}-${d.getDate()}`);
+    // 时间不进气泡体（2026-11-23 用户裁决）：任何消息都不再带日期徽标，
+    // 日期只在操作条的 msg-time 里。
+    expect(msgs[0].note).toBeUndefined();
     expect(msgs[3].note).toBeUndefined();
     // 空态消失，正文可见。
     expect(screen.queryByText("还没聊过")).toBeNull();

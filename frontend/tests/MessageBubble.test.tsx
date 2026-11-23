@@ -37,4 +37,26 @@ describe("MessageBubble", () => {
     rerender(<MessageBubble message={typing} />);
     expect(container.querySelector(".bubble.typing")?.querySelectorAll("i")).toHaveLength(3);
   });
+
+  it("bot 消息按 markdown 渲染，user 消息保持原文", () => {
+    const bot: ChatMessage = {
+      id: 5,
+      kind: "bot",
+      text: "**重点**：两件事\n\n- 第一条\n- 第二条",
+    };
+    const { container, unmount } = render(<MessageBubble message={bot} />);
+    const md = container.querySelector(".bubble.bot .md")!;
+    expect(md).toBeTruthy();
+    expect(md.querySelector("strong")?.textContent).toBe("重点");
+    expect(md.querySelectorAll("li")).toHaveLength(2);
+    // 原始星号不应再露出
+    expect(md.textContent).not.toContain("**");
+    unmount();
+
+    const user: ChatMessage = { id: 6, kind: "user", text: "**照原样显示**" };
+    const userView = render(<MessageBubble message={user} />);
+    const body = userView.container.querySelector(".bubble.user .body")!;
+    expect(body.textContent).toBe("**照原样显示**");
+    expect(userView.container.querySelector(".bubble.user .md")).toBeNull();
+  });
 });
