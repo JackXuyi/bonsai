@@ -50,6 +50,12 @@ const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_REDIRECT_HOPS: usize = 5;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(20);
+/// 搜索用更短的超时（2026-11-23，P2）：DDG 在国内网络里先按 IPv6 连一次
+/// （实测 5-7s 才失败）再降级 IPv4，一次搜索 9s 起步。搜索是低价值高频调用，
+/// 宁可快速失败把错误交给模型，也不要让用户盯着 20s 的空白。抓取（web_fetch）
+/// 仍用上面的 10/20：正文值得等。
+const SEARCH_CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
+const SEARCH_TOTAL_TIMEOUT: Duration = Duration::from_secs(10);
 /// web_search 最多返回条数（plan §3.1）。
 const MAX_SEARCH_RESULTS: usize = 5;
 /// 搜索结果 summary 维持 200 字惯例。
@@ -218,6 +224,16 @@ fn http_agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
         .timeout_connect(CONNECT_TIMEOUT)
         .timeout(TOTAL_TIMEOUT)
+        .redirects(0)
+        .user_agent(USER_AGENT)
+        .build()
+}
+
+/// 搜索专用 agent：同一套重定向/UA 约定，只是超时更短（理由见常量注释）。
+fn search_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(SEARCH_CONNECT_TIMEOUT)
+        .timeout(SEARCH_TOTAL_TIMEOUT)
         .redirects(0)
         .user_agent(USER_AGENT)
         .build()
@@ -442,7 +458,7 @@ impl WebSearchSource for DuckDuckGoSearch {
                 .finish()
         );
         let url = validate_url(&target)?;
-        let resp = http_agent().get(url.as_str()).call().map_err(|e| match e {
+        let resp = search_agent().get(url.as_str()).call().map_err(|e| match e {
             // DDG 反爬（429/403）是「搜索失败」而非「网络离线」，错误码分离。
             ureq::Error::Status(code, resp) => WebError::search_failed(format!("HTTP {code}"))
                 .with_body_note(resp),

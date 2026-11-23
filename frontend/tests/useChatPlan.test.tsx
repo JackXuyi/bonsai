@@ -142,6 +142,26 @@ describe("useChat × 计划事件", () => {
     });
   });
 
+  it("回合进行中再发一条会被忽略（不并发跑两轮）", async () => {
+    let release!: () => void;
+    chatMock.mockImplementation(async (_t: string, _s: string, ch: { onmessage: ((m: unknown) => void) | null }) => {
+      ch.onmessage?.({ task_step: { event: "task_start", id: "t3", goal: "g", planned: true } });
+      await new Promise<void>((r) => {
+        release = r;
+      });
+      ch.onmessage?.({ turn_done: { reply: "好了", turn_id: 1 } });
+    });
+    render(<Harness />);
+    fireEvent.click(screen.getByText("发"));
+    await waitFor(() => expect(usePlanStore.getState().current?.id).toBe("t3"));
+
+    fireEvent.click(screen.getByText("发"));
+    expect(chatMock).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      release();
+    });
+  });
+
   it("点「停」用本轮 task id 叫停后端", async () => {    let release!: () => void;
     chatMock.mockImplementation(async (_t: string, _s: string, ch: { onmessage: ((m: unknown) => void) | null }) => {
       ch.onmessage?.({ task_step: { event: "task_start", id: "t9", goal: "g", planned: true } });
