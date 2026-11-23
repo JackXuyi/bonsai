@@ -17,6 +17,12 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use super::clock;
 
+/// SCHEMA_VERSION = 14（2026-11-23）：规划能力（docs/zh/plan-planning.md §4）——
+/// `tasks` 增四列：`plan_json`（结构化计划 JSON）、`plan_mode`（none/planned）、
+/// `cancel_reason`（user/budget）、`confirm_mode`（auto/manual，D1 默认 auto 直放）。
+/// 不新建 plans/plan_steps 表——步骤明细仍由 tool_calls.task_id 承载，
+/// 进度状态只存 plan_json + 从 tool_calls 派生，不双写。
+///
 /// SCHEMA_VERSION = 13（2026-11-23）：用户画像（docs/zh/plan-user-profile.md §4）——
 /// `user_profile`（身份 KV，key 白名单在 memory/profile.rs）+
 /// `user_profile_history`（被覆盖/删除的旧值归档）。画像 ≠ 事实：facts 是
@@ -33,7 +39,7 @@ use super::clock;
 /// EXISTS 不会给已有表加列；v9→v9 不触发 migrate，INSERT 带 user_text 直接
 /// 报 "table turn_trace has no column named user_text"。教训：改 SCHEMA 必
 /// 须同时 bump 此版本号。
-pub(crate) const SCHEMA_VERSION: i64 = 13;
+pub(crate) const SCHEMA_VERSION: i64 = 14;
 
 /// Test-only: materialise the full schema on a bare in-memory connection.
 /// Other modules' tests build their own `Connection::open_in_memory()` and
@@ -276,12 +282,17 @@ CREATE TABLE IF NOT EXISTS tool_calls (
 -- 任务卡外壳（plan-task-card v0.2 §8，v12）：一次云端工具循环一行；
 -- 步骤明细在 tool_calls（task_id 关联）。审计不进 ACTIVITY_KINDS。
 CREATE TABLE IF NOT EXISTS tasks (
-    id           TEXT PRIMARY KEY,   -- uuid
-    created_at   TEXT NOT NULL,      -- clock::now_iso()
-    goal         TEXT NOT NULL,      -- 用户原话前 80 字（人工可读）
-    status       TEXT NOT NULL,      -- running / done / failed
-    tool_calls   INTEGER NOT NULL DEFAULT 0,
-    final_reply  TEXT
+    id            TEXT PRIMARY KEY,   -- uuid
+    created_at    TEXT NOT NULL,      -- clock::now_iso()
+    goal          TEXT NOT NULL,      -- 用户原话前 80 字（人工可读）
+    status        TEXT NOT NULL,      -- running / done / failed / canceled
+    tool_calls    INTEGER NOT NULL DEFAULT 0,
+    final_reply   TEXT,
+    -- 规划能力（v14，docs/zh/plan-planning.md §4）：NULL = 单步任务，无额外开销
+    plan_json     TEXT,                         -- 结构化计划 JSON（steps[] 状态）
+    plan_mode     TEXT NOT NULL DEFAULT 'none', -- 'none' | 'planned'
+    cancel_reason TEXT,                         -- 'user' | 'budget' | NULL
+    confirm_mode  TEXT NOT NULL DEFAULT 'auto'  -- D1: 'auto' 直放 | 'manual' 扩展位（本版不阻塞）
 );
 
 -- MCP servers (plan-agent-mcp-skill.md §3.2, spec-s2). Secrets in
@@ -436,6 +447,12 @@ pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     add_column_if_missing(conn, "trace_steps", "user_text", "TEXT")?;
     // v12: 任务卡外壳（tasks 表由 SCHEMA 的 IF NOT EXISTS 建出）。
     add_column_if_missing(conn, "tool_calls", "task_id", "TEXT")?;
+    // v14: 规划能力（docs/zh/plan-planning.md §4）。必须在 SCHEMA 之后——
+    // v12 老库的 tasks 表已在 SCHEMA 补出但无新列；顺序颠倒会 no such table。
+    add_column_if_missing(conn, "tasks", "plan_json", "TEXT")?;
+    add_column_if_missing(conn, "tasks", "plan_mode", "TEXT NOT NULL DEFAULT 'none'")?;
+    add_column_if_missing(conn, "tasks", "cancel_reason", "TEXT")?;
+    add_column_if_missing(conn, "tasks", "confirm_mode", "TEXT NOT NULL DEFAULT 'auto'")?;
 
     set_user_version_if_behind(conn)?;
     Ok(())
@@ -1526,7 +1543,39 @@ pub fn log_agent_tool_call(
     Ok(())
 }
 
-// ---------------------------------------------------------------- tasks（任务卡外壳，v12）
+// ---------------------------------------------------------------- tasks（任务卡外壳，v12）/ 计划（v14）
+
+/// 计划步骤（docs/zh/plan-planning.md §4.2）。字段保持 snake_case——
+/// 这是落库/协议契约，不是 UI 类型；前端类型在 T6 单独声明。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PlanStep {
+    pub seq: i32,
+    pub intent: String,
+    #[serde(default)]
+    pub tool_hint: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub attempts: i32,
+    #[serde(default)]
+    pub tool_call_id: Option<i64>,
+}
+
+/// 结构化计划：写入 tasks.plan_json，供 trace 与 D6 进度面板消费。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PlanJson {
+    #[serde(default = "plan_version_default")]
+    pub version: i32,
+    pub goal: String,
+    #[serde(default)]
+    pub steps: Vec<PlanStep>,
+    #[serde(default)]
+    pub replans: i32,
+}
+
+fn plan_version_default() -> i32 {
+    1
+}
 
 /// 一次云端工具循环开始：落 running 行，返回 id（tool_calls.task_id 关联用）。
 pub fn task_start(conn: &Connection, goal: &str) -> rusqlite::Result<String> {
@@ -1555,7 +1604,54 @@ pub fn task_finish(
     Ok(())
 }
 
+/// 写计划 JSON（T2 计划轮产出 / T4 replan 覆盖）。
+/// `plan_mode='planned'` 与 JSON 同事务写入，避免出现「有计划但模式是 none」。
+pub fn plan_put(conn: &Connection, task_id: &str, plan: &PlanJson) -> rusqlite::Result<()> {
+    let raw = serde_json::to_string(plan)
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+    conn.execute(
+        "UPDATE tasks SET plan_json = ?2, plan_mode = 'planned' WHERE id = ?1",
+        params![task_id, raw],
+    )?;
+    Ok(())
+}
+
+/// 读计划 JSON。解析失败视为「无计划」（降级为单步任务），不 panic——
+/// 一条脏数据不能打挂 trace/进度面板（沿用 v10 教训的防御姿态）。
+pub fn plan_get(conn: &Connection, task_id: &str) -> rusqlite::Result<Option<PlanJson>> {
+    let raw: Option<String> = conn.query_row(
+        "SELECT plan_json FROM tasks WHERE id = ?1",
+        params![task_id],
+        |r| r.get(0),
+    ).optional()?;
+    Ok(raw.and_then(|s| serde_json::from_str(&s).ok()))
+}
+
+/// 记录本轮确认模式（D1：`auto` 默认直放；`manual` 本版只留痕不阻塞）。
+pub fn task_set_confirm_mode(conn: &Connection, task_id: &str, mode: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE tasks SET confirm_mode = ?2 WHERE id = ?1",
+        params![task_id, mode],
+    )?;
+    Ok(())
+}
+
+/// 记录取消原因（`user` / `budget`）。
+pub fn task_set_cancel_reason(
+    conn: &Connection,
+    task_id: &str,
+    reason: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE tasks SET cancel_reason = ?2 WHERE id = ?1",
+        params![task_id, reason],
+    )?;
+    Ok(())
+}
+
 /// 任务卡读取（UI 只读总览，沿 tool_call_records 惯例：最新在前）。
+/// `plan` 是解析后的结构化计划（T6 `plan_list` 直接转发给前端）；
+/// 脏 JSON 视为 None，不阻断列表。
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskRow {
@@ -1565,14 +1661,20 @@ pub struct TaskRow {
     pub status: String,
     pub tool_calls: i64,
     pub final_reply: Option<String>,
+    pub plan: Option<PlanJson>,
+    pub plan_mode: String,
+    pub cancel_reason: Option<String>,
+    pub confirm_mode: String,
 }
 
 pub fn task_list(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<TaskRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, created_at, goal, status, tool_calls, final_reply
+        "SELECT id, created_at, goal, status, tool_calls, final_reply,
+                plan_json, plan_mode, cancel_reason, confirm_mode
          FROM tasks ORDER BY rowid DESC LIMIT ?1",
     )?;
     let rows = stmt.query_map(params![limit], |r| {
+        let raw_plan: Option<String> = r.get(6)?;
         Ok(TaskRow {
             id: r.get(0)?,
             created_at: r.get(1)?,
@@ -1580,6 +1682,10 @@ pub fn task_list(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<TaskRow>
             status: r.get(3)?,
             tool_calls: r.get(4)?,
             final_reply: r.get(5)?,
+            plan: raw_plan.and_then(|s| serde_json::from_str(&s).ok()),
+            plan_mode: r.get::<_, Option<String>>(7)?.unwrap_or_else(|| "none".into()),
+            cancel_reason: r.get(8)?,
+            confirm_mode: r.get::<_, Option<String>>(9)?.unwrap_or_else(|| "auto".into()),
         })
     })?;
     rows.collect()
@@ -2329,16 +2435,112 @@ mod tests {
     }
 
     #[test]
-    fn migrate_heals_a_db_stamped_at_current_version_without_tables() {
-        // 真机事故（2026-11-23）：user_version 已经 checkpoint 到 13，但建表
-        // 帧随 WAL 截断丢失 → 旧实现「版本够就 return」永久卡死，前端报
-        // "no such table: user_profile"。migrate 必须自己把表补回来。
+    fn v13_tasks_upgrade_to_v14_with_plan_columns() {
+        // v13 老库：tasks 是 v12 的六列外壳，user_version 已停在 13。
+        // migrate 必须补齐四列、保留老行，并写入默认值（v10 教训）。
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL,
                  kind TEXT NOT NULL, content TEXT NOT NULL, role TEXT, session_id TEXT,
                  consumed INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE tasks (
+                 id TEXT PRIMARY KEY, created_at TEXT NOT NULL, goal TEXT NOT NULL,
+                 status TEXT NOT NULL, tool_calls INTEGER NOT NULL DEFAULT 0,
+                 final_reply TEXT);
+             INSERT INTO tasks (id, created_at, goal, status, tool_calls)
+                 VALUES ('legacy-1', '2026-11-23T00:00:00Z', '老任务', 'done', 2);
              PRAGMA user_version = 13;",
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
+
+        let cols: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(tasks)").unwrap();
+            let rows = stmt.query_map([], |r| r.get::<_, String>(1)).unwrap();
+            rows.map(|r| r.unwrap()).collect()
+        };
+        for c in ["plan_json", "plan_mode", "cancel_reason", "confirm_mode"] {
+            assert!(cols.iter().any(|x| x == c), "v14 缺列: {c}");
+        }
+
+        let rows = task_list(&conn, 10).unwrap();
+        assert_eq!(rows.len(), 1, "老行必须保留");
+        assert_eq!(rows[0].id, "legacy-1");
+        assert_eq!(rows[0].goal, "老任务");
+        assert!(rows[0].plan.is_none());
+        assert_eq!(rows[0].plan_mode, "none");
+        assert_eq!(rows[0].confirm_mode, "auto", "D1 默认确认");
+        assert!(rows[0].cancel_reason.is_none());
+
+        // 二次迁移幂等：不重复加列、不丢行。
+        migrate(&conn).unwrap();
+        assert_eq!(task_list(&conn, 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn plan_put_get_and_task_list_carry_plan() {
+        let conn = mem();
+        let id = task_start(&conn, "整理文件并写摘要").unwrap();
+        let plan = PlanJson {
+            version: 1,
+            goal: "整理文件并写摘要".into(),
+            steps: vec![
+                PlanStep {
+                    seq: 0,
+                    intent: "读第一个文件".into(),
+                    tool_hint: "fs_read".into(),
+                    status: "done".into(),
+                    attempts: 1,
+                    tool_call_id: Some(12),
+                },
+                PlanStep {
+                    seq: 1,
+                    intent: "写入摘要".into(),
+                    tool_hint: "fs_write".into(),
+                    status: "pending".into(),
+                    attempts: 0,
+                    tool_call_id: None,
+                },
+            ],
+            replans: 0,
+        };
+
+        plan_put(&conn, &id, &plan).unwrap();
+        assert_eq!(plan_get(&conn, &id).unwrap(), Some(plan.clone()));
+        task_set_confirm_mode(&conn, &id, "manual").unwrap();
+        task_set_cancel_reason(&conn, &id, "budget").unwrap();
+        task_finish(&conn, &id, "done", 2, None).unwrap();
+
+        let rows = task_list(&conn, 10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].plan, Some(plan));
+        assert_eq!(rows[0].plan_mode, "planned");
+        assert_eq!(rows[0].confirm_mode, "manual");
+        assert_eq!(rows[0].cancel_reason.as_deref(), Some("budget"));
+
+        // 脏 JSON 降级：plan_get 返回 None、列表不炸（一条脏数据不打挂面板）。
+        conn.execute(
+            "UPDATE tasks SET plan_json = '{not json' WHERE id = ?1",
+            params![id],
+        )
+        .unwrap();
+        assert!(plan_get(&conn, &id).unwrap().is_none());
+        assert!(task_list(&conn, 10).unwrap()[0].plan.is_none());
+    }
+
+    #[test]
+    fn migrate_heals_a_db_stamped_at_current_version_without_tables() {
+        // 真机事故（2026-11-23）：user_version 已经 checkpoint 到当前版本（当初 13，
+        // 现为 14），但建表帧随 WAL 截断丢失 → 旧实现「版本够就 return」永久卡死，
+        // 前端报 "no such table: user_profile"。migrate 必须自己把表补回来。
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL,
+                 kind TEXT NOT NULL, content TEXT NOT NULL, role TEXT, session_id TEXT,
+                 consumed INTEGER NOT NULL DEFAULT 0);
+             PRAGMA user_version = 14;",
         )
         .unwrap();
         conn.execute(
