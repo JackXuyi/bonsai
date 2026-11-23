@@ -15,8 +15,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: macos-14
-            args: "--target aarch64-apple-darwin"
+          - platform: macos-latest
+            args: ""
             sidecar: macos
           - platform: windows-latest
             args: ""
@@ -36,8 +36,6 @@ jobs:
           cache: pnpm
 
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.sidecar == 'macos' && 'aarch64-apple-darwin' || '' }}
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
@@ -69,7 +67,7 @@ jobs:
             - 修复表情皮肤路径双重嵌套导致的 404
 
             ## 下载
-            - macOS (Apple Silicon): `bonsai_0.2.0_aarch64.dmg`
+            - macOS: `.dmg` 安装包（Apple Silicon）
             - Windows (x64): `.msi` 或 `.nsis` 安装包
 
             两个平台均内置 Ollama sidecar 与 CPU 推理运行时，本地模型开箱可用；
