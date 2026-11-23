@@ -145,13 +145,13 @@ usable = min(window, soft) - 4096        # 4096 = CLOUD_MAX_TOKENS 答复预留
 ```sql
 CREATE TABLE IF NOT EXISTS sessions (
     id            TEXT PRIMARY KEY,          -- 'default' | uuid
-    title         TEXT NOT NULL,             -- 首条用户消息前 24 字（零模型）
+    title         TEXT NOT NULL DEFAULT '',  -- 首条用户消息前 24 字；'' = 未命名（前端显示「新对话」）
     created_at    TEXT NOT NULL,
     updated_at    TEXT NOT NULL,             -- 每次落对话事件时 touch，列表按它倒序
     archived      INTEGER NOT NULL DEFAULT 0,
     digest        TEXT,                      -- L1/L2 摘要正文（NULL = 还没压过）
     digest_upto_event_id INTEGER,            -- 已合并进 digest 的最大 events.id（防重复合并）
-    message_count INTEGER NOT NULL DEFAULT 0
+    message_count INTEGER NOT NULL DEFAULT 0  -- 落地的对话事件条数（user+assistant 各算一条）
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(archived, updated_at DESC);
 ```
@@ -173,6 +173,8 @@ CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id, id);
 | `dropped_turns` | INTEGER | 本轮被 L0 丢掉的历史轮数（0 = 没压） |
 
 迁移沿用既有范式：`execute_batch(SCHEMA)` **之后**再 `add_column_if_missing`（v10 教训：先建表后加列，顺序反了会在老库上失败）。
+
+> 实施补充（T4）：另给 `tasks` 加了 `session_id TEXT`。§5.5 要求「忘掉这段会话」连带清任务行，而任务行只有 `goal`（用户原话）没有归属——按文本匹配不可靠，所以让 `task_start_in` 在建卡时带上会话 id。
 
 ### 5.4 迁移与回填
 
@@ -431,7 +433,7 @@ pub struct Built {
 | T1 | `b2737c3` | `cargo test --lib` 486 passed（+16：估算器 6 / 窗口表 3 / 预算 5 / 分段表 2）；`cargo check` 仅既有 `dialogue.rs:101` dead_code | `context.rs` 落地：估算器（汉字 1.0 / 拉丁 1/4 / 符号 0.75，整体向上取整）+ 窗口表（deepseek 128k / claude 200k / openai 128k / 本地取 `num_ctx` / 未知 32k）+ `Budget`（`usable = min(window,soft) − 4096`、`tool_room` 40%、`history_room` 饱和减法）+ 7 个固定段上限。**零接线**：`dialogue.rs` 一行未改 |
 | T2 | `bb4c8da` | `cargo test --lib` 495 passed（+9：装配 7 / 接线 1 / num_ctx 1）；`tsc --noEmit` 0 错；`vitest run` 170 passed；`cargo check` 仅既有 `TraceRecorder::new` dead_code | `context::build`（`BuildInput`/`Built`/L0/摘要位）+ 唯一装配点接线（原 `1531-1536` 的 `format!(env+body)` 改为 build）；**D5 = 8192** 落地（`ollama::NUM_CTX`，请求带显式 `num_ctx`）；历史上限 6 → `HISTORY_MAX_TURNS=12`；本地不预留给工具额度（云端才留）；trace 增 `context_budget` 步（est/usable/window/dropped） |
 | T3 | `ae75530` | `cargo test --lib` 505 passed（+8：压缩 3 / 目录 3 / 接线 2）；`tsc --noEmit` 0 错；`vitest run` 170 passed；`cargo check` 仅既有 `TraceRecorder::new` dead_code | `context::compact_tool_result`（>1500 tokens → head 70% + tail 20% + 省略标记）+ `context::trim_tool_catalog`（description 截 240 字 + 顺序砍尾部，第一条永留）；接线两处：`cloud_tool_loop` 建 `tools[]` 时裁目录并记 `tools_truncated`、`tool_result` 落地时降级内容；**配对不破**（`tool_call_id` 与 assistant 一一对应，单测断言 roles 相邻）；原文仍在 `tool_call` 审计步 |
-| T4 | | | |
+| T4 | `3b73d9c` | `cargo test --lib` 518 passed（T4 自身 +8：迁移/索引/遗忘 4 + 会话命令 4；总数含工作区里他人未提交的 S0 检索改动）；`cargo check` 仅既有 `TraceRecorder::new` dead_code | `memory/db.rs` 落地 schema v15（`sessions` 表 + `idx_sessions_updated` + `idx_events_session` + `turn_trace` 三列 + `tasks.session_id`）+ 迁移回填 `default`（标题取首条用户消息，不造 digest，`proactive` 不建行）+ 会话 CRUD（`session_touch`/`list`/`get`/`create`/`rename`/`set_archived`）+ 遗忘补全（`forget_session` 连带 trace_steps/trace_trace/tasks/sessions；`forget_all` 补四张表）；`src/session.rs` 提供 5 个 IPC 命令；`add_event_meta` 成为会话索引的**唯一**维护点 |
 | T5 | | | |
 | T6 | | | |
 | T7 | | | |
@@ -446,3 +448,4 @@ pub struct Built {
 | v0.1.1 | 2026-11-23 | T1 落地：`context.rs` 估算器 / 窗口表 / `Budget` / 分段上限；方案本身无变更 |
 | v0.2 | 2026-11-23 | T2 落地：§6.3 换成实际签名（`BuildInput` / `reserve_tool_room`，`truncated_tools` 延到 T3）；D5 裁决 8192、历史 6 → 12；trace 增 `context_budget` 步 |
 | v0.3 | 2026-11-23 | T3 落地：§6.6 换成实际函数名与三处差异（head/tail 按上限算、降级在落地时一次、目录裁剪在 `cloud_tool_loop`）；§6.3 明确 `truncated_tools` 不再需要；记录 `web_fetch` 8000 字摘要被压到 ~1350 字的取舍 |
+| v0.4 | 2026-11-23 | T4 落地：schema v15 与 §5 对齐（另加 `tasks.session_id`，理由见 §5.3 补充）；会话标题用「空串 = 未命名」代替中文占位串；`add_event_meta` 成为会话索引唯一维护点；遗忘补全按 §5.5 实际删 5 张表 |
