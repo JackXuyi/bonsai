@@ -294,7 +294,7 @@ pub struct Built {
 |---|---|---|
 | `session_list` | `(limit?) -> Vec<SessionRow>` | 未归档，按 `updated_at DESC`，默认 50 |
 | `session_create` | `(title?) -> SessionRow` | 生成 uuid；无标题则「新对话」 |
-| `session_rename` | `(id, title)` | 截 60 字；空标题拒绝 |
+| `session_rename` | `(id, title)` | 截 60 字；空标题拒绝（T5 实施注：拒绝在前端——空标题不提交；后端空串语义是「不改自动标题」，两者不冲突） |
 | `session_archive` | `(id, archived)` | 归档/取消归档（数据不动） |
 | `session_delete` | `(id)` | 拒绝删 `default`；调 `forget_session` 的加强版（§5.5）；二次确认在前端 |
 
@@ -304,10 +304,12 @@ pub struct Built {
 
 ### 6.8 前端会话切换
 
-- 新增 `lib/stores/sessionStore.ts`：`list` / `currentId` / `loading` / `switchTo(id)` / `create()` / `rename()` / `archive()` / `remove()`。
-- `useChat` 的 `SESSION_ID` 常量删除，改读 store（`sessionStore.getState().currentId`）。
-- `ChatPane` 的两处 `dialogueHistory("default", …)` 改传入 `currentId`；切换时：`chatStore.clear()` → 拉第一页 → 重置分页游标（`oldestIdRef` / `hasMoreRef`）。
-- **在飞禁止切换**：`chatting === true` 时抽屉里的切换/新建置灰，提示「等它说完」；不静默 cancel（用户可能只是手滑）。
+- 新增 `lib/stores/sessionStore.ts`：`list` / `currentId` / `loaded` / `pending` / `load()` / `switchTo(id)` / `create()` / `rename()` / `archive()` / `remove()`；纯函数 `sessionTitle`（空串兜「新对话」）/ `dayLabel`（今天/昨天/MM-DD）/ `splitSessions`（主列表/归档分组）放同文件供单测。
+- `useChat` 的 `SESSION_ID` 常量删除，发送时读 `sessionStore.getState().currentId`，并把该值绑定为本轮归属；**归属兜底**：若用户仍切走了会话（A13 已挡，只防万一），这一轮的 delta / turn_done 一个字不写进新会话的气泡，但终态照常收尾（否则输入框永远卡「在飞」）。
+- `ChatPane` 首次挂载与切换合并为同一条 `currentId` effect：切换 = `chatStore.reset()` → 游标/滚动锚点全部归零 → 拉第一页（30 条）→ prefill；快速连切用 cancelled 标志只认最后一次。首次挂载若消息流已有内容（本次启动先聊过 / proactive 先到）以消息流为准，不白跑 IPC。
+- **在飞禁止切换**：`chatting === true` 时抽屉里的切换/新建/删除全部置灰（药丸本身仍可点开看列表），底部提示「等它说完再切换」；不静默 cancel（用户可能只是手滑）。useChat 侧另有归属兜底（见上）。
+- 归档 ≠ 删除：归档的会话留在列表（移进底部「已归档（N）」折叠区，可恢复），当前会话被归档不强行切走；删除才有二次确认弹层（复用 `.mconfirm`），文案写明「连带清掉这段对话的生成记录」。`default` 会话不给归档/删除入口（老数据锚点，§6.7）。
+- 删掉的正是当前会话时，store 自动切回 `default`，ChatPane 的 effect 随即清流并回放默认会话。
 
 ### 6.9 可观察性
 
@@ -434,7 +436,7 @@ pub struct Built {
 | T2 | `bb4c8da` | `cargo test --lib` 495 passed（+9：装配 7 / 接线 1 / num_ctx 1）；`tsc --noEmit` 0 错；`vitest run` 170 passed；`cargo check` 仅既有 `TraceRecorder::new` dead_code | `context::build`（`BuildInput`/`Built`/L0/摘要位）+ 唯一装配点接线（原 `1531-1536` 的 `format!(env+body)` 改为 build）；**D5 = 8192** 落地（`ollama::NUM_CTX`，请求带显式 `num_ctx`）；历史上限 6 → `HISTORY_MAX_TURNS=12`；本地不预留给工具额度（云端才留）；trace 增 `context_budget` 步（est/usable/window/dropped） |
 | T3 | `ae75530` | `cargo test --lib` 505 passed（+8：压缩 3 / 目录 3 / 接线 2）；`tsc --noEmit` 0 错；`vitest run` 170 passed；`cargo check` 仅既有 `TraceRecorder::new` dead_code | `context::compact_tool_result`（>1500 tokens → head 70% + tail 20% + 省略标记）+ `context::trim_tool_catalog`（description 截 240 字 + 顺序砍尾部，第一条永留）；接线两处：`cloud_tool_loop` 建 `tools[]` 时裁目录并记 `tools_truncated`、`tool_result` 落地时降级内容；**配对不破**（`tool_call_id` 与 assistant 一一对应，单测断言 roles 相邻）；原文仍在 `tool_call` 审计步 |
 | T4 | `3b73d9c` | `cargo test --lib` 518 passed（T4 自身 +8：迁移/索引/遗忘 4 + 会话命令 4；总数含工作区里他人未提交的 S0 检索改动）；`cargo check` 仅既有 `TraceRecorder::new` dead_code | `memory/db.rs` 落地 schema v15（`sessions` 表 + `idx_sessions_updated` + `idx_events_session` + `turn_trace` 三列 + `tasks.session_id`）+ 迁移回填 `default`（标题取首条用户消息，不造 digest，`proactive` 不建行）+ 会话 CRUD（`session_touch`/`list`/`get`/`create`/`rename`/`set_archived`）+ 遗忘补全（`forget_session` 连带 trace_steps/trace_trace/tasks/sessions；`forget_all` 补四张表）；`src/session.rs` 提供 5 个 IPC 命令；`add_event_meta` 成为会话索引的**唯一**维护点 |
-| T5 | | | |
+| T5 | 本提交 | `tsc --noEmit` 0 错；`vitest run` 186 passed（+14：sessionStore 纯函数 6 + SessionSwitch 切换/抽屉 8）；金丝雀 A12/A11/A13/A14 由 `SessionSwitch.test.tsx` 用真实 ChatPane + 真实 store 锁死；浏览器预览截图核对药丸/抽屉版式 | `sessionStore.ts`（列表/当前/切换/CRUD + 3 个纯函数）+ `SessionDrawer.tsx`（右侧 260px 抽屉：全宽「新对话」、行尾「…」菜单改名/归档/删除、归档折叠区、删除二次确认复用 `.mconfirm`）+ ChatPane 顶部会话药丸与 `currentId` 切换 effect；`useChat` 去常量、按发送时归属兜底；`chatStore.reset()` 供切换清流；抽屉整体滚动（行尾菜单绝对定位不被列表裁切） |
 | T6 | | | |
 | T7 | | | |
 
@@ -449,3 +451,4 @@ pub struct Built {
 | v0.2 | 2026-11-23 | T2 落地：§6.3 换成实际签名（`BuildInput` / `reserve_tool_room`，`truncated_tools` 延到 T3）；D5 裁决 8192、历史 6 → 12；trace 增 `context_budget` 步 |
 | v0.3 | 2026-11-23 | T3 落地：§6.6 换成实际函数名与三处差异（head/tail 按上限算、降级在落地时一次、目录裁剪在 `cloud_tool_loop`）；§6.3 明确 `truncated_tools` 不再需要；记录 `web_fetch` 8000 字摘要被压到 ~1350 字的取舍 |
 | v0.4 | 2026-11-23 | T4 落地：schema v15 与 §5 对齐（另加 `tasks.session_id`，理由见 §5.3 补充）；会话标题用「空串 = 未命名」代替中文占位串；`add_event_meta` 成为会话索引唯一维护点；遗忘补全按 §5.5 实际删 5 张表 |
+| v0.5 | 2026-11-23 | T5 落地：§6.8 换成实际实现——切换与启动回放合并为一条 `currentId` effect（首次挂载消息流优先）；归档语义明确为「不切走、可恢复」；删除当前会话自动回 `default`；§6.7 补注「空标题拒绝在前端」；列表一次全拉含归档由前端分组（后端 `include_archived` 直接给 true） |

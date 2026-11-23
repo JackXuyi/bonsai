@@ -234,6 +234,19 @@ export interface DialogueBubble {
   content: string;
 }
 
+/** 会话索引行（session.rs / sessions 表，plan-context.md §6.7）。
+ *  `title` 空串 = 未命名（显示层兜「新对话」，后端不造中文占位串）。 */
+export interface SessionRow {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  archived: boolean;
+  messageCount: number;
+  digest?: string | null;
+  digestUptoEventId?: number | null;
+}
+
 // ── prediction（predict.rs）───────────────────────────────────
 export interface PredictionAskedPayload {
   id: number;

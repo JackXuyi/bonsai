@@ -47,6 +47,9 @@ interface ChatState {
   patch: (id: number, partial: Partial<ChatMessage>) => void;
   /** 启动回放：整批灌入历史气泡（仅在消息流为空时由 ChatPane 调用） */
   prefill: (msgs: Omit<ChatMessage, "id">[]) => void;
+  /** 切会话：整条流清空（旧会话的气泡一个不留，A12）；id 序号不回退，
+   *  防止旧 key 被新气泡复用导致 React 误复用节点。 */
+  reset: () => void;
   /** 向上分页：把更早的一页插到最前面（保持现有气泡 id 稳定） */
   prepend: (msgs: Omit<ChatMessage, "id">[]) => void;
 }
@@ -88,6 +91,7 @@ export const useChatStore = create<ChatState>((set) => ({
     const filled = msgs.map((m) => ({ ...m, id: ++seq }));
     set({ messages: filled });
   },
+  reset: () => set({ messages: [] }),
   prepend: (msgs) =>
     set((st) => {
       if (msgs.length === 0) return st;

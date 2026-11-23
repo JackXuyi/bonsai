@@ -30,6 +30,7 @@ import type {
   PerceptionStatus,
   ProfileEntry,
   RelationshipStatus,
+  SessionRow,
   SkillCreateInput,
   SkillDetail,
   SkillView,
@@ -84,6 +85,20 @@ export const dialogueCancel = (taskId: string) =>
 export const dialogueHistory = (sessionId: string, limit?: number, beforeId?: number) =>
   call<DialogueBubble[]>("dialogue_history", { sessionId, limit, beforeId });
 export const dialogueProactiveNow = () => call<ProactiveReply>("dialogue_proactive_now");
+
+// ---------- 会话（session.rs，plan-context.md §6.7）----------
+/** 会话索引。`includeArchived` 缺省 false：抽屉默认只看活的，
+ *  归档区要单独拉一次（或直接一次全拉回来自己分组）。 */
+export const sessionList = (includeArchived?: boolean) =>
+  call<SessionRow[]>("session_list", { includeArchived });
+export const sessionCreate = (title?: string) =>
+  call<SessionRow>("session_create", { title });
+export const sessionRename = (id: string, title: string) =>
+  call<void>("session_rename", { id, title });
+export const sessionArchive = (id: string, archived: boolean) =>
+  call<void>("session_archive", { id, archived });
+/** 删除 = 合规意义上的「忘掉这段」：连带清 trace / 任务。返回删掉的事件条数。 */
+export const sessionDelete = (id: string) => call<number>("session_delete", { id });
 
 // ---------- 对话链路追踪（dialogue.rs，spec-s8）----------
 /** 单回合完整生成链路；None = 追踪上线前的旧消息（前端空态）。 */

@@ -13,10 +13,9 @@ import { inTauri } from "@/lib/tauriInvoke";
 import { noteFor } from "@/components/face/frames";
 import { useChatStore } from "@/lib/stores/chatStore";
 import { usePlanStore } from "@/lib/stores/planStore";
+import { useSessionStore } from "@/lib/stores/sessionStore";
 import { toast } from "@/lib/stores/uiStore";
 import type { DialogueOutcome } from "@/lib/types";
-
-const SESSION_ID = "default";
 
 /** 事件静默上限：一轮真实对话里最长静默是单次云端 HTTP（上限 120s），
  *  取 150s 留余量——只判「真断了」，不判「慢」。 */
@@ -66,6 +65,8 @@ export function useChat() {
     }
 
     const userId = store.add({ kind: "user", text, ts: new Date().toISOString() });
+    // 本轮归属：发送那一刻的当前会话（切会话时抽屉已禁用，这里只做兜底）。
+    const sessionId = useSessionStore.getState().currentId;
     chattingRef.current = true;
     setChatting(true);
     const typingId = store.add({ kind: "typing", text: "" });
@@ -129,6 +130,17 @@ export function useChat() {
         return;
       }
 
+      // 会话归属兜底（A13 已在前端禁用切换，这里只防万一）：这一轮属于旧
+      // 会话时，正文一个字符都不往新会话里写；但终态必须收尾，否则输入框
+      // 会永远卡在「在飞」。
+      if (useSessionStore.getState().currentId !== sessionId) {
+        if (msg?.turn_done || msg?.turn_error) {
+          settled = true;
+          endTurn();
+        }
+        return;
+      }
+
       // 终态事件：整轮的权威结果（P1 之后不再有「命令返回值」这条路）
       if (msg?.turn_done) {
         settled = true;
@@ -174,7 +186,7 @@ export function useChat() {
 
     armIdle();
     // 命令只负责「受理」；结果一律走 Channel 事件。
-    dialogueChatStream(text, SESSION_ID, onDelta).catch((err) => {
+    dialogueChatStream(text, sessionId, onDelta).catch((err) => {
       if (settled) return;
       settled = true;
       fail(err);

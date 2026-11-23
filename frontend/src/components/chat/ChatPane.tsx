@@ -3,11 +3,20 @@
 // 对话页（旧 tab-chat）：消息流 + 渐增气泡 + typing + 回到底部 + composer。
 // 主动搭话 / 预测 / 提醒事件已上移 useAppEvents（路由化后 ChatPane 只在 /
 // 挂载）；消息流状态在 chatStore，跨页保留。
+//
+// 多会话（plan-context.md §6.8）：顶部一颗「会话」药丸开右侧抽屉。切换时
+// 消息流整条清空再按新会话回放（A12 不串味）；一轮在飞时抽屉禁点（A13）。
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MessageBubble } from "./MessageBubble";
 import { Composer } from "./Composer";
+import { SessionDrawer } from "./SessionDrawer";
 import { useChat } from "@/hooks/useChat";
 import { useChatStore, type ChatMessage } from "@/lib/stores/chatStore";
+import {
+  sessionTitle,
+  useCurrentSession,
+  useSessionStore,
+} from "@/lib/stores/sessionStore";
 import { dialogueHistory } from "@/lib/commands";
 import { inTauri } from "@/lib/tauriInvoke";
 
@@ -39,8 +48,11 @@ function bubblesFromHistory(
 export function ChatPane() {
   const messages = useChatStore((s) => s.messages);
   const { send, chatting, cancel } = useChat();
+  const currentId = useSessionStore((s) => s.currentId);
+  const current = useCurrentSession();
   const scrollRef = useRef<HTMLDivElement>(null);
   const [showToBottom, setShowToBottom] = useState(false);
+  const [drawerOpen, setDrawerOpen] = useState(false);
 
   // —— 分页回放状态（refs：不参与渲染，避免 onScroll 高频重渲） ——
   const PAGE_SIZE = 30;
@@ -110,7 +122,7 @@ export function ChatPane() {
     if (before === null) return;
     loadingRef.current = true;
     try {
-      const rows = await dialogueHistory("default", PAGE_SIZE, before);
+      const rows = await dialogueHistory(currentId, PAGE_SIZE, before);
       if (rows.length === 0) {
         hasMoreRef.current = false;
         return;
@@ -125,7 +137,7 @@ export function ChatPane() {
     } finally {
       loadingRef.current = false;
     }
-  }, []);
+  }, [currentId]);
 
   function onMessagesScroll() {
     const el = scrollRef.current;
@@ -139,37 +151,75 @@ export function ChatPane() {
     scrollRef.current?.querySelector("textarea")?.focus({ preventScroll: true });
   }, []);
 
-  // 启动回放：只拉第一页（30 条），其余滚到顶部再分页加载。仅在流为空时
-  // 执行——本次启动已产生的消息优先；拉取失败静默降级（空态文案兜底）。
-  // 跨启动一律以 DB 为准，不做本地缓存。
+  // 会话载入（首次挂载 + 每次切换共用一条路）：只拉第一页（30 条），其余
+  // 滚到顶部再分页加载。
+  // - 切换：先把旧会话的气泡整条清掉、游标归零（A12 旧气泡不残留），
+  //   再按新会话回放；`jumpedRef` 复位让视图落到底部。
+  // - 首次挂载：本次启动若已聊过（先发消息 / proactive 先到）就以消息流
+  //   为准，不覆盖；否则按 DB 回放。跨启动一律以 DB 为准，不做本地缓存。
+  const loadedSessionRef = useRef<string | null>(null);
   useEffect(() => {
+    const switching =
+      loadedSessionRef.current !== null && loadedSessionRef.current !== currentId;
+    loadedSessionRef.current = currentId;
+
+    const store = useChatStore.getState();
+    if (switching) {
+      store.reset();
+      oldestIdRef.current = null;
+      hasMoreRef.current = true;
+      restoreRef.current = null;
+      jumpedRef.current = false;
+      pinnedRef.current = true;
+    } else if (store.messages.length > 0) {
+      return;
+    }
     if (!inTauri) return;
-    let cancelled = false;
+
+    let cancelled = false; // 快速连切：只认最后一次请求
     void (async () => {
       try {
-        const rows = await dialogueHistory("default", PAGE_SIZE);
-        if (
-          cancelled ||
-          rows.length === 0 ||
-          useChatStore.getState().messages.length > 0
-        )
-          return;
+        const rows = await dialogueHistory(currentId, PAGE_SIZE);
+        if (cancelled || useChatStore.getState().messages.length > 0) return;
+        if (rows.length === 0) return;
         oldestIdRef.current = rows[0].id;
         hasMoreRef.current = rows.length === PAGE_SIZE;
         useChatStore.getState().prefill(bubblesFromHistory(rows));
       } catch {
-        // 历史读不到就当没聊过，不挡本次对话。
+        // 历史读不到就当这个会话是空的，不挡本次对话。
       }
     })();
     return () => {
       cancelled = true;
     };
+  }, [currentId]);
+
+  // 会话索引只在壳层拉一次；抽屉每次打开会自己重拉（标题/条数会变）。
+  useEffect(() => {
+    void useSessionStore.getState().load();
   }, []);
 
   const empty = messages.length === 0;
 
   return (
     <>
+      <div className="chat-topbar">
+        <button
+          type="button"
+          className={`sess-pill ${chatting ? "busy" : ""}`}
+          onClick={() => setDrawerOpen(true)}
+          title={chatting ? "这一轮说完就能换会话" : "会话"}
+          aria-label="会话"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <line x1="4" y1="7" x2="20" y2="7" />
+            <line x1="4" y1="12" x2="13" y2="12" />
+            <line x1="4" y1="17" x2="16" y2="17" />
+          </svg>
+          <span className="sess-pill-title">{sessionTitle(current)}</span>
+        </button>
+      </div>
+
       <div className="chat-body">
         <div className="messages" ref={scrollRef} onScroll={onMessagesScroll}>
           {empty && (
@@ -216,6 +266,7 @@ export function ChatPane() {
       </div>
 
       <Composer onSend={send} onCancel={cancel} chatBusy={chatting} />
+      <SessionDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} busy={chatting} />
     </>
   );
 }

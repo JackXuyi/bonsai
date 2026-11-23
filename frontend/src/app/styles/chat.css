@@ -437,3 +437,332 @@
   fill: #fff;
   stroke: none;
 }
+
+/* ── 会话药丸 + 抽屉（plan-context.md §8，D7：抽屉不加侧栏项）──── */
+
+.chat-topbar {
+  display: flex;
+  justify-content: flex-end;
+  flex: none;
+  padding: 0 2px;
+}
+
+.sess-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 190px;
+  padding: 3px 9px 3px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--card);
+  color: var(--muted);
+  font: inherit;
+  font-size: 10.5px;
+  cursor: pointer;
+  transition: color 0.16s, border-color 0.16s;
+}
+
+.sess-pill:hover {
+  color: var(--ink);
+  border-color: rgba(76, 140, 43, 0.35);
+}
+
+/* 在飞时药丸仍可点开（看得见列表），但操作全部置灰——不静默 cancel */
+.sess-pill.busy {
+  opacity: 0.72;
+}
+
+.sess-pill svg {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.sess-pill-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 遮罩与抽屉：z-index 30/31，低于 toast(50) 与 onboarding(60)，
+   高于页内容——弹层顺序由低到高：抽屉 < 删除确认(40) < toast */
+.sess-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  background: rgba(40, 36, 24, 0.12);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s;
+}
+
+.sess-scrim.on {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.sess-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 31;
+  width: 260px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 10px 12px;
+  background: var(--card);
+  border-left: 1px solid var(--line);
+  box-shadow: -8px 0 24px rgba(60, 50, 30, 0.08);
+  /* 抽屉整条滚动、列表本身不滚：行尾「…」菜单是绝对定位，列表一滚就会被
+     裁掉半个；会话一多时滚抽屉，菜单始终画得出来 */
+  overflow-y: auto;
+  scrollbar-width: none;
+  transform: translateX(100%);
+  visibility: hidden;
+  transition: transform 0.2s ease, visibility 0s 0.2s;
+}
+
+.sess-drawer.on {
+  transform: none;
+  visibility: visible;
+  transition: transform 0.2s ease;
+}
+
+.sess-drawer::-webkit-scrollbar {
+  display: none;
+}
+
+.sess-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 0 2px;
+}
+
+.sess-head-title {
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.sess-head-count {
+  font-size: 10px;
+  color: var(--faint);
+}
+
+.sess-new {
+  flex: none;
+  padding: 6px 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  transition: color 0.16s, border-color 0.16s, background 0.16s;
+}
+
+.sess-new:hover:not(:disabled) {
+  color: var(--accent-ink);
+  border-color: rgba(76, 140, 43, 0.45);
+  background: var(--accent-wash);
+}
+
+.sess-new:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.sess-list {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sess-empty {
+  padding: 10px 4px;
+  font-size: 10.5px;
+  line-height: 1.6;
+  color: var(--faint);
+}
+
+.sess-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  border-radius: 9px;
+  border-left: 2px solid transparent;
+}
+
+.sess-row:hover {
+  background: var(--bg-sunk);
+}
+
+/* 当前会话：左侧 2px 竖线 + 稍深底色（§8 列表行） */
+.sess-row.on {
+  border-left-color: var(--accent);
+  background: var(--bg-sunk);
+}
+
+.sess-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 6px 4px 6px 8px;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sess-main:disabled {
+  cursor: default;
+}
+
+.sess-row-title {
+  font-size: 11.5px;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sess-row.on .sess-row-title {
+  font-weight: 600;
+}
+
+.sess-row-meta {
+  font-size: 9.5px;
+  color: var(--faint);
+}
+
+.sess-more {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  margin-right: 4px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--faint);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.16s, color 0.16s;
+}
+
+.sess-row:hover .sess-more,
+.sess-row.on .sess-more,
+.sess-more[aria-expanded="true"],
+.sess-more:focus-visible {
+  opacity: 1;
+}
+
+.sess-more:hover {
+  color: var(--ink);
+}
+
+.sess-more svg {
+  width: 13px;
+  height: 13px;
+  fill: currentColor;
+}
+
+.sess-menu {
+  position: absolute;
+  top: 100%;
+  right: 4px;
+  z-index: 2;
+  min-width: 108px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--card);
+  box-shadow: 0 8px 20px rgba(60, 50, 30, 0.14);
+}
+
+.sess-menu button {
+  display: block;
+  width: 100%;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sess-menu button:hover {
+  background: var(--bg-sunk);
+}
+
+.sess-menu button.danger {
+  color: var(--danger);
+}
+
+.sess-menu-note {
+  padding: 5px 8px;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--faint);
+}
+
+.sess-edit {
+  flex: 1;
+  min-width: 0;
+  margin: 4px 4px 4px 8px;
+  padding: 4px 6px;
+  border: 1px solid rgba(76, 140, 43, 0.45);
+  border-radius: 7px;
+  background: #fff;
+  color: var(--ink);
+  font: inherit;
+  font-size: 11.5px;
+  outline: none;
+  user-select: text;
+}
+
+.sess-arch {
+  flex: none;
+  margin-top: 2px;
+  padding-top: 4px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.sess-arch > summary {
+  padding: 4px 4px;
+  font-size: 10.5px;
+  color: var(--faint);
+  cursor: pointer;
+  list-style: none;
+}
+
+.sess-arch > summary::-webkit-details-marker {
+  display: none;
+}
+
+.sess-arch[open] > summary {
+  color: var(--muted);
+}
+
+.sess-hint {
+  flex: none;
+  padding: 4px 4px 0;
+  font-size: 10px;
+  color: var(--warn);
+}

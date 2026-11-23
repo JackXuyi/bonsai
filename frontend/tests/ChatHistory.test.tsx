@@ -69,7 +69,7 @@ describe("ChatPane 启动回放", () => {
     expect(screen.getByText("早。今天有雨。")).toBeTruthy();
   });
 
-  it("消息流已有内容（本次启动先聊过）时不覆盖", async () => {
+  it("消息流已有内容（本次启动先聊过）时不覆盖，也不白跑一次 IPC", async () => {
     useChatStore.getState().add({ kind: "user", text: "刚发的" });
     historyMock.mockResolvedValue([
       { id: 1, ts: ts(yesterday), role: "user", content: "昨天的旧消息" },
@@ -77,10 +77,10 @@ describe("ChatPane 启动回放", () => {
 
     render(<ChatPane />);
 
-    await waitFor(() => expect(historyMock).toHaveBeenCalled());
-    await waitFor(() =>
-      expect(useChatStore.getState().messages.map((m) => m.text)).toEqual(["刚发的"])
-    );
+    // 首次挂载且流里已有内容：连拉都不拉（消息流优先），旧历史不覆盖。
+    await new Promise((r) => setTimeout(r, 20));
+    expect(historyMock).not.toHaveBeenCalled();
+    expect(useChatStore.getState().messages.map((m) => m.text)).toEqual(["刚发的"]);
     expect(screen.queryByText("昨天的旧消息")).toBeNull();
   });
 
