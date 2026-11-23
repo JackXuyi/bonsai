@@ -29,3 +29,5 @@ src-tauri/binaries/
 # Playwright CLI scratch output (snapshots, screenshots)
 .playwright-cli/
 s1.yaml
+chat.yaml
+frontend/chat.yaml
