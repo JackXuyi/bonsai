@@ -1,6 +1,6 @@
 # 方案：表情成套自定义皮肤（图片上传版）
 
-> **状态**：v0.1 待评审
+> **状态**：v0.2 已实施（M0–M2 落地，M3 真机验收待做）
 > **日期**：2026-11-23
 > **前置**：皮肤系统已落地（commit 5d456c6：内置 deepseek 图片皮肤 + bonsai SVG 皮肤 + 设置页选择卡）
 
@@ -184,12 +184,35 @@ calm 槽位标「必传」（渲染兜底依赖它，§3.2）。
 | 4 | 内置 DeepSeek 皮肤是否允许「覆盖上传」 | 不允许——内置只读，自定义基于空白模板 |
 | 5 | asset protocol 不可用时的降级 | base64 data URL + 内存缓存（§4.2 备选），真机验收 M2 时决定 |
 
-## 10. 实施记录
+## 10. 实施记录（2026-11-23）
 
-（待实施后回写）
+**Commits**：`0cc4025`（M0 存储内核）→ `dbbd888` + `9c26bec`（M1 注册表重构；补提含 SkinSlotGrid 组件 + tauri `protocol-asset` feature——assetProtocol 配置生效的必要条件）→ `a270146`（M2 管理界面）。
+
+**已落地（与方案的差异标注）**
+
+- `faceskins.rs`（~470 行含单测）：5 命令 + manifest BTreeMap + `c-`+8 位 base36 id（时间+pid 熵）；id 正则白名单 + canonicalize 界内校验；magic bytes（PNG/JPEG/WebP）；≤2MB 前置拒绝、≤10 套；list 坏目录容错跳过；排序 created_at(ms) 并列回退 id。
+- 前端三管线：`FaceSkin` 判别联合（svg/image/custom）替代原 Component 单契约；`resolveSkinImage` 渲染优先级（槽位图 > calm > FALLBACK_IMAGE）；`resolveCustom` 返回 `string | undefined`（baseDir 未就绪回退，比方案更细）。
+- asset protocol：`tauri.conf.json` scope `$APPDATA/face_skins/**` + Cargo.toml `protocol-asset` feature（补提提交）；`convertFileSrc` 解析 URL；`faceSkinStore` 扩展 `customSkins`/`baseDir`（partialize 只持久化 skinId），`ensureFaceSkinsLoaded` 懒加载一次。
+- 管理界面：FaceSkinCard 三区 + `SkinSlotGrid`（7 槽缩略图/上传/× 清除）+ `skinSlots.ts` 槽位常量；删除走 `window.confirm`；错误 toast 只取冒号后中文说明；取消选择（face_pick_cancelled）不弹错。
+
+**偏差两条（已记档）**
+
+1. 单槽清除命令命名为 `face_skin_clear_slot`（方案 §5.1 表格漏列序号，语义一致）。
+2. created_at 秒级改毫秒 + id 并列排序（同秒创建排序不稳定，单测抓住）。
+
+**门禁**：cargo test --lib **451 全绿**（faceskins 7 例）+ clippy 对 faceskins 零警告；`tsc --noEmit` 干净；vitest **140 过**（FaceSkin 18 例：内置回归 4 + 渲染优先级 7 + 管理流程 7）；next lint 无警告。
+
+**待真机验收（M3）**
+
+1. 新建皮肤 → rfd 弹窗上传 calm → 侧栏/表情页立即显示（asset:// URL 加载）；
+2. 传 >2MB / 假 PNG（改扩展名）→ 结构化 toast 报错，manifest 不变；
+3. 删除选中皮肤 → 回退 DeepSeek 不白屏；重启后自定义皮肤仍在；
+4. 手工构造 `skin_id="../x"` invoke → `face_bad_id` 拒绝；
+5. 表情状态全量切换（7 态）→ 槽位图正确优先于 calm 兜底。
 
 ## 变更记录
 
 | 版本 | 日期 | 说明 |
 | --- | --- | --- |
 | v0.1 | 2026-11-23 | 初稿：7 槽位模型、渲染优先级、asset protocol 存储、5 命令 Rust 面、M0–M3 里程碑 |
+| v0.2 | 2026-11-23 | M0–M2 实施落地（0cc4025 / dbbd888 / 9c26bec / a270146），门禁全绿；M3 真机验收待做 |
