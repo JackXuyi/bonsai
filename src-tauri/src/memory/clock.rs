@@ -35,6 +35,17 @@ pub fn now_local() -> chrono::DateTime<chrono::Local> {
     }
 }
 
+/// RFC3339 时间戳 → 本地「MM-DD」（摘要行前缀，plan-context §6.4）。
+///
+/// 为什么不用字符串切片：库里的 `ts` 是 UTC（`now_iso`），早上 8 点前的
+/// 对话在 UTC 还是前一天——摘要上的日期会集体错一天。解析失败返回空串，
+/// 调用方（`digest_line`）会退化成不带日期的行，不 panic。
+pub fn day_mmdd(ts: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(ts)
+        .map(|t| t.with_timezone(&chrono::Local).format("%m-%d").to_string())
+        .unwrap_or_default()
+}
+
 /// Pin the clock on the current thread (test only). Returns a guard that
 /// clears the pin on drop.
 #[cfg(test)]

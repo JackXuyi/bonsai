@@ -9,6 +9,10 @@
 //!                stale low-confidence facts are invalidated (defensive sweep)
 //!   finish       mark window events consumed; write the audit row
 //!
+//! Stage ⑥ (outside the transaction, plan-context §6.5): L2 digest rewrite for
+//! the sessions touched yesterday — **默认关**（`settings.ctx_digest_model`），
+//! 失败保留 L1 文本。
+//!
 //! Stage ① (session summaries) is deliberately absent in P0 — see the plan's
 //! open-question recommendation.
 //!
@@ -21,6 +25,28 @@ use serde::Serialize;
 
 use super::db;
 use super::extract::{CandidateFact, Category, FactExtractor, RuleExtractor, SessionDigest};
+
+/// L2 摘要重写（plan-context §6.5）：默认关。值只认 `local`，其它一律当关。
+pub const SETTING_DIGEST_MODEL: &str = "ctx_digest_model";
+/// 一次夜间最多重写几个会话（§6.5：最多 3 个）。
+pub const DIGEST_L2_MAX_SESSIONS: usize = 3;
+/// L2 输出上限（字）：超了就截，不重试。
+pub const DIGEST_L2_MAX_CHARS: usize = 300;
+/// L2 单次推理超时（秒）：2B 冷加载也不该要更久，超了就留 L1 文本。
+pub const DIGEST_L2_TIMEOUT_SECS: u64 = 10;
+
+/// L2 的结果。`enabled=false` 表示开关没开（不是失败）。
+#[derive(Debug, Default, serde::Serialize)]
+pub struct DigestReport {
+    pub enabled: bool,
+    pub rewritten: usize,
+    pub skipped: usize,
+}
+
+const DIGEST_L2_PROMPT: &str = r#"你是对话摘要压缩器。把用户给的「较早对话摘要」压成一段不超过 300 字的纯文本：
+- 只保留用户在做什么、关心什么、已经解决的事，以及还没定下来的事；
+- 不评价、不寒暄、不加标题、不用列表、不用 markdown；
+- 直接输出正文，不要说明你在做什么，也不要复述这条要求。"#;
 
 /// Facts at/above this confidence are promoted into the preferences layer.
 const PROMOTION_THRESHOLD: f64 = 0.8;
@@ -331,6 +357,85 @@ pub fn run_with_local_or_rules(
     }
 }
 
+/// L2：把 L1 的短行摘要重写成一段人话（§6.5）。
+///
+/// 三条边界：
+/// - **默认关**：开关没开就直接返回，不读候选、不构造 prompt；
+/// - **只在夜间/手动巩固之后跑**（调用方是 scheduler），不进热路径（D2）；
+/// - **写回用 compare-and-set**：这几秒里 L1 可能又追加了新行，直接覆盖等于
+///   把刚记住的东西吞掉。写不进去就算 skipped，L1 文本原样保留。
+pub fn digest_pass(
+    store: &super::MemoryStore,
+    client: &dyn crate::llm::ChatClient,
+) -> DigestReport {
+    let mut report = DigestReport::default();
+
+    let candidates = {
+        let Ok(conn) = lock_store(store) else {
+            return report;
+        };
+        match db::get_setting(&conn, SETTING_DIGEST_MODEL).ok().flatten().as_deref() {
+            Some("local") => {}
+            _ => return report, // 默认 off（D4）
+        }
+        report.enabled = true;
+        db::session_digest_candidates(&conn, &digest_window_start(), DIGEST_L2_MAX_SESSIONS)
+            .unwrap_or_default()
+    };
+
+    for row in candidates {
+        let Some(old) = row.digest.as_deref().map(str::trim).filter(|d| !d.is_empty()) else {
+            continue;
+        };
+        let Some(new) = rewrite_digest(client, old) else {
+            report.skipped += 1;
+            continue;
+        };
+        // 锁只在读候选与写回这两小段里持有，模型推理全程零锁（同巩固管线）。
+        let written = lock_store(store)
+            .ok()
+            .and_then(|conn| db::session_set_digest_if(&conn, &row.id, old, &new).ok())
+            .unwrap_or(0);
+        if written > 0 {
+            report.rewritten += 1;
+        } else {
+            report.skipped += 1; // L1 抢先写入 / 会话被删：保留库里的版本
+        }
+    }
+    report
+}
+
+/// 「昨天有摘要更新」的近似：`updated_at` 在最近 24 小时内。
+fn digest_window_start() -> String {
+    let now = chrono::DateTime::parse_from_rfc3339(&super::clock::now_iso())
+        .map(|t| t.with_timezone(&chrono::Utc))
+        .unwrap_or_else(|_| chrono::Utc::now());
+    (now - chrono::Duration::hours(24)).to_rfc3339()
+}
+
+/// 一次模型重写。任何失败（超时 / 空输出 / 连接不上）→ `None`，保留 L1 文本。
+fn rewrite_digest(client: &dyn crate::llm::ChatClient, digest: &str) -> Option<String> {
+    let reply = client
+        .chat(
+            &[
+                crate::llm::Msg::system(DIGEST_L2_PROMPT),
+                crate::llm::Msg::user(digest),
+            ],
+            0.2, // 摘要是「复述」不是「创作」
+            DIGEST_L2_TIMEOUT_SECS,
+        )
+        .ok()?;
+    let text = reply
+        .trim()
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some(crate::context::clip_chars(text, DIGEST_L2_MAX_CHARS))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -353,6 +458,139 @@ mod tests {
 
     fn nightly() -> Options<'static> {
         Options { trigger: "nightly", window_start: START, window_end: END }
+    }
+
+    // ------------------------------------------------------ L2 digest（§6.5）
+
+    struct FakeClient {
+        reply: Option<&'static str>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl FakeClient {
+        fn new(reply: Option<&'static str>) -> Self {
+            FakeClient { reply, calls: std::sync::atomic::AtomicUsize::new(0) }
+        }
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl crate::llm::ChatClient for FakeClient {
+        fn chat(
+            &self,
+            _messages: &[crate::llm::Msg],
+            _temperature: f64,
+            _timeout: u64,
+        ) -> Result<String, crate::llm::LlmError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.reply
+                .map(|s| s.to_string())
+                .ok_or_else(|| crate::llm::LlmError::Decode("fake: no reply".into()))
+        }
+        fn chat_stream(
+            &self,
+            messages: &[crate::llm::Msg],
+            temperature: f64,
+            timeout: u64,
+            _on_delta: &mut dyn FnMut(&str),
+        ) -> Result<String, crate::llm::LlmError> {
+            self.chat(messages, temperature, timeout)
+        }
+        fn is_up(&self) -> bool {
+            true
+        }
+    }
+
+    /// 一个带摘要的会话，`updated_at` 落在 L2 的 24h 窗口内。
+    fn store_with_digest(digest: &str) -> (crate::memory::MemoryStore, String) {
+        let conn = mem();
+        db::session_create(&conn, "s1", "封窗报价").unwrap();
+        db::session_set_digest(&conn, "s1", digest, 12).unwrap();
+        (crate::memory::MemoryStore(std::sync::Mutex::new(conn)), "s1".to_string())
+    }
+
+    fn digest_of(store: &crate::memory::MemoryStore, id: &str) -> Option<String> {
+        let conn = store.0.lock().unwrap();
+        db::session_digest(&conn, id).unwrap().0
+    }
+
+    #[test]
+    fn digest_pass_is_off_unless_the_setting_says_local() {
+        let _g = clock::pinned("2026-11-23T22:00:00Z");
+        let (store, id) = store_with_digest("- [11-22] 问报价 → 给了估算");
+        let client = FakeClient::new(Some("用户在看封窗报价。"));
+
+        let report = digest_pass(&store, &client);
+
+        assert!(!report.enabled, "默认关（D4）");
+        assert_eq!(client.calls(), 0, "关着就不该花一次推理");
+        assert_eq!(digest_of(&store, &id).as_deref(), Some("- [11-22] 问报价 → 给了估算"));
+    }
+
+    #[test]
+    fn digest_pass_rewrites_touched_sessions_when_enabled() {
+        let _g = clock::pinned("2026-11-23T22:00:00Z");
+        let (store, id) = store_with_digest("- [11-22] 问报价 → 给了估算");
+        {
+            let conn = store.0.lock().unwrap();
+            db::set_setting(&conn, SETTING_DIGEST_MODEL, "local").unwrap();
+        }
+        let client = FakeClient::new(Some("  用户在比价封窗，倾向先做客厅阳台。  "));
+
+        let report = digest_pass(&store, &client);
+
+        assert!(report.enabled);
+        assert_eq!(report.rewritten, 1);
+        assert_eq!(report.skipped, 0);
+        assert_eq!(
+            digest_of(&store, &id).as_deref(),
+            Some("用户在比价封窗，倾向先做客厅阳台。"),
+            "L2 覆盖 L1，前后空白去掉"
+        );
+    }
+
+    #[test]
+    fn digest_pass_keeps_the_l1_text_when_the_model_fails() {
+        let _g = clock::pinned("2026-11-23T22:00:00Z");
+        let (store, id) = store_with_digest("- [11-22] 问报价 → 给了估算");
+        {
+            let conn = store.0.lock().unwrap();
+            db::set_setting(&conn, SETTING_DIGEST_MODEL, "local").unwrap();
+        }
+        let client = FakeClient::new(None); // 超时 / 连不上
+
+        let report = digest_pass(&store, &client);
+
+        assert_eq!(report.rewritten, 0);
+        assert_eq!(report.skipped, 1);
+        assert_eq!(
+            digest_of(&store, &id).as_deref(),
+            Some("- [11-22] 问报价 → 给了估算"),
+            "失败就留 L1，不重试、不清空"
+        );
+    }
+
+    #[test]
+    fn digest_pass_clips_a_runaway_rewrite() {
+        let _g = clock::pinned("2026-11-23T22:00:00Z");
+        let (store, id) = store_with_digest("- [11-22] 问报价 → 给了估算");
+        {
+            let conn = store.0.lock().unwrap();
+            db::set_setting(&conn, SETTING_DIGEST_MODEL, "local").unwrap();
+        }
+        let long: &'static str = Box::leak("很长的一句话。".repeat(80).into_boxed_str());
+        let client = FakeClient::new(Some(long));
+
+        let report = digest_pass(&store, &client);
+
+        assert_eq!(report.rewritten, 1);
+        let text = digest_of(&store, &id).expect("摘要应当被写回");
+        assert!(
+            text.chars().count() <= DIGEST_L2_MAX_CHARS,
+            "L2 输出上限 300 字：{}",
+            text.chars().count()
+        );
     }
 
     #[test]

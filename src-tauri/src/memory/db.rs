@@ -890,6 +890,74 @@ pub fn session_set_archived(
     )
 }
 
+// ------------------------------------------------ digest（plan-context §6.4/§6.5）
+
+/// 会话摘要的当前值：`(正文, 已合并到的最大 events.id)`。
+/// 行不存在（proactive / 刚清库）→ `(None, None)`，调用方按「还没压过」处理。
+pub fn session_digest(
+    conn: &Connection,
+    id: &str,
+) -> rusqlite::Result<(Option<String>, Option<i64>)> {
+    conn.query_row(
+        "SELECT digest, digest_upto_event_id FROM sessions WHERE id = ?1",
+        params![id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .optional()
+    .map(|o| o.unwrap_or((None, None)))
+}
+
+/// 写回摘要 + 幂等指针。**指针只前进不后退**（`CASE` 而不是直接赋值）：
+/// 装配是并发路径，迟到的旧轮不该把水位线拖回去。返回受影响行数——
+/// 0 说明会话行不存在（proactive），调用方忽略即可。
+pub fn session_set_digest(
+    conn: &Connection,
+    id: &str,
+    digest: &str,
+    upto_id: i64,
+) -> rusqlite::Result<usize> {
+    conn.execute(
+        "UPDATE sessions SET digest = ?2,
+             digest_upto_event_id = CASE
+                 WHEN COALESCE(digest_upto_event_id, 0) < ?3 THEN ?3
+                 ELSE digest_upto_event_id END
+         WHERE id = ?1",
+        params![id, digest, upto_id],
+    )
+}
+
+/// 比较并写回（L2 用，§6.5）：只有库里还是 `expect` 时才覆盖。
+/// 夜间重写的几秒里，L1 可能又追加了新行——直接覆盖等于把新记忆吞了。
+pub fn session_set_digest_if(
+    conn: &Connection,
+    id: &str,
+    expect: &str,
+    next: &str,
+) -> rusqlite::Result<usize> {
+    conn.execute(
+        "UPDATE sessions SET digest = ?3 WHERE id = ?1 AND digest = ?2",
+        params![id, expect, next],
+    )
+}
+
+/// L2 的候选会话：有摘要、未归档、最近 `since` 之后有活动（§6.5「昨天有
+/// digest 更新的会话」）。用 `updated_at` 近似：摘要更新本身不 touch，
+/// 但真正需要重写的会话一定还在被使用。
+pub fn session_digest_candidates(
+    conn: &Connection,
+    since: &str,
+    limit: usize,
+) -> rusqlite::Result<Vec<SessionRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {SESSION_COLUMNS} FROM sessions
+          WHERE archived = 0 AND digest IS NOT NULL AND TRIM(digest) <> ''
+            AND updated_at >= ?1
+          ORDER BY updated_at DESC, rowid DESC LIMIT ?2"
+    ))?;
+    let rows = stmt.query_map(params![since, limit as i64], session_from_row)?;
+    rows.collect()
+}
+
 // --------------------------------------------------- forget (compliance Art. 16)
 
 /// User: "forget this" → truly delete, cleanly: the event and every fact
@@ -2133,6 +2201,68 @@ pub fn boundaries(conn: &Connection) -> rusqlite::Result<Vec<String>> {
     rows.collect()
 }
 
+/// 一轮对话 + 摘要需要的元数据（plan-context §6.4）。
+///
+/// `upto_id` 是该轮的**收尾事件 id**（assistant 行）：摘要幂等指针
+/// `sessions.digest_upto_event_id` 按它前进，重复装配不会重复合并同一轮。
+/// `day` 是本地「MM-DD」，只在摘要行前缀里用。
+#[derive(Debug, Clone)]
+pub struct TurnMeta {
+    pub user: String,
+    pub assistant: String,
+    pub upto_id: i64,
+    pub day: String,
+}
+
+/// 抽取 `max_turns` 轮对话的配对逻辑（唯一实现）。
+///
+/// 配对规则：连续的 user → assistant 拼一轮；没有前导 user 的 assistant 行
+/// 是主动搭话（用合成 user 标号保留，让后面对话仍知道「它自己说过什么」）；
+/// 没有 assistant 回复的 user 行丢掉（模型那一轮死在半路，或者已被窗口截断）。
+pub fn dialogue_turns_meta(
+    conn: &Connection,
+    session_id: &str,
+    max_turns: usize,
+) -> rusqlite::Result<Vec<TurnMeta>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, ts, role, content FROM events
+         WHERE session_id = ?1 AND kind = 'dialogue'
+           AND role IN ('user', 'assistant')
+         ORDER BY id DESC LIMIT ?2",
+    )?;
+    let mut rows: Vec<(i64, String, String, String)> = stmt
+        .query_map(params![session_id, (max_turns * 2) as i64], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?
+        .collect::<Result<_, _>>()?;
+    rows.reverse(); // oldest first
+
+    let mut out = Vec::new();
+    let mut pending_user: Option<String> = None;
+    for (id, ts, role, content) in rows {
+        match role.as_str() {
+            "user" => pending_user = Some(content),
+            "assistant" => {
+                let user =
+                    pending_user.take().unwrap_or_else(|| "(盆栽主动说的)".to_string());
+                out.push(TurnMeta {
+                    user,
+                    assistant: content,
+                    upto_id: id,
+                    day: super::clock::day_mmdd(&ts),
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
 /// Last `max_turns` dialogue turns for a session, oldest first. Dialogue
 /// events carry kind="dialogue", role user/assistant, and a session id.
 pub fn dialogue_history(
@@ -2140,38 +2270,15 @@ pub fn dialogue_history(
     session_id: &str,
     max_turns: usize,
 ) -> rusqlite::Result<Vec<crate::persona::eval::Turn>> {
-    let mut stmt = conn.prepare(
-        "SELECT role, content FROM events
-         WHERE session_id = ?1 AND kind = 'dialogue'
-           AND role IN ('user', 'assistant')
-         ORDER BY id DESC LIMIT ?2",
-    )?;
-    let mut rows: Vec<(String, String)> = stmt
-        .query_map(params![session_id, (max_turns * 2) as i64], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?
-        .collect::<Result<_, _>>()?;
-    rows.reverse(); // oldest first
-
-    // Pair consecutive user → assistant rows into turns. An assistant row
-    // without a preceding user row is a proactive message — kept, with a
-    // synthetic user marker, so later chats still see what the companion
-    // said on its own. A user row with no assistant reply is dropped (the
-    // turn scrolled out of the limit or the model died mid-turn).
-    let mut out = Vec::new();
-    let mut pending_user: Option<String> = None;
-    for (role, content) in rows {
-        match role.as_str() {
-            "user" => pending_user = Some(content),
-            "assistant" => {
-                let user =
-                    pending_user.take().unwrap_or_else(|| "(盆栽主动说的)".to_string());
-                out.push(crate::persona::eval::Turn { user, assistant: content });
-            }
-            _ => {}
-        }
-    }
-    Ok(out)
+    Ok(
+        dialogue_turns_meta(conn, session_id, max_turns)?
+            .into_iter()
+            .map(|t| crate::persona::eval::Turn {
+                user: t.user,
+                assistant: t.assistant,
+            })
+            .collect(),
+    )
 }
 
 /// One dialogue row, flat, for the chat page's startup replay (spec: 对话页
@@ -3058,6 +3165,80 @@ mod tests {
         let page1_only = dialogue_bubbles(&conn, "default", 1, Some(rows[2].id)).unwrap();
         assert_eq!(page1_only.len(), 1);
         assert_eq!(page1_only[0].content, "早。今天有雨。", "cursor excludes itself and everything after");
+    }
+
+    #[test]
+    fn dialogue_turns_meta_carries_ids_and_days_for_the_digest() {
+        let conn = mem();
+        add_event_meta(&conn, "dialogue", "问一", Some("user"), Some("s1")).unwrap();
+        let a1 = add_event_meta(&conn, "dialogue", "答一", Some("assistant"), Some("s1")).unwrap();
+        add_event_meta(&conn, "dialogue", "问二", Some("user"), Some("s1")).unwrap();
+        let a2 = add_event_meta(&conn, "dialogue", "答二", Some("assistant"), Some("s1")).unwrap();
+
+        let turns = dialogue_turns_meta(&conn, "s1", 12).unwrap();
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].upto_id, a1, "水位线取该轮的 assistant 行");
+        assert_eq!(turns[1].upto_id, a2);
+        assert_eq!(turns[0].day.chars().count(), 5, "本地 MM-DD");
+
+        // 纯文本视图与旧契约一致：T6 把配对逻辑收敛成一份实现。
+        let plain = dialogue_history(&conn, "s1", 12).unwrap();
+        assert_eq!(plain.len(), turns.len());
+        assert_eq!(plain[1].assistant, "答二");
+        assert_eq!(plain[0].user, "问一");
+    }
+
+    #[test]
+    fn session_digest_pointer_only_moves_forward() {
+        let conn = mem();
+        session_create(&conn, "s1", "会话").unwrap();
+        assert_eq!(session_digest(&conn, "s1").unwrap(), (None, None));
+
+        session_set_digest(&conn, "s1", "- [11-22] 甲 → 乙", 30).unwrap();
+        assert_eq!(
+            session_set_digest(&conn, "s1", "- [11-21] 旧 → 旧", 10).unwrap(),
+            1
+        );
+        let (text, upto) = session_digest(&conn, "s1").unwrap();
+        assert_eq!(text.as_deref(), Some("- [11-21] 旧 → 旧"), "正文按最后一次写入");
+        assert_eq!(upto, Some(30), "水位线不许被旧数据拖回去");
+
+        // 行不存在（proactive）：静默 0 行，不报错、不建行。
+        assert_eq!(session_set_digest(&conn, "proactive", "x", 1).unwrap(), 0);
+        assert!(session_get(&conn, "proactive").unwrap().is_none());
+    }
+
+    #[test]
+    fn session_set_digest_if_refuses_to_clobber_a_newer_merge() {
+        let conn = mem();
+        session_create(&conn, "s1", "会话").unwrap();
+        session_set_digest(&conn, "s1", "L1 v1", 5).unwrap();
+
+        // L2 看到的也是 v1 → 允许覆盖。
+        assert_eq!(session_set_digest_if(&conn, "s1", "L1 v1", "L2 人话").unwrap(), 1);
+        // 但若库里的已经变了（L1 又追加过），就不许覆盖。
+        assert_eq!(session_set_digest_if(&conn, "s1", "L1 v1", "过期的 L2").unwrap(), 0);
+        assert_eq!(
+            session_digest(&conn, "s1").unwrap().0.as_deref(),
+            Some("L2 人话")
+        );
+    }
+
+    #[test]
+    fn digest_candidates_skip_archived_and_empty() {
+        let conn = mem();
+        session_create(&conn, "with-digest", "有摘要").unwrap();
+        session_set_digest(&conn, "with-digest", "- [11-22] 甲", 5).unwrap();
+        session_create(&conn, "empty", "没摘要").unwrap();
+        session_create(&conn, "archived", "归档").unwrap();
+        session_set_digest(&conn, "archived", "- [11-22] 乙", 6).unwrap();
+        session_set_archived(&conn, "archived", true).unwrap();
+
+        let rows = session_digest_candidates(&conn, "1970-01-01T00:00:00Z", 3).unwrap();
+        let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+        assert!(ids.contains(&"with-digest"));
+        assert!(!ids.contains(&"empty"), "没摘要就没有可重写的东西");
+        assert!(!ids.contains(&"archived"), "归档会话不该被夜间任务翻出来");
     }
 
     #[test]

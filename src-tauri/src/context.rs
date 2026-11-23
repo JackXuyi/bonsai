@@ -13,7 +13,8 @@
 //!
 //! T1 只做纯函数（估算器 / 窗口表 / 预算 / 分段上限），T2 接上装配
 //! [`build`]（含 L0 按预算丢最旧轮），T3 补轮内压缩（[`compact_tool_result`]
-//! 与 [`trim_tool_catalog`]）。摘要（T6）仍待接线。
+//! 与 [`trim_tool_catalog`]），T6 补摘要（[`digest_line`] / [`digest_merge`]；
+//! 写库与 L2 重写在 `memory::db` / `memory::consolidate`）。
 
 use crate::persona::eval::Turn;
 
@@ -326,6 +327,134 @@ pub fn build(input: BuildInput<'_>, budget: Budget) -> Built {
         dropped,
         est_tokens: fixed + used + estimate_msg(input.user_text),
     }
+}
+
+// ---------------------------------------------------------------- 摘要（L1，T6）
+//
+// L0 真的丢了轮才动这里（plan §4.3）：丢掉的轮抽成一行短句合并进
+// `sessions.digest`，下一轮（同一轮里其实是重建一次）作为 system 末尾的
+// 「较早对话摘要」段喂回去。
+//
+// 三条自我约束：
+// - **只记事实不记语气**：摘要是给模型当背景的，人格由 system 段保证，
+//   摘要里写「它当时有点不高兴」既不准也容易变成新的人格输入。
+// - **抽取式，零模型**：热路径不能多一次推理（D2）。L2 才是模型摘要，
+//   默认关、只在夜间跑（§6.5）。
+// - **幂等靠水位线**：合并哪些轮由调用方按 `digest_upto_event_id` 过滤，
+//   这里只保证「同输入同输出」。
+
+/// 摘要单行上限（**字**，含 `- [MM-DD] ` 前缀）：§6.4 的「单条 ≤60 字」。
+pub const DIGEST_LINE_MAX_CHARS: usize = 60;
+/// 摘要总长上限（字）：§6.4 的「总 ≤600 字」。超了从最旧的行开始丢。
+pub const DIGEST_MAX_CHARS: usize = 600;
+/// 单侧原文截断长度：60 字减去 `- [11-23] `（约 10）与 ` → `（3）后对半分。
+const DIGEST_SIDE_CHARS: usize = 22;
+/// 主动搭话那轮的合成前缀（没有用户原话，别让摘要看起来像用户说的）。
+const DIGEST_PROACTIVE: &str = "（主动说）";
+
+/// 被 L0 丢掉的一轮：摘要的原料。
+pub struct DigestTurn<'a> {
+    pub day: &'a str,
+    pub user: &'a str,
+    pub assistant: &'a str,
+    /// 该轮的收尾事件 id：调用方据此推进 `digest_upto_event_id`。
+    pub upto_id: i64,
+}
+
+/// 按字符截断，超出补 `…`。摘要（L1/L2）共用的唯一实现。
+pub fn clip_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+/// 取「第一句 + 前 N 字」：压掉换行与连续空白，遇到句末标点就停。
+///
+/// 摘要行必须单行——多行会把 600 字的额度算错，也会把列表结构冲散。
+fn first_clause(text: &str, max_chars: usize) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out = String::new();
+    let mut clipped = false;
+    for c in flat.chars() {
+        if matches!(c, '。' | '！' | '？' | '!' | '?' | '；' | ';') {
+            break;
+        }
+        if out.chars().count() >= max_chars {
+            clipped = true;
+            break;
+        }
+        out.push(c);
+    }
+    let mut out = out.trim().to_string();
+    // 全符号 / 全空白视为抽取失败（§6.4 末条）：这种「一轮」没有信息量。
+    if !out.chars().any(|c| c.is_alphanumeric()) {
+        return String::new();
+    }
+    // 截过就留标记：读者（模型和排查的人）都要知道这不是原话全文。
+    if clipped {
+        out.push('…');
+    }
+    out
+}
+
+/// 单行摘要：`- [MM-DD] 用户诉求 → 助手首句`。两侧都抽不出来 → `None`。
+pub fn digest_line(day: &str, user: &str, assistant: &str) -> Option<String> {
+    let u = first_clause(user, DIGEST_SIDE_CHARS);
+    let a = first_clause(assistant, DIGEST_SIDE_CHARS);
+    if u.is_empty() && a.is_empty() {
+        return None;
+    }
+    let mut line = String::from("- ");
+    if !day.is_empty() {
+        line.push('[');
+        line.push_str(day);
+        line.push_str("] ");
+    }
+    if !u.is_empty() && !a.is_empty() {
+        line.push_str(&u);
+        line.push_str(" → ");
+        line.push_str(&a);
+    } else if !u.is_empty() {
+        line.push_str(&u);
+    } else {
+        line.push_str(DIGEST_PROACTIVE);
+        line.push_str(&a);
+    }
+    Some(clip_chars(&line, DIGEST_LINE_MAX_CHARS))
+}
+
+/// 把新丢掉的轮合并进现有摘要（plan §6.4）。
+///
+/// - 新行追加在末尾（时间序），完全重复的行不再加一次（水位线失效时的兜底）；
+/// - 现有文本里的非列表行（L2 重写过的人话）**保留**，不因为格式不同就吞掉；
+/// - 总长超 [`DIGEST_MAX_CHARS`] 时从最旧的行开始丢——摘要的职责是「最近
+///   被挤出去的那段」，不是全史。
+pub fn digest_merge(existing: Option<&str>, dropped: &[DigestTurn<'_>]) -> String {
+    let mut lines: Vec<String> = existing
+        .unwrap_or("")
+        .lines()
+        .map(|l| l.trim_end().to_string())
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+
+    for turn in dropped {
+        if let Some(line) = digest_line(turn.day, turn.user, turn.assistant) {
+            if !lines.iter().any(|l| l == &line) {
+                lines.push(line);
+            }
+        }
+    }
+
+    let mut total: usize = lines.iter().map(|l| l.chars().count() + 1).sum();
+    let mut start = 0usize;
+    while total > DIGEST_MAX_CHARS && start + 1 < lines.len() {
+        total -= lines[start].chars().count() + 1;
+        start += 1;
+    }
+    lines[start..].join("\n")
 }
 
 // ---------------------------------------------------------------- 轮内压缩（T3）
@@ -922,5 +1051,87 @@ mod tests {
         assert_eq!(kept.len(), 2);
         assert!(dropped.is_empty());
         assert_eq!(kept[1].description, "记笔记", "没超长就不该改写描述");
+    }
+    // ------------------------------------------------------------ 摘要（T6）
+
+    fn dturn<'a>(day: &'a str, user: &'a str, assistant: &'a str, id: i64) -> DigestTurn<'a> {
+        DigestTurn { day, user, assistant, upto_id: id }
+    }
+
+    #[test]
+    fn digest_line_is_one_short_line_with_the_day() {
+        let line = digest_line("11-22", "帮我看看明天杭州天气怎么样，要不要带伞", "明天小雨，12 到 18 度。记得带伞")
+            .expect("有内容就要出一行");
+        assert!(line.starts_with("- [11-22] "), "{line}");
+        assert!(line.contains(" → "), "两侧都要留一点：{line}");
+        assert!(
+            line.chars().count() <= DIGEST_LINE_MAX_CHARS,
+            "单行超 60 字会算错总额度：{} 字",
+            line.chars().count()
+        );
+        assert!(!line.contains('\n'), "摘要行必须单行");
+    }
+
+    #[test]
+    fn digest_line_skips_turns_without_content() {
+        assert!(digest_line("11-22", "   ", "。。。").is_none(), "全符号不算内容");
+        assert!(digest_line("11-22", "", "").is_none());
+    }
+
+    #[test]
+    fn digest_line_marks_proactive_turns() {
+        let line = digest_line("11-22", "", "你昨天说的报价我记着了").unwrap();
+        assert!(line.contains(DIGEST_PROACTIVE), "没有用户原话时要说清是它自己说的：{line}");
+    }
+
+    #[test]
+    fn digest_merge_appends_new_lines_after_old_ones() {
+        let merged = digest_merge(
+            Some("- [11-20] 旧事 → 旧答"),
+            &[dturn("11-21", "新事", "新答", 7)],
+        );
+        let lines: Vec<&str> = merged.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("旧事"), "旧的在前");
+        assert!(lines[1].contains("新事"), "新的追加在末尾");
+    }
+
+    #[test]
+    fn digest_merge_is_idempotent_for_the_same_turn() {
+        // 水位线失效的兜底：同一轮再合并一次，不许多出一行。
+        let once = digest_merge(None, &[dturn("11-21", "同一句", "同一答", 7)]);
+        let twice = digest_merge(Some(&once), &[dturn("11-21", "同一句", "同一答", 7)]);
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn digest_merge_keeps_l2_prose_instead_of_eating_it() {
+        // L2 重写过的人话不是列表行；L1 追加时不能把它当脏数据丢掉。
+        let merged = digest_merge(Some("用户在弄封窗报价，还没定。"), &[dturn("11-21", "问报价", "给了估算", 9)]);
+        assert!(merged.starts_with("用户在弄封窗报价"), "{merged}");
+        assert!(merged.contains("问报价"), "{merged}");
+    }
+
+    #[test]
+    fn digest_merge_drops_the_oldest_lines_over_the_cap() {
+        let old: Vec<String> = (0..40)
+            .map(|i| digest_line("11-01", &format!("第{i}件旧事"), "答").unwrap())
+            .collect();
+        let existing = old.join("\n");
+        let merged = digest_merge(Some(&existing), &[dturn("11-22", "最新一件", "答", 99)]);
+        assert!(
+            merged.chars().count() <= DIGEST_MAX_CHARS,
+            "总长必须落回 600 字内：{}",
+            merged.chars().count()
+        );
+        assert!(merged.contains("最新一件"), "新的永远留");
+        assert!(!merged.contains("第0件旧事"), "超限从最旧开始丢");
+    }
+
+    #[test]
+    fn digest_line_clips_long_but_keeps_the_head() {
+        let line = digest_line("11-22", &"很长的用户诉求".repeat(20), &"很长的回答".repeat(20)).unwrap();
+        assert!(line.chars().count() <= DIGEST_LINE_MAX_CHARS);
+        assert!(line.contains('…'), "截断要留省略标记");
     }
 }

@@ -264,12 +264,29 @@ pub struct Built {
 - **只记事实不记语气**：摘要是给模型当背景的，不负责复现人格；人格由 system 段保证。
 - 抽取失败（消息为空/全符号）就跳过该轮，不占额度。
 
+> **落地细节（T6，与初稿的四处差异）**
+>
+> 1. **「单条 ≤60 字」与「两侧各 30 字」不可能同时满足**：前缀 `- [11-23] `（10）+ 箭头（3）就占掉 13 字。实现取「两侧各 22 字 + 整体再按 60 字兜底截断」，被截的一侧补 `…`（读者要知道这不是原话全文）。
+> 2. **同轮就要看到摘要（两遍装配）**：先装一遍拿到 `dropped`，合并写库，再带新摘要**重建一次** `Built`。只装一遍的话，这一轮的模型既丢了那几轮历史、又看不到摘要——凭空失忆一轮。重建的代价是 µs 级纯计算。
+> 3. **`digest_merge` 保留 L2 人话**：L2 重写后的 digest 不是 `- ` 列表行。按「只认列表行」过滤会把 L2 正文整段吞掉，所以合并时保留所有非空行，只有超 600 字才从最旧的行开始丢（L2 正文天然最旧）。
+> 4. **日期取本地时区**：`events.ts` 是 UTC，直接切片会让早上 8 点前的对话集体错一天，故 `clock::day_mmdd` 解析后再转本地。
+>
+> **已知取舍（不是 bug，是需要真机数据才决定要不要改）**：只有「预算真的丢掉的轮」进摘要。`HISTORY_MAX_TURNS = 12` 这道窗口上限本身挡掉的更早历史（预算充足的长会话）**不进** digest——那属于「窗口」而不是「压缩」。云端 32k 预算下 12 轮很少超，所以摘要主要在本地 8192 窗口触发。真机上若出现「它不记得昨天说的」，第一件事是把窗口上限也纳入摘要（或调低上限），而不是先怀疑摘要质量。
+
 ### 6.5 L2 模型摘要（默认关）
 
 - 触发：夜间 `consolidate` 跑完之后，同一线程接着处理「昨天有 digest 更新的会话」，最多 3 个。
 - 通道：本地 `reply()`（无 `tools[]`），system 用一句固定指令，不注入人格卡（省预算、防人格漂移）。
 - 输出约束：≤300 字，纯文本；解析失败或超时 10s → 保留 L1 文本，不重试。
 - 开关：`settings.ctx_digest_model = "off" | "local"`，默认 `off`。
+
+> **落地细节（T6）**
+>
+> - 实现是 `consolidate::digest_pass(&store, &client)`：**先读开关再读候选**，关着就一次推理都不花（单测锁 `client.calls() == 0`）。
+> - 候选查询按 `updated_at` 近似「昨天有摘要更新」的会话（摘要写入本身不 touch `updated_at`，但需要重写的会话一定还在被用），`archived = 0`、`LIMIT 3`。
+> - 写回是 **compare-and-set**（`session_set_digest_if`）：这几秒里 L1 可能又追加了新行，看见的 `expect` 与库里不一致就放弃覆盖（记 skipped，保留库里的版本）——宁可这晚没重写，也不能吞掉刚记住的东西。
+> - 通道固定本地：调度器显式构造 `OllamaClient::from_env()`，**即便当前对话走云端也不外发**——摘要是离线整理的活，没有把原文送到云端的理由。
+> - 编辑入口：本版**没有 UI**，手工把 `settings.ctx_digest_model` 设为 `local` 即生效（设置页开关留给后续期）。
 
 ### 6.6 轮内压缩（`context::compact_tool_result` / `context::trim_tool_catalog`）
 
@@ -437,7 +454,7 @@ pub struct Built {
 | T3 | `ae75530` | `cargo test --lib` 505 passed（+8：压缩 3 / 目录 3 / 接线 2）；`tsc --noEmit` 0 错；`vitest run` 170 passed；`cargo check` 仅既有 `TraceRecorder::new` dead_code | `context::compact_tool_result`（>1500 tokens → head 70% + tail 20% + 省略标记）+ `context::trim_tool_catalog`（description 截 240 字 + 顺序砍尾部，第一条永留）；接线两处：`cloud_tool_loop` 建 `tools[]` 时裁目录并记 `tools_truncated`、`tool_result` 落地时降级内容；**配对不破**（`tool_call_id` 与 assistant 一一对应，单测断言 roles 相邻）；原文仍在 `tool_call` 审计步 |
 | T4 | `3b73d9c` | `cargo test --lib` 518 passed（T4 自身 +8：迁移/索引/遗忘 4 + 会话命令 4；总数含工作区里他人未提交的 S0 检索改动）；`cargo check` 仅既有 `TraceRecorder::new` dead_code | `memory/db.rs` 落地 schema v15（`sessions` 表 + `idx_sessions_updated` + `idx_events_session` + `turn_trace` 三列 + `tasks.session_id`）+ 迁移回填 `default`（标题取首条用户消息，不造 digest，`proactive` 不建行）+ 会话 CRUD（`session_touch`/`list`/`get`/`create`/`rename`/`set_archived`）+ 遗忘补全（`forget_session` 连带 trace_steps/trace_trace/tasks/sessions；`forget_all` 补四张表）；`src/session.rs` 提供 5 个 IPC 命令；`add_event_meta` 成为会话索引的**唯一**维护点 |
 | T5 | 本提交 | `tsc --noEmit` 0 错；`vitest run` 186 passed（+14：sessionStore 纯函数 6 + SessionSwitch 切换/抽屉 8）；金丝雀 A12/A11/A13/A14 由 `SessionSwitch.test.tsx` 用真实 ChatPane + 真实 store 锁死；浏览器预览截图核对药丸/抽屉版式 | `sessionStore.ts`（列表/当前/切换/CRUD + 3 个纯函数）+ `SessionDrawer.tsx`（右侧 260px 抽屉：全宽「新对话」、行尾「…」菜单改名/归档/删除、归档折叠区、删除二次确认复用 `.mconfirm`）+ ChatPane 顶部会话药丸与 `currentId` 切换 effect；`useChat` 去常量、按发送时归属兜底；`chatStore.reset()` 供切换清流；抽屉整体滚动（行尾菜单绝对定位不被列表裁切） |
-| T6 | | | |
+| T6 | 本提交 | `cargo test --lib` **541 passed / 1 ignored**（+18：摘要纯函数 8 / db 4 / L2 4 / 装配集成 2）；`tsc --noEmit` 0 错、`vitest run` 187 passed（前端无改动）；`cargo check` 仅既有 `TraceRecorder::new` dead_code | `context.rs` 加 `digest_line` / `digest_merge` / `DigestTurn`（单行 ≤60 字、总 ≤600 字、去重、保留 L2 人话）；`db.rs` 加 `TurnMeta` + `dialogue_turns_meta`（`dialogue_history` 改为其投影，配对逻辑收敛成一份）+ `session_digest` / `session_set_digest`（水位线只前进）/ `session_set_digest_if`（CAS）/ `session_digest_candidates`；`dialogue.rs` 装配改两遍（探 dropped → 合并写库 → 带摘要重建），trace 的 `context_budget` 补 `digest=true/false`；`consolidate::digest_pass` 实现 L2（默认关、CAS 写回、本地 client、10s 超时、≤300 字）+ scheduler 在巩固后调用 |
 | T7 | | | |
 
 ---
@@ -451,4 +468,5 @@ pub struct Built {
 | v0.2 | 2026-11-23 | T2 落地：§6.3 换成实际签名（`BuildInput` / `reserve_tool_room`，`truncated_tools` 延到 T3）；D5 裁决 8192、历史 6 → 12；trace 增 `context_budget` 步 |
 | v0.3 | 2026-11-23 | T3 落地：§6.6 换成实际函数名与三处差异（head/tail 按上限算、降级在落地时一次、目录裁剪在 `cloud_tool_loop`）；§6.3 明确 `truncated_tools` 不再需要；记录 `web_fetch` 8000 字摘要被压到 ~1350 字的取舍 |
 | v0.4 | 2026-11-23 | T4 落地：schema v15 与 §5 对齐（另加 `tasks.session_id`，理由见 §5.3 补充）；会话标题用「空串 = 未命名」代替中文占位串；`add_event_meta` 成为会话索引唯一维护点；遗忘补全按 §5.5 实际删 5 张表 |
+| v0.6 | 2026-11-23 | T6 落地：§6.4 补四处实现差异（60 字与两侧 30 字的冲突、两遍装配同轮可见、保留 L2 人话、日期转本地）；§6.5 补 L2 的 CAS 写回与「固定本地通道」；`dialogue_history` 的配对逻辑收敛进 `dialogue_turns_meta`（不再是两份） |
 | v0.5 | 2026-11-23 | T5 落地：§6.8 换成实际实现——切换与启动回放合并为一条 `currentId` effect（首次挂载消息流优先）；归档语义明确为「不切走、可恢复」；删除当前会话自动回 `default`；§6.7 补注「空标题拒绝在前端」；列表一次全拉含归档由前端分组（后端 `include_archived` 直接给 true） |

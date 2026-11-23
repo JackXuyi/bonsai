@@ -149,6 +149,18 @@ fn tick(app: &AppHandle) -> Result<(), String> {
     let report = consolidate::run_with_local_or_rules(&store, &opts)
         .map_err(|e| format!("consolidate run failed: {e}"))?;
 
+    // L2 摘要重写（plan-context §6.5，默认关）：巩固跑完接着做，失败/关闭都
+    // 不影响上面那份 report。走本地 client——即便当前对话在云端，摘要是
+    // 离线整理的活，不该为此把用户原文发出去。
+    let digest = consolidate::digest_pass(&store, &crate::llm::OllamaClient::from_env());
+    if digest.enabled {
+        log::info!(
+            "digest pass: rewritten {} skipped {}",
+            digest.rewritten,
+            digest.skipped
+        );
+    }
+
     // Growth-narrative hook: the frontend can surface "it thought about
     // yesterday" from this event (plan §6).
     use tauri::Emitter;

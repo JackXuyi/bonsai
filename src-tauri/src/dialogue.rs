@@ -369,6 +369,19 @@ fn turn_budget(conn: &Connection) -> (crate::context::Budget, bool) {
     }
 }
 
+/// 库里的轮（带 id / 日期）→ 装配层要的纯文本轮。
+///
+/// 摘要需要 id 与日期，装配只需要两段文本，所以读一次库、用两种视图：
+/// 别为此查两遍（多会话之后每轮都要读，翻倍就是浪费）。
+fn turns_to_history(rows: &[db::TurnMeta]) -> Vec<crate::persona::eval::Turn> {
+    rows.iter()
+        .map(|t| crate::persona::eval::Turn {
+            user: t.user.clone(),
+            assistant: t.assistant.clone(),
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------- tool calling
 //
 // 工具调用分流（plan-task-card v0.2，2026-11-22 用户裁决）：
@@ -1584,29 +1597,74 @@ fn chat_turn_inner(
         let conn = lock_conn(store)?;
         let env = env_prefix(&conn);
         let body = system_prompt(&conn, card, hour, raining)?;
-        let raw = db::dialogue_history(&conn, session_id, crate::context::HISTORY_MAX_TURNS)?;
+        let turns = db::dialogue_turns_meta(&conn, session_id, crate::context::HISTORY_MAX_TURNS)?;
         let (budget, cloud) = turn_budget(&conn);
         // 云端工具循环会往消息序列里插 `tool` 消息 → 必须预留；本地零工具
         // 调用，预留只会白占 2B 的 8192 窗口。
-        let built = crate::context::build(
+        let reserve = cloud && will_use_tools;
+        let (digest, upto) = db::session_digest(&conn, session_id).unwrap_or((None, None));
+
+        // 装一遍先看会丢几轮（纯计算，微秒级）。
+        let mut built = crate::context::build(
             crate::context::BuildInput {
                 env: &env,
                 body: &body,
-                digest: None,
-                history: raw,
+                digest: digest.as_deref(),
+                history: turns_to_history(&turns),
                 user_text,
-                reserve_tool_room: cloud && will_use_tools,
+                reserve_tool_room: reserve,
             },
             budget,
         );
+
+        // L1（§6.4）：真丢了轮才写摘要，且只合并水位线之后的轮——重复调用
+        // 不会重复加行（A6）。摘要比丢掉的轮还旧的那部分本来就在 digest 里。
+        if built.dropped > 0 {
+            let fresh: Vec<crate::context::DigestTurn> = turns
+                .iter()
+                .take(built.dropped)
+                .filter(|t| upto.map_or(true, |u| t.upto_id > u))
+                .map(|t| crate::context::DigestTurn {
+                    day: &t.day,
+                    user: &t.user,
+                    assistant: &t.assistant,
+                    upto_id: t.upto_id,
+                })
+                .collect();
+            if !fresh.is_empty() {
+                let merged = crate::context::digest_merge(digest.as_deref(), &fresh);
+                let new_upto = fresh.iter().map(|t| t.upto_id).max().unwrap_or(0);
+                // 写库失败不挡这一轮：摘要是增益，丢了下一轮还会再试。
+                // 会话行不存在（proactive）时这里静默 0 行，正是想要的。
+                let _ = db::session_set_digest(&conn, session_id, &merged, new_upto);
+                // 用刚合并的摘要重建一次：否则这一轮的模型既看不到那几轮历史、
+                // 也看不到摘要，等于凭空失忆一轮。
+                built = crate::context::build(
+                    crate::context::BuildInput {
+                        env: &env,
+                        body: &body,
+                        digest: Some(&merged),
+                        history: turns_to_history(&turns),
+                        user_text,
+                        reserve_tool_room: reserve,
+                    },
+                    budget,
+                );
+            }
+        }
+
         // 观测（A10 的数据来源）：估算值 / 丢弃轮数 / 两个预算数字。
         rec.simple(
             "context_budget",
             "上下文预算",
             if built.dropped > 0 { "trimmed" } else { "ok" },
             Some(&format!(
-                "est={} usable={} window={} dropped={}",
-                built.est_tokens, budget.usable, budget.window, built.dropped
+                "est={} usable={} window={} dropped={} digest={}",
+                built.est_tokens,
+                budget.usable,
+                budget.window,
+                built.dropped,
+                built.system.contains(crate::context::DIGEST_HEADER)
             )),
         );
         (built.system, built.turns)
@@ -2562,6 +2620,123 @@ mod tests {
             .find(|(k, _)| k == "context_budget")
             .expect("装配阶段必须留一条预算记录");
         assert_eq!(budget.1, "ok");
+    }
+
+    /// 记录 system 全文与历史条数的探针：摘要是否进 system 只能从这里看。
+    struct SystemProbe {
+        systems: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        history_len: std::sync::Arc<std::sync::Mutex<usize>>,
+    }
+
+    impl DialogueBackend for SystemProbe {
+        fn reply(
+            &mut self,
+            system: &str,
+            history: &[crate::persona::eval::Turn],
+            _user: &str,
+            _temperature: f64,
+        ) -> String {
+            self.systems.lock().unwrap().push(system.to_string());
+            *self.history_len.lock().unwrap() = history.len();
+            "好".to_string()
+        }
+    }
+
+    /// 12 轮长对话：本地 8192 窗口装不下 → L0 必丢轮 → L1 必须写摘要。
+    fn seed_long_history(store: &MemoryStore) {
+        with_conn(store, |conn| {
+            for i in 0..12 {
+                db::add_event_meta(
+                    conn,
+                    "dialogue",
+                    &format!("第{i}个问题：{}", "很长的描述".repeat(400)),
+                    Some("user"),
+                    Some("s1"),
+                )
+                .unwrap();
+                db::add_event_meta(
+                    conn,
+                    "dialogue",
+                    &format!("第{i}个回答：{}", "更长的答复".repeat(400)),
+                    Some("assistant"),
+                    Some("s1"),
+                )
+                .unwrap();
+            }
+        });
+    }
+
+    fn probe() -> (SystemProbe, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        let systems = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        (
+            SystemProbe {
+                systems: systems.clone(),
+                history_len: std::sync::Arc::new(std::sync::Mutex::new(0)),
+            },
+            systems,
+        )
+    }
+
+    #[test]
+    fn l0_dropped_turns_are_digested_and_visible_in_the_same_turn() {
+        // A5：真丢了轮 → digest 多出若干行（单行 ≤60 字、总长 ≤600 字），
+        // 且**这一轮**的 system 里就能看到摘要（两遍装配的意义）。
+        let s = mem();
+        let c = card();
+        seed_long_history(&s);
+        let (mut backend, systems) = probe();
+
+        chat_turn(&s, &mut backend, &c, "s1", "接着说", 10, false, crate::calendar::CalendarAccess::Denied)
+            .unwrap();
+
+        let (digest, upto) = with_conn(&s, |conn| db::session_digest(conn, "s1").unwrap());
+        let digest = digest.expect("丢了轮就必须写摘要");
+        let lines: Vec<&str> = digest.lines().collect();
+        assert!(lines.len() >= 3, "丢了不止一轮：{} 行", lines.len());
+        assert!(
+            digest.chars().count() <= crate::context::DIGEST_MAX_CHARS,
+            "摘要总长超上限：{} 字",
+            digest.chars().count()
+        );
+        assert!(
+            lines.iter().all(|l| l.chars().count() <= crate::context::DIGEST_LINE_MAX_CHARS),
+            "单行超 60 字：{digest}"
+        );
+        assert!(upto.unwrap_or(0) > 0, "水位线要跟着走");
+
+        let seen = systems.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert!(
+            seen[0].contains("较早对话摘要"),
+            "同一轮的 system 就该带上摘要，否则模型凭空失忆一轮"
+        );
+        assert!(seen[0].contains("第0个问题"), "最早被丢的那轮要进摘要");
+    }
+
+    #[test]
+    fn digest_never_merges_the_same_turn_twice() {
+        // A6：连续两轮都触发压缩 → 水位线只前进，摘要不重复加行。
+        let s = mem();
+        let c = card();
+        seed_long_history(&s);
+        let (mut backend, _systems) = probe();
+
+        chat_turn(&s, &mut backend, &c, "s1", "接着说", 10, false, crate::calendar::CalendarAccess::Denied)
+            .unwrap();
+        let (first, upto1) = with_conn(&s, |conn| db::session_digest(conn, "s1").unwrap());
+
+        chat_turn(&s, &mut backend, &c, "s1", "再接着说", 10, false, crate::calendar::CalendarAccess::Denied)
+            .unwrap();
+        let (second, upto2) = with_conn(&s, |conn| db::session_digest(conn, "s1").unwrap());
+
+        assert!(
+            upto2.unwrap_or(0) >= upto1.unwrap_or(0),
+            "水位线只许前进：{upto1:?} → {upto2:?}"
+        );
+        let text = second.unwrap_or_default();
+        let lines: Vec<&str> = text.lines().collect();
+        let unique: std::collections::HashSet<&str> = lines.iter().copied().collect();
+        assert_eq!(lines.len(), unique.len(), "同一轮被合并了两次：{first:?}");
     }
 
     #[test]
