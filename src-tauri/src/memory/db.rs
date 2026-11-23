@@ -17,6 +17,12 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use super::clock;
 
+/// SCHEMA_VERSION = 15（2026-11-23）：上下文管理（docs/zh/plan-context.md §5）——
+/// `sessions`（会话索引：标题/时间/归档/摘要指针）+ `events(session_id,id)`
+/// 索引（多会话后每个会话都要查，从「可有可无」变成「必须有」）+
+/// `turn_trace` 三列观测（估算/实际 prompt tokens、被丢弃轮数）+
+/// `tasks.session_id`（遗忘按会话级联时用来定位任务行）。
+///
 /// SCHEMA_VERSION = 14（2026-11-23）：规划能力（docs/zh/plan-planning.md §4）——
 /// `tasks` 增四列：`plan_json`（结构化计划 JSON）、`plan_mode`（none/planned）、
 /// `cancel_reason`（user/budget）、`confirm_mode`（auto/manual，D1 默认 auto 直放）。
@@ -39,7 +45,12 @@ use super::clock;
 /// EXISTS 不会给已有表加列；v9→v9 不触发 migrate，INSERT 带 user_text 直接
 /// 报 "table turn_trace has no column named user_text"。教训：改 SCHEMA 必
 /// 须同时 bump 此版本号。
-pub(crate) const SCHEMA_VERSION: i64 = 14;
+pub(crate) const SCHEMA_VERSION: i64 = 15;
+
+/// 不进会话列表的保留 session id：主动搭话（bubble 照旧实时显示，但不占
+/// 用户能切换的对话窗口）。sessions 里**永不建行**（plan-context D6）。
+/// 唯一定义在这里，dialogue 侧以 `PROACTIVE_SESSION` 别名引用。
+pub const PROACTIVE_SESSION_ID: &str = "proactive";
 
 /// Test-only: materialise the full schema on a bare in-memory connection.
 /// Other modules' tests build their own `Connection::open_in_memory()` and
@@ -69,6 +80,25 @@ CREATE TABLE IF NOT EXISTS events (
     session_id TEXT,                        -- same dialogue window share one id
     consumed   INTEGER NOT NULL DEFAULT 0   -- consumed by a consolidate run
 );
+
+-- Conversation windows (plan-context §5.1, v15). 会话只是「对话窗口的索引」：
+-- 记忆（facts / preferences / 画像）仍然全局，切会话不切记忆。
+-- `title` 为空串 = 还没被首条用户消息命名（前端显示「新对话」）；这样
+-- 自动命名不需要中文字符串哨兵，也不会覆盖用户手动改过的标题。
+-- `digest` / `digest_upto_event_id` 是 L1/L2 摘要的落点（T6）：
+-- upto = 已合并进 digest 的最大 events.id，防重复合并。
+-- `proactive` 不在此表建行（D6）。
+CREATE TABLE IF NOT EXISTS sessions (
+    id                   TEXT PRIMARY KEY,          -- 'default' | uuid
+    title                TEXT NOT NULL DEFAULT '',  -- 首条用户消息前 24 字；'' = 未命名
+    created_at           TEXT NOT NULL,
+    updated_at           TEXT NOT NULL,             -- 每次落对话事件 touch，列表按它倒序
+    archived             INTEGER NOT NULL DEFAULT 0,
+    digest               TEXT,
+    digest_upto_event_id INTEGER,
+    message_count        INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(archived, updated_at DESC);
 
 -- Layer 2: extracted facts. Superseded facts are stamped invalid_at (never
 -- hard-deleted by the system; hard delete only on user request).
@@ -215,6 +245,9 @@ CREATE TABLE IF NOT EXISTS relationship_log (
 
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_events_unconsumed ON events(consumed, ts);
+-- v15：按会话取历史（dialogue_history / 回放 / 遗忘）从「扫 ts 再过滤」
+-- 变成区间扫描；多会话之后每个会话都要查，这条索引是硬需求不是装饰。
+CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id, id);
 CREATE INDEX IF NOT EXISTS idx_facts_active ON facts(ts) WHERE invalid_at IS NULL;
 
 -- 用户画像（plan-user-profile.md §4，v13）。身份 KV，key 白名单在
@@ -292,7 +325,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     plan_json     TEXT,                         -- 结构化计划 JSON（steps[] 状态）
     plan_mode     TEXT NOT NULL DEFAULT 'none', -- 'none' | 'planned'
     cancel_reason TEXT,                         -- 'user' | 'budget' | NULL
-    confirm_mode  TEXT NOT NULL DEFAULT 'auto'  -- D1: 'auto' 直放 | 'manual' 扩展位（本版不阻塞）
+    confirm_mode  TEXT NOT NULL DEFAULT 'auto', -- D1: 'auto' 直放 | 'manual' 扩展位（本版不阻塞）
+    -- 会话归属（v15）：forget_session 要按会话连带清掉任务行（goal 存的是用户原话）
+    session_id    TEXT
 );
 
 -- MCP servers (plan-agent-mcp-skill.md §3.2, spec-s2). Secrets in
@@ -331,6 +366,9 @@ CREATE TABLE IF NOT EXISTS turn_trace (
     duration_ms        INTEGER,
     user_text          TEXT,           -- 用户原文（摘要卡显示；proactive 为 NULL）
     reply_text         TEXT,           -- 过滤后的最终回复（摘要卡显示）
+    prompt_tokens_est    INTEGER,      -- v15：本轮最后一次请求的估算输入 tokens
+    prompt_tokens_actual INTEGER,      -- v15：provider usage.prompt_tokens（没有就 NULL）
+    dropped_turns        INTEGER,      -- v15：L0 丢掉的历史轮数（0/未记为 NULL）
     ts                 TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_turn_trace_user ON turn_trace(user_event_id);
@@ -453,8 +491,43 @@ pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     add_column_if_missing(conn, "tasks", "plan_mode", "TEXT NOT NULL DEFAULT 'none'")?;
     add_column_if_missing(conn, "tasks", "cancel_reason", "TEXT")?;
     add_column_if_missing(conn, "tasks", "confirm_mode", "TEXT NOT NULL DEFAULT 'auto'")?;
+    // v15: 上下文管理（docs/zh/plan-context.md §5）。sessions 表由 SCHEMA 的
+    // IF NOT EXISTS 建出；这里只补列 + 回填 default 行。
+    add_column_if_missing(conn, "tasks", "session_id", "TEXT")?;
+    add_column_if_missing(conn, "turn_trace", "prompt_tokens_est", "INTEGER")?;
+    add_column_if_missing(conn, "turn_trace", "prompt_tokens_actual", "INTEGER")?;
+    add_column_if_missing(conn, "turn_trace", "dropped_turns", "INTEGER")?;
+    backfill_default_session(conn)?;
 
     set_user_version_if_behind(conn)?;
+    Ok(())
+}
+
+/// v15 回填：老库里 `events.session_id='default'` 的对话，在 sessions 里
+/// 补一行，否则对话页的会话列表看不到历史。标题取该会话首条用户消息前
+/// 24 字（换行折成空格），空则「默认会话」；时间取该会话最早/最晚事件。
+/// **不写 digest**（§5.4 第 5 条）：第一次真超预算时才生成，不给老用户
+/// 凭空造摘要。`proactive` 不建行（D6）。幂等：已有该行就跳过。
+fn backfill_default_session(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO sessions (id, title, created_at, updated_at, message_count)
+         SELECT 'default',
+                COALESCE(
+                    NULLIF(TRIM(SUBSTR(
+                        REPLACE(REPLACE(
+                            (SELECT content FROM events
+                              WHERE session_id = 'default' AND role = 'user'
+                              ORDER BY id ASC LIMIT 1), char(10), ' '), char(13), ' ')
+                    , 1, 24)), ''),
+                    '默认会话'),
+                COALESCE((SELECT MIN(ts) FROM events WHERE session_id = 'default'), ?1),
+                COALESCE((SELECT MAX(ts) FROM events WHERE session_id = 'default'), ?1),
+                (SELECT COUNT(*) FROM events
+                  WHERE session_id = 'default' AND kind = 'dialogue')
+          WHERE EXISTS (SELECT 1 FROM events WHERE session_id = 'default')
+            AND NOT EXISTS (SELECT 1 FROM sessions WHERE id = 'default')",
+        params![clock::now_iso()],
+    )?;
     Ok(())
 }
 
@@ -497,6 +570,11 @@ pub fn add_event(conn: &Connection, kind: &str, content: &str) -> rusqlite::Resu
 }
 
 /// Append a raw event with dialogue metadata (role / session).
+///
+/// v15：对话事件是**唯一**能决定「会话存在与最近活跃」的写入点，所以
+/// 会话索引在这里顺手维护（`session_touch`）——调用方散落在危机拦截、
+/// 日历路由、云端循环、总结、本地直答五处，各自记得 touch 一定会漏。
+/// `proactive` 例外：主动搭话不进会话列表（plan-context D6）。
 pub fn add_event_meta(
     conn: &Connection,
     kind: &str,
@@ -508,7 +586,16 @@ pub fn add_event_meta(
         "INSERT INTO events (ts, kind, content, role, session_id) VALUES (?1, ?2, ?3, ?4, ?5)",
         params![clock::now_iso(), kind, content, role, session_id],
     )?;
-    Ok(conn.last_insert_rowid())
+    let id = conn.last_insert_rowid();
+    if kind == "dialogue" {
+        if let Some(sid) = session_id {
+            if sid != PROACTIVE_SESSION_ID {
+                let title_from = if role == Some("user") { Some(content) } else { None };
+                session_touch(conn, sid, title_from)?;
+            }
+        }
+    }
+    Ok(id)
 }
 
 pub fn add_fact(conn: &Connection, content: &str, source_event_id: Option<i64>) -> rusqlite::Result<i64> {
@@ -621,6 +708,138 @@ pub fn promote_fact(
     Ok(true)
 }
 
+// ------------------------------------------------------ sessions (v15)
+
+/// 会话索引行（plan-context §5.1）。`title` 空串 = 未命名，前端显示「新对话」。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionRow {
+    pub id: String,
+    pub title: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub archived: bool,
+    pub message_count: i64,
+    pub digest: Option<String>,
+    pub digest_upto_event_id: Option<i64>,
+}
+
+/// 自动标题：首条用户消息前 24 字，换行折成空格。全空白 → None（不改名，
+/// 留给下一条有内容的用户消息）。
+const AUTO_TITLE_MAX_CHARS: usize = 24;
+/// 手动改名上限（比自动命名宽松：这是用户自己的话）。
+const MANUAL_TITLE_MAX_CHARS: usize = 40;
+
+fn auto_title(text: &str) -> Option<String> {
+    let flat: String = text
+        .chars()
+        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+        .collect();
+    let trimmed = flat.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let clipped: String = trimmed.chars().take(AUTO_TITLE_MAX_CHARS).collect();
+    Some(clipped)
+}
+
+/// 对话事件落地时维护会话索引：确保行存在、touch updated_at、累加条数，
+/// 并在**还没被命名**（title = ''）时用首条用户消息命名。
+/// 手动改过的标题永不被覆盖——判断依据就是「非空」，不用中文字符串哨兵。
+pub fn session_touch(
+    conn: &Connection,
+    session_id: &str,
+    user_text: Option<&str>,
+) -> rusqlite::Result<()> {
+    let now = clock::now_iso();
+    let candidate = user_text.and_then(auto_title);
+    conn.execute(
+        "INSERT INTO sessions (id, title, created_at, updated_at, message_count)
+         VALUES (?1, ?2, ?3, ?3, 1)
+         ON CONFLICT(id) DO UPDATE SET
+             updated_at = excluded.updated_at,
+             message_count = sessions.message_count + 1",
+        params![session_id, candidate.clone().unwrap_or_default(), now],
+    )?;
+    if let Some(t) = candidate {
+        conn.execute(
+            "UPDATE sessions SET title = ?2 WHERE id = ?1 AND title = ''",
+            params![session_id, t],
+        )?;
+    }
+    Ok(())
+}
+
+const SESSION_COLUMNS: &str =
+    "id, title, created_at, updated_at, archived, message_count, digest, digest_upto_event_id";
+
+fn session_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
+    Ok(SessionRow {
+        id: r.get(0)?,
+        title: r.get(1)?,
+        created_at: r.get(2)?,
+        updated_at: r.get(3)?,
+        archived: r.get::<_, i64>(4)? != 0,
+        message_count: r.get(5)?,
+        digest: r.get(6)?,
+        digest_upto_event_id: r.get(7)?,
+    })
+}
+
+/// 会话列表：未归档在前，`updated_at` 倒序（同秒再用 rowid 兜底）。
+/// `include_archived` 为 false 时只返回未归档（抽屉默认视图）。
+pub fn session_list(conn: &Connection, include_archived: bool) -> rusqlite::Result<Vec<SessionRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {SESSION_COLUMNS} FROM sessions
+          WHERE (?1 = 1 OR archived = 0)
+          ORDER BY archived ASC, updated_at DESC, rowid DESC"
+    ))?;
+    let rows = stmt.query_map(params![include_archived as i64], session_from_row)?;
+    rows.collect()
+}
+
+pub fn session_get(conn: &Connection, id: &str) -> rusqlite::Result<Option<SessionRow>> {
+    conn.query_row(
+        &format!("SELECT {SESSION_COLUMNS} FROM sessions WHERE id = ?1"),
+        params![id],
+        session_from_row,
+    )
+    .optional()
+}
+
+/// 新建会话。`id` 缺省由调用方生成；`title` 留给「新对话」以外的显式命名，
+/// 空串 = 未命名（首条用户消息会补上）。
+pub fn session_create(conn: &Connection, id: &str, title: &str) -> rusqlite::Result<SessionRow> {
+    let now = clock::now_iso();
+    let title: String = title.trim().chars().take(MANUAL_TITLE_MAX_CHARS).collect();
+    conn.execute(
+        "INSERT INTO sessions (id, title, created_at, updated_at, message_count)
+         VALUES (?1, ?2, ?3, ?3, 0)",
+        params![id, title, now],
+    )?;
+    session_get(conn, id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
+}
+
+/// 改名（用户显式操作，覆盖任何自动标题）。
+pub fn session_rename(conn: &Connection, id: &str, title: &str) -> rusqlite::Result<usize> {
+    let title: String = title.trim().chars().take(MANUAL_TITLE_MAX_CHARS).collect();
+    conn.execute(
+        "UPDATE sessions SET title = ?2 WHERE id = ?1",
+        params![id, title],
+    )
+}
+
+pub fn session_set_archived(
+    conn: &Connection,
+    id: &str,
+    archived: bool,
+) -> rusqlite::Result<usize> {
+    conn.execute(
+        "UPDATE sessions SET archived = ?2 WHERE id = ?1",
+        params![id, archived as i64],
+    )
+}
+
 // --------------------------------------------------- forget (compliance Art. 16)
 
 /// User: "forget this" → truly delete, cleanly: the event and every fact
@@ -631,12 +850,25 @@ pub fn forget_event(conn: &Connection, event_id: i64) -> rusqlite::Result<usize>
 }
 
 /// User: "forget that whole conversation" → cascade by session.
+///
+/// v15 补全（plan-context §5.5，合规 P0）：`trace_steps.prompt` 存的是
+/// **未截断的 system 全文**，`turn_trace` 存用户原话与回复原文，`tasks.goal`
+/// 存用户原话——只删 events/facts 等于「说忘了其实没忘」。这里同事务把
+/// 会话的 trace、任务、会话行一起清掉。
+///
+/// 返回删除的 events 行数（沿用旧语义，调用方按它报「清掉了几条」）。
 pub fn forget_session(conn: &Connection, session_id: &str) -> rusqlite::Result<usize> {
+    // 老库未必开着 FK 级联，trace_steps 显式按 turn 删（不依赖 ON DELETE CASCADE）。
     conn.execute(
-        "DELETE FROM facts WHERE source_event_id IN
-             (SELECT id FROM events WHERE session_id = ?1)",
+        "DELETE FROM trace_steps WHERE turn_id IN
+             (SELECT id FROM turn_trace WHERE session_id = ?1)",
         params![session_id],
     )?;
+    conn.execute("DELETE FROM turn_trace WHERE session_id = ?1", params![session_id])?;
+    conn.execute("DELETE FROM tasks WHERE session_id = ?1", params![session_id])?;
+    conn.execute("DELETE FROM facts WHERE source_event_id IN
+             (SELECT id FROM events WHERE session_id = ?1)", params![session_id])?;
+    conn.execute("DELETE FROM sessions WHERE id = ?1", params![session_id])?;
     conn.execute("DELETE FROM events WHERE session_id = ?1", params![session_id])
 }
 
@@ -644,9 +876,10 @@ pub fn forget_session(conn: &Connection, session_id: &str) -> rusqlite::Result<u
 /// plus the prediction audit (plan-predict.md §7) and the growth tables
 /// (plan-morph.md §7: compliance extends to growth too — starting over IS
 /// the honest interpretation of "forget everything").
+/// v15：trace / 任务 / 会话索引一并清（此前漏删，等于把原话留在库里）。
 pub fn forget_all(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
-        "DELETE FROM tool_calls; DELETE FROM calendar_cache; DELETE FROM user_profile_history; DELETE FROM user_profile; DELETE FROM relationship_log; DELETE FROM relationship_progress; DELETE FROM relationship; DELETE FROM onboarding_answers; DELETE FROM settings; DELETE FROM growth_log; DELETE FROM growth; DELETE FROM predictions; DELETE FROM boundaries; DELETE FROM preferences; DELETE FROM facts; DELETE FROM events;",
+        "DELETE FROM trace_steps; DELETE FROM turn_trace; DELETE FROM tasks; DELETE FROM sessions; DELETE FROM tool_calls; DELETE FROM calendar_cache; DELETE FROM user_profile_history; DELETE FROM user_profile; DELETE FROM relationship_log; DELETE FROM relationship_progress; DELETE FROM relationship; DELETE FROM onboarding_answers; DELETE FROM settings; DELETE FROM growth_log; DELETE FROM growth; DELETE FROM predictions; DELETE FROM boundaries; DELETE FROM preferences; DELETE FROM facts; DELETE FROM events;",
     )?;
     Ok(())
 }
@@ -1579,11 +1812,22 @@ fn plan_version_default() -> i32 {
 
 /// 一次云端工具循环开始：落 running 行，返回 id（tool_calls.task_id 关联用）。
 pub fn task_start(conn: &Connection, goal: &str) -> rusqlite::Result<String> {
+    task_start_in(conn, goal, None)
+}
+
+/// 带会话归属的建卡（v15）：`forget_session` 按 session_id 连带清任务行。
+/// 单步任务也落 session_id——它和计划任务一样带着用户原话（goal）。
+pub fn task_start_in(
+    conn: &Connection,
+    goal: &str,
+    session_id: Option<&str>,
+) -> rusqlite::Result<String> {
     let id = crate::mcp_admin::new_task_id();
     let clipped: String = goal.chars().take(80).collect();
     conn.execute(
-        "INSERT INTO tasks (id, created_at, goal, status) VALUES (?1, ?2, ?3, 'running')",
-        params![id, clock::now_iso(), clipped],
+        "INSERT INTO tasks (id, created_at, goal, status, session_id)
+         VALUES (?1, ?2, ?3, 'running', ?4)",
+        params![id, clock::now_iso(), clipped, session_id],
     )?;
     Ok(id)
 }
@@ -2697,6 +2941,175 @@ mod tests {
         forget_all(&conn).unwrap();
         assert!(all_events(&conn).is_empty());
         assert!(active_facts(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn v14_database_backfills_default_session_and_observability_columns() {
+        // v14 老库：events 已有会话列，sessions 还不存在，turn_trace 没有
+        // 观测三列，tasks 没有 session_id。迁移必须补齐且保留老数据。
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL,
+                 kind TEXT NOT NULL, content TEXT NOT NULL, role TEXT, session_id TEXT,
+                 consumed INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE tasks (id TEXT PRIMARY KEY, created_at TEXT NOT NULL,
+                 goal TEXT NOT NULL, status TEXT NOT NULL,
+                 tool_calls INTEGER NOT NULL DEFAULT 0, final_reply TEXT,
+                 plan_json TEXT, plan_mode TEXT NOT NULL DEFAULT 'none', cancel_reason TEXT,
+                 confirm_mode TEXT NOT NULL DEFAULT 'auto');
+             CREATE TABLE turn_trace (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 session_id TEXT NOT NULL, user_event_id INTEGER, assistant_event_id INTEGER,
+                 kind TEXT NOT NULL, model_used INTEGER NOT NULL DEFAULT 0, tool_label TEXT,
+                 filter_report TEXT, duration_ms INTEGER, user_text TEXT, reply_text TEXT,
+                 ts TEXT NOT NULL);
+             INSERT INTO events (ts, kind, content, role, session_id) VALUES
+                 ('2026-11-20T08:00:00Z','dialogue','第一句用户消息
+第二行','user','default'),
+                 ('2026-11-20T08:00:01Z','dialogue','回复','assistant','default'),
+                 ('2026-11-20T09:00:00Z','dialogue','早','assistant','proactive');
+             INSERT INTO tasks (id, created_at, goal, status) VALUES
+                 ('legacy-task','2026-11-20T08:00:02Z','老任务','done');
+             PRAGMA user_version = 14;",
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
+
+        let s = session_get(&conn, "default").unwrap().expect("老库要回填 default 行");
+        assert_eq!(s.title, "第一句用户消息 第二行", "标题取首条用户消息，换行折空格");
+        assert_eq!(s.message_count, 2, "只数对话事件");
+        assert!(s.digest.is_none(), "回填不造摘要");
+        assert!(session_get(&conn, "proactive").unwrap().is_none(), "主动搭话不建行");
+        assert_eq!(session_list(&conn, true).unwrap().len(), 1);
+
+        let trace_cols: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(turn_trace)").unwrap();
+            let rows = stmt.query_map([], |r| r.get::<_, String>(1)).unwrap();
+            rows.map(|r| r.unwrap()).collect()
+        };
+        for c in ["prompt_tokens_est", "prompt_tokens_actual", "dropped_turns"] {
+            assert!(trace_cols.iter().any(|x| x == c), "v15 缺列: {c}");
+        }
+        let task_cols: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(tasks)").unwrap();
+            let rows = stmt.query_map([], |r| r.get::<_, String>(1)).unwrap();
+            rows.map(|r| r.unwrap()).collect()
+        };
+        assert!(task_cols.iter().any(|x| x == "session_id"), "tasks 缺 session_id");
+        assert_eq!(task_list(&conn, 10).unwrap().len(), 1, "老任务保留");
+
+        // 二次迁移幂等：不重复回填、不重复加列。
+        migrate(&conn).unwrap();
+        assert_eq!(session_list(&conn, true).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn dialogue_events_touch_sessions_but_proactive_stays_out() {
+        let conn = mem();
+        add_event_meta(&conn, "dialogue", "在吗", Some("user"), Some("s1")).unwrap();
+        add_event_meta(&conn, "dialogue", "在", Some("assistant"), Some("s1")).unwrap();
+        let s = session_get(&conn, "s1").unwrap().unwrap();
+        assert_eq!(s.title, "在吗");
+        assert_eq!(s.message_count, 2);
+
+        // 非对话事件（心跳、感知）不建会话。
+        add_event_meta(&conn, "clipboard", "复制了一段", None, Some("s1")).unwrap();
+        assert_eq!(session_get(&conn, "s1").unwrap().unwrap().message_count, 2);
+
+        add_event_meta(&conn, "dialogue", "早", Some("assistant"), Some(PROACTIVE_SESSION_ID))
+            .unwrap();
+        assert!(
+            session_get(&conn, PROACTIVE_SESSION_ID).unwrap().is_none(),
+            "proactive 不进会话列表"
+        );
+    }
+
+    #[test]
+    fn forget_session_clears_trace_tasks_and_the_session_row() {
+        let conn = mem();
+        let u1 = add_event_meta(&conn, "dialogue", "帮我整理文件", Some("user"), Some("s1")).unwrap();
+        add_event_meta(&conn, "dialogue", "好了", Some("assistant"), Some("s1")).unwrap();
+        add_event_meta(&conn, "dialogue", "另一个话题", Some("user"), Some("s2")).unwrap();
+        add_fact(&conn, "s1 的事实", Some(u1)).unwrap();
+        let task_s1 = task_start_in(&conn, "帮我整理文件", Some("s1")).unwrap();
+        let task_s2 = task_start_in(&conn, "另一个话题", Some("s2")).unwrap();
+        conn.execute(
+            "INSERT INTO turn_trace (session_id, user_event_id, kind, user_text, reply_text, ts)
+             VALUES ('s1', ?1, 'model', '帮我整理文件', '好了', '2026-11-23T00:00:00Z')",
+            params![u1],
+        )
+        .unwrap();
+        let turn_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO trace_steps (turn_id, seq, step_kind, title, prompt, ts)
+             VALUES (?1, 0, 'llm_round', '模型作答', 'SYSTEM 全文+用户原话', '2026-11-23T00:00:00Z')",
+            params![turn_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO turn_trace (session_id, kind, user_text, ts)
+             VALUES ('s2', 'model', '另一个话题', '2026-11-23T00:00:01Z')",
+            [],
+        )
+        .unwrap();
+
+        forget_session(&conn, "s1").unwrap();
+
+        assert!(session_get(&conn, "s1").unwrap().is_none(), "会话行要删");
+        assert!(session_get(&conn, "s2").unwrap().is_some(), "别的会话不动");
+        assert!(
+            all_events(&conn).iter().all(|e| e.session_id.as_deref() != Some("s1")),
+            "事件要删"
+        );
+        // trace 里存着未截断的 system 与用户原话：必须一起走。
+        let traces: i64 = conn
+            .query_row("SELECT COUNT(*) FROM turn_trace WHERE session_id = 's1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(traces, 0);
+        let steps: i64 = conn
+            .query_row("SELECT COUNT(*) FROM trace_steps", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(steps, 0, "trace_steps 随 turn 级联删除");
+        let tasks: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tasks WHERE session_id = 's1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(tasks, 0, "任务行（goal 存原话）要删");
+        let keep: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tasks WHERE id = ?1", params![task_s2], |r| r.get(0))
+            .unwrap();
+        assert_eq!(keep, 1);
+        let _ = task_s1;
+    }
+
+    #[test]
+    fn forget_all_clears_trace_tasks_and_sessions() {
+        let conn = mem();
+        add_event_meta(&conn, "dialogue", "随便聊聊", Some("user"), Some("s1")).unwrap();
+        task_start_in(&conn, "随便聊聊", Some("s1")).unwrap();
+        conn.execute(
+            "INSERT INTO turn_trace (session_id, kind, ts) VALUES ('s1','model','2026-11-23T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        let tid = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO trace_steps (turn_id, seq, step_kind, title, ts)
+             VALUES (?1, 0, 'llm_round', '模型作答', '2026-11-23T00:00:00Z')",
+            params![tid],
+        )
+        .unwrap();
+
+        forget_all(&conn).unwrap();
+        for (table, sql) in [
+            ("sessions", "SELECT COUNT(*) FROM sessions"),
+            ("tasks", "SELECT COUNT(*) FROM tasks"),
+            ("turn_trace", "SELECT COUNT(*) FROM turn_trace"),
+            ("trace_steps", "SELECT COUNT(*) FROM trace_steps"),
+        ] {
+            let n: i64 = conn.query_row(sql, [], |r| r.get(0)).unwrap();
+            assert_eq!(n, 0, "{table} 未清空");
+        }
     }
 
     #[test]

@@ -242,7 +242,7 @@ fn validate_transport(transport: &str, command: Option<&str>, url: Option<&str>)
 
 /// Compact uuid (no external crate: rand not in the tree; this is enough
 /// entropy for a locally-stored config row).
-fn uuid_v4() -> String {
+pub(crate) fn uuid_v4() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     let pid = std::process::id() as u128;

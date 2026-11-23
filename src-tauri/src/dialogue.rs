@@ -41,8 +41,10 @@ use crate::AppState;
 /// scores across 0.3/0.7/1.0; runtime sits on the middle grade).
 const CHAT_TEMPERATURE: f64 = 0.7;
 /// Session id for proactive messages (kept separate from user chats so a
-/// "forget this conversation" can target either).
-pub const PROACTIVE_SESSION: &str = "proactive";
+/// "forget this conversation" can target either). 值定义在 db 侧：会话索引
+/// 的写入点是 `add_event_meta`，它必须知道哪个 id 不建行（plan-context D6），
+/// 两处各写一份字符串迟早会走散。
+pub use crate::memory::db::PROACTIVE_SESSION_ID as PROACTIVE_SESSION;
 /// How often the proactive loop checks the decision layer.
 pub const PROACTIVE_POLL_SECS: u64 = 60;
 
@@ -718,6 +720,7 @@ fn cloud_tool_loop(
     system: &str,
     history: &[crate::persona::eval::Turn],
     user_text: &str,
+    session_id: &str,
     rec: &mut TraceRecorder,
     mut on_task: Option<&mut dyn FnMut(serde_json::Value)>,
 ) -> rusqlite::Result<(String, Option<String>, Option<TaskCard>, bool)> {
@@ -831,7 +834,7 @@ fn cloud_tool_loop(
                             // plan_json 需要先有归属行）。后续工具循环见 task_open=true
                             // 不再重复开卡。
                             let conn = lock_conn(store)?;
-                            match db::task_start(&conn, user_text) {
+                            match db::task_start_in(&conn, user_text, Some(session_id)) {
                                 Ok(id) => {
                                     task.borrow_mut().id = id.clone();
                                     if let Ok(mut g) = kit.task_id.lock() {
@@ -984,7 +987,7 @@ fn cloud_tool_loop(
             executed += 1;
             if !task_open.get() {
                 let conn = lock_conn(store)?;
-                match db::task_start(&conn, user_text) {
+                match db::task_start_in(&conn, user_text, Some(session_id)) {
                     Ok(id) => {
                         task.borrow_mut().id = id.clone();
                         if let Ok(mut g) = kit.task_id.lock() {
@@ -1633,7 +1636,10 @@ fn chat_turn_inner(
         let (raw, tool_label, task_card, streamed) = match backend.tool_client() {
             Some(client) => {
                 kit.trace("mode:cloud".into());
-                cloud_tool_loop(store, client, kit, &system, &history, user_text, &mut rec, on_task.take())?
+                cloud_tool_loop(
+                    store, client, kit, &system, &history, user_text, session_id, &mut rec,
+                    on_task.take(),
+                )?
             }
             None => {
                 kit.trace("mode:local".into());

@@ -38,6 +38,7 @@ pub mod persona;
 pub mod predict;
 pub mod relationship;
 pub mod report;
+pub mod session;
 pub mod skill;
 pub mod skill_remote;
 pub mod webtools;
@@ -247,6 +248,11 @@ pub fn run() {
             memory::consolidate,
             memory::forget_session,
             memory::forget_all,
+            session::session_list,
+            session::session_create,
+            session::session_rename,
+            session::session_archive,
+            session::session_delete,
             persona::snapshot::persona_snapshot,
             debug::debug_log_tail,
             debug::debug_open_log_dir,
