@@ -12,6 +12,7 @@
 
 pub mod agent_tools;
 pub mod calendar;
+pub mod context;
 pub mod debug;
 pub mod decision;
 pub mod dialogue;
