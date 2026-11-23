@@ -46,6 +46,12 @@ pub struct CandidateFact {
     /// Correction marker: the pipeline resolves WHICH active fact this
     /// supersedes at apply time (so same-run facts count — plan §5.1 ④).
     pub is_correction: bool,
+    /// 用户画像出口（plan-user-profile.md §3）：key 已过白名单校验的
+    /// (key, value)。一份抽取两个出口——facts 照旧落库，画像由
+    /// consolidate apply 写进 user_profile。None = 本条不带画像。
+    pub profile: Option<(String, String)>,
+    /// 抽出来源（画像 manual 保护的判定依据）：'rule' | 'model'。
+    pub source: &'static str,
 }
 
 /// What an extractor may look at. `active_facts` is provided so rule-based
@@ -103,6 +109,81 @@ const CORRECTION_MARKERS: &[&str] = &["说错了", "不对", "其实是", "我�
 /// priority, plan §5.3), plus a `boundary`-category fact for traceability.
 const BOUNDARY_MARKERS: &[&str] = &["别再", "不要再", "别在", "禁止", "别打断", "don't interrupt", "stop interrupting"];
 
+// ------------------------------------------------------------- profile rules
+// (docs/zh/plan-user-profile.md §3.1) — 规则层画像抽取。产出与 facts 同一批
+// candidate（content 仍是用户原话），value 是剥掉前缀的短值；落库由
+// consolidate apply 走 profile::apply（白名单 + manual 保护在那边）。
+
+/// (前缀, key)——要求主语是「我」的确定性句式。前缀顺序即匹配顺序。
+const PROFILE_PATTERNS: &[(&str, &str)] = &[
+    ("我叫", "name"),
+    ("叫我", "name"),
+    ("我是做", "occupation"),
+    ("我的工作是", "occupation"),
+    ("我是一名", "occupation"),
+    ("我在用", "tools"),
+    ("我平时用", "tools"),
+    ("我每天用", "tools"),
+];
+
+/// name 误报排除：给阿盆起名 / 指代他人都不是「用户叫什么」。
+const NAME_EXCLUDES: &[&str] = &["阿盆", "你", "它", "他", "她", "咱", "别人"];
+
+/// city 词表校验（方案 §3.1）：「我在 Cursor 上写代码」不能误进 city——
+/// 必须命中真实城市名才落库。宁漏勿误：词表短就短，漏的城市靠模型层/UI。
+const CITY_WORDS: &[&str] = &[
+    "北京", "上海", "广州", "深圳", "杭州", "成都", "重庆", "武汉", "西安", "南京",
+    "苏州", "天津", "长沙", "郑州", "青岛", "合肥", "厦门", "宁波", "无锡", "济南",
+    "大连", "福州", "昆明", "沈阳", "哈尔滨", "石家庄", "南昌", "贵阳", "太原",
+    "南宁", "兰州", "海口", "中国香港", "中国澳门",
+];
+
+/// name 值的合理长度上限（中文名）。
+const NAME_MAX_CHARS: usize = 6;
+
+/// 剥掉画像前缀后的值清洗：去尾部语气/标点（「我是做 QA 的」→「QA」）。
+fn trim_profile_value(v: &str) -> String {
+    v.trim()
+        .trim_end_matches(['的', '了', '呢', '啊', '呀', '。', '！', '，', '？', ' ', '~', '…'])
+        .trim()
+        .to_string()
+}
+
+/// 一句话的画像匹配（规则层）。返回 Some((key, value)) 或 None。
+/// 只做前缀剥离 + 最小校验，复杂口语交给模型层（§3.2）。
+/// 入参是原文（非 lowercase）：匹配大小写不敏感，但值必须从原文切——
+/// 「我是一名 QA」剥出来是 QA 不是 qa。
+pub fn profile_match(original: &str) -> Option<(String, String)> {
+    let lower = original.to_lowercase();
+    // city 特例：「我在杭州」句式 + 词表校验，先于通用前缀（「我在」不是
+    // 通用画像前缀，进词表才算命中）。
+    if let Some(rest) = lower.strip_prefix("我在") {
+        if let Some(city) = CITY_WORDS.iter().find(|c| rest.starts_with(**c)) {
+            return Some(("city".to_string(), city.to_string()));
+        }
+    }
+    let (key, raw) = PROFILE_PATTERNS
+        .iter()
+        .find(|(prefix, _)| lower.starts_with(*prefix))
+        .map(|(prefix, key)| {
+            // 前缀是 ASCII/中文字面量，lowercasing 不改这一段的 char 数，
+            // 按前缀 char 数从原文切片是安全的。
+            let skip = prefix.chars().count();
+            (*key, original.chars().skip(skip).collect::<String>())
+        })?;
+    let value = trim_profile_value(&raw);
+    if value.is_empty() {
+        return None;
+    }
+    if key == "name"
+        && (value.chars().count() > NAME_MAX_CHARS
+            || NAME_EXCLUDES.iter().any(|e| value.contains(e)))
+    {
+        return None; // 宁漏勿误：「我叫你放心」「叫他阿盆」都不抽
+    }
+    Some((key.to_string(), value))
+}
+
 fn overlap(a: &str, b: &str) -> usize {
     // Shared 2-gram count (bigrams): the weakest similarity that still
     // separates a correction from its target on short Chinese utterances,
@@ -145,6 +226,8 @@ impl FactExtractor for RuleExtractor {
                     confidence: 0.95,
                     source_event_id: Some(ev.id),
                     is_correction: false,
+                    profile: None,
+                    source: "rule",
                 });
                 continue;
             }
@@ -152,6 +235,7 @@ impl FactExtractor for RuleExtractor {
             // 2) Correction — target resolves at apply time (see
             //    CandidateFact::is_correction); apply_candidates skips it
             //    when nothing overlaps, so emitting unconditionally is safe.
+            //    更正句不带画像（更正的语义先于身份陈述，宁漏勿误）。
             if CORRECTION_MARKERS.iter().any(|m| lower.contains(m)) {
                 out.push(CandidateFact {
                     content: ev.content.clone(),
@@ -159,11 +243,18 @@ impl FactExtractor for RuleExtractor {
                     confidence: 0.6,
                     source_event_id: Some(ev.id),
                     is_correction: true,
+                    profile: None,
+                    source: "rule",
                 });
                 continue;
             }
 
-            // 3) Direct statement.
+            // 3) 画像匹配（方案 §3.1）：独立于直接陈述——「我在用 Cursor」
+            //    两条规则都命中时，画像挂到同一条 candidate 上（一份抽取
+            //    两个出口，不是两条 candidate）。传原文，值的大小写保真。
+            let profile = profile_match(&ev.content);
+
+            // 4) Direct statement.
             if let Some((_, category, confidence)) = DIRECT_PATTERNS
                 .iter()
                 .find(|(prefix, _, _)| lower.starts_with(prefix))
@@ -174,9 +265,25 @@ impl FactExtractor for RuleExtractor {
                     confidence: *confidence,
                     source_event_id: Some(ev.id),
                     is_correction: false,
+                    profile,
+                    source: "rule",
+                });
+                continue;
+            }
+            // 5) 只有画像命中、没有直接陈述句式：仍出一条 context candidate
+            //    ——facts 留痕 + 画像落库都要发生。
+            if let Some(p) = profile {
+                out.push(CandidateFact {
+                    content: ev.content.clone(),
+                    category: Category::Context,
+                    confidence: 0.7,
+                    source_event_id: Some(ev.id),
+                    is_correction: false,
+                    profile: Some(p),
+                    source: "rule",
                 });
             }
-            // 4) Everything else: no candidate. 宁漏勿误 — model layer (M5)
+            // 6) Everything else: no candidate. 宁漏勿误 — model layer (M5)
             //    widens this without touching the pipeline.
         }
         out
@@ -234,12 +341,13 @@ impl FactExtractor for LocalExtractor {
 const EXTRACTION_SYSTEM_PROMPT: &str = r#"你是记忆抽取模块。输入是一天的用户发言（带编号）和当前已知事实。你的任务：从发言中提炼出值得长期记住的候选事实。
 
 只输出一个 JSON 数组，不要输出任何其他文字、解释或 markdown。每条候选的格式：
-{"idx": <发言编号>, "fact": "<一句话事实，第三人称>", "category": "like|habit|context|boundary", "confidence": <0.0-1.0>, "correction": <true|false>}
+{"idx": <发言编号>, "fact": "<一句话事实，第三人称>", "category": "like|habit|context|boundary", "confidence": <0.0-1.0>, "correction": <true|false>, "profile": {"key": "<画像字段>", "value": "<画像值>"} 或 null}
 
 规则：
 - fact 必须是可断言的单一事实，改写为第三人称（如用户说"我喜欢雨天"→"用户喜欢雨天"）。
 - category：like=显式喜好/厌恶；habit=行为规律；context=稳定背景；boundary=用户明确说"别/不要再做X"。
 - correction=true 表示该发言在更正一个已有事实（"说错了，其实是…"）。
+- profile（可省略）：当发言透露了用户的固定身份信息时填写，key 只允许 name（用户姓名/怎么称呼）、occupation（职业/角色）、tools（常用工具）、city（所在城市）、projects（正在做的事）、schedule（作息规律）；value 是第一人称原值的简短形式（如"我叫许一"→ value "许一"）。key 不在上面的清单里就一律填 null。拿不准就填 null。
 - 只抽有把握的。宁漏勿误：拿不准就不要输出。没有可抽取的内容时输出 []。"#;
 
 /// Build the user-side prompt: numbered utterances + the active facts (so the
@@ -280,6 +388,26 @@ struct RawCandidate {
     confidence: Option<f64>,
     #[serde(default)]
     correction: bool,
+    #[serde(default)]
+    profile: Option<RawProfile>,
+}
+
+/// 模型侧画像输出（plan-user-profile.md §3.2）。key 白名单在这里硬校验：
+/// 白名单外的 key 静默丢弃（宁漏勿误），value 空串同样丢弃。
+#[derive(Debug, Deserialize)]
+struct RawProfile {
+    key: String,
+    value: String,
+}
+
+impl RawProfile {
+    fn into_valid(self) -> Option<(String, String)> {
+        let value = self.value.trim().to_string();
+        if value.is_empty() || !super::profile::is_valid_key(&self.key) {
+            return None;
+        }
+        Some((self.key, value))
+    }
 }
 
 /// Parse the model's JSON array into candidates. Traceability invariant: a
@@ -302,12 +430,15 @@ fn parse_candidates(reply: &str, events: &[EventRow]) -> Option<Vec<CandidateFac
             _ => continue,
         };
         let confidence = c.confidence.unwrap_or(0.7).clamp(0.0, 1.0);
+        let profile = c.profile.and_then(|p| p.into_valid());
         out.push(CandidateFact {
             content: c.fact.trim().to_string(),
             category,
             confidence,
             source_event_id: Some(ev.id),
             is_correction: c.correction,
+            profile,
+            source: "model",
         });
     }
     Some(out)
@@ -399,6 +530,128 @@ mod tests {
         assert!(ex.is_empty());
     }
 
+    // ---- 画像规则（plan-user-profile.md §3.1）----
+
+    #[test]
+    fn profile_patterns_extract_identity_values() {
+        let evs = vec![
+            event(1, "我叫许一"),
+            event(2, "我是做质量管理的"),
+            event(3, "我的工作是写代码"),
+            event(4, "我是一名 QA"),
+            event(5, "我平时用 Figma 画图"),
+        ];
+        let ex = RuleExtractor.extract(&SessionDigest {
+            user_utterances: &evs,
+            active_facts: &[],
+        });
+        assert_eq!(ex.len(), 5);
+        assert_eq!(ex[0].profile.as_ref().map(|(k, v)| (k.as_str(), v.as_str())), Some(("name", "许一")));
+        assert_eq!(ex[1].profile.as_ref().map(|(k, v)| (k.as_str(), v.as_str())), Some(("occupation", "质量管理")));
+        assert_eq!(ex[2].profile.as_ref().map(|(k, v)| (k.as_str(), v.as_str())), Some(("occupation", "写代码")));
+        assert_eq!(ex[3].profile.as_ref().map(|(k, v)| (k.as_str(), v.as_str())), Some(("occupation", "QA")));
+        assert_eq!(ex[4].profile.as_ref().map(|(k, v)| (k.as_str(), v.as_str())), Some(("tools", "Figma 画图")));
+    }
+
+    #[test]
+    fn profile_and_direct_statement_share_one_candidate() {
+        // 「我在用 Cursor」：DIRECT_PATTERNS（context fact）与画像规则同时
+        // 命中——一条 candidate 双出口，不是两条。
+        let evs = vec![event(1, "我在用 Cursor")];
+        let ex = RuleExtractor.extract(&SessionDigest {
+            user_utterances: &evs,
+            active_facts: &[],
+        });
+        assert_eq!(ex.len(), 1);
+        assert_eq!(ex[0].category, Category::Context);
+        assert_eq!(ex[0].profile.as_ref().map(|(k, v)| (k.as_str(), v.as_str())), Some(("tools", "Cursor")));
+    }
+
+    #[test]
+    fn profile_only_utterance_still_yields_a_candidate() {
+        // 「我叫许一」不在 DIRECT_PATTERNS 里：画像命中也要出 candidate，
+        // facts 留痕 + 画像落库都要发生。
+        let evs = vec![event(1, "我叫许一")];
+        let ex = RuleExtractor.extract(&SessionDigest {
+            user_utterances: &evs,
+            active_facts: &[],
+        });
+        assert_eq!(ex.len(), 1);
+        assert_eq!(ex[0].category, Category::Context);
+        assert_eq!(ex[0].profile.as_ref().map(|(k, v)| (k.as_str(), v.as_str())), Some(("name", "许一")));
+    }
+
+    #[test]
+    fn city_requires_wordlist_hit() {
+        let evs = vec![
+            event(1, "我在杭州工作"),
+            event(2, "我在 Cursor 上写代码"),
+        ];
+        let ex = RuleExtractor.extract(&SessionDigest {
+            user_utterances: &evs,
+            active_facts: &[],
+        });
+        let by_id = |id: i64| ex.iter().find(|c| c.source_event_id == Some(id));
+        assert_eq!(
+            by_id(1).unwrap().profile.as_ref().map(|(k, v)| (k.as_str(), v.as_str())),
+            Some(("city", "杭州"))
+        );
+        // 非城市词不进 city；「没命中任何规则就不出 candidate」是既有语义，
+        // 出了 candidate 也不许带画像。
+        assert!(by_id(2).map(|c| c.profile.is_some()) != Some(true), "非城市词不进 city");
+    }
+
+    #[test]
+    fn name_false_positives_are_rejected() {
+        let evs = vec![
+            event(1, "我叫你放心"),      // 指代不是自称
+            event(2, "叫我阿盆就行"),    // 给阿盆起名
+            event(3, "我叫王长征就是不服"),
+        ];
+        let ex = RuleExtractor.extract(&SessionDigest {
+            user_utterances: &evs,
+            active_facts: &[],
+        });
+        let by_id = |id: i64| ex.iter().find(|c| c.source_event_id == Some(id));
+        assert!(by_id(1).map(|c| c.profile.is_some()) != Some(true), "「我叫你」不是自我介绍");
+        assert!(by_id(2).map(|c| c.profile.is_some()) != Some(true), "阿盆是阿盆不是用户");
+        assert!(by_id(3).map(|c| c.profile.is_some()) != Some(true), "超长值不是姓名");
+    }
+
+    #[test]
+    fn corrections_carry_no_profile() {
+        let evs = vec![event(1, "说错了，其实我叫李四")];
+        let ex = RuleExtractor.extract(&SessionDigest {
+            user_utterances: &evs,
+            active_facts: &[],
+        });
+        assert!(ex[0].is_correction);
+        assert_eq!(ex[0].profile, None, "更正句不抽画像（宁漏勿误）");
+    }
+
+    #[test]
+    fn boundary_wins_over_profile() {
+        let evs = vec![event(1, "别再问我在用什么工具了")];
+        let ex = RuleExtractor.extract(&SessionDigest {
+            user_utterances: &evs,
+            active_facts: &[],
+        });
+        assert_eq!(ex[0].category, Category::Boundary);
+        assert_eq!(ex[0].profile, None);
+    }
+
+    #[test]
+    fn rule_candidates_are_sourced_rule() {
+        let evs = vec![event(1, "我叫许一")];
+        let ex = RuleExtractor.extract(&SessionDigest {
+            user_utterances: &evs,
+            active_facts: &[],
+        });
+        assert_eq!(ex[0].source, "rule");
+    }
+
+    // ---- 模型层画像（plan-user-profile.md §3.2）----
+
     #[test]
     fn normalization_strips_punct_and_case() {
         assert_eq!(normalize("我喜欢，雨天！"), normalize("我喜欢雨天"));
@@ -444,6 +697,28 @@ mod tests {
         let evs = vec![event(1, "我喜欢雨天")];
         assert!(parse_candidates("好的，以下是候选事实：……", &evs).is_none());
         assert!(parse_candidates("", &evs).is_none());
+    }
+
+    #[test]
+    fn parses_model_profile_field_with_whitelist_gate() {
+        let evs = vec![event(1, "我叫许一，做 QA"), event(2, "我的年薪是五十万")];
+        let reply = r#"[
+            {"idx":0,"fact":"用户叫许一","category":"context","confidence":0.8,"correction":false,"profile":{"key":"name","value":"许一"}},
+            {"idx":1,"fact":"用户谈到了收入","category":"context","confidence":0.9,"correction":false,"profile":{"key":"income","value":"50w"}}
+        ]"#;
+        let parsed = parse_candidates(reply, &evs).unwrap();
+        assert_eq!(parsed[0].profile.as_ref().map(|(k, v)| (k.as_str(), v.as_str())), Some(("name", "许一")));
+        // 白名单外的 key（income）静默丢弃——candidate 本身保留，画像不落。
+        assert_eq!(parsed[1].profile, None);
+        assert_eq!(parsed[0].source, "model");
+    }
+
+    #[test]
+    fn model_profile_empty_value_is_dropped() {
+        let evs = vec![event(1, "我在一家公司上班")];
+        let reply = r#"[{"idx":0,"fact":"用户有工作","category":"context","correction":false,"profile":{"key":"occupation","value":"  "}}]"#;
+        let parsed = parse_candidates(reply, &evs).unwrap();
+        assert_eq!(parsed[0].profile, None);
     }
 
     #[test]

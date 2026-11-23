@@ -203,6 +203,20 @@ fn apply_candidates(
             continue; // correction with no target: 宁漏勿误, skip
         }
 
+        // 画像出口（plan-user-profile.md §3.4）：带 profile 的 candidate 在
+        // facts 照旧落库的同时写 user_profile——一份抽取两个出口。白名单/
+        // manual 保护/历史归档都在 profile::apply 里，这里不重复实现。
+        if let Some((key, value)) = &cand.profile {
+            crate::memory::profile::apply(
+                conn,
+                key,
+                value,
+                cand.source,
+                cand.source_event_id,
+                cand.confidence,
+            )?;
+        }
+
         // Stage ③: merge. Normalized exact match bumps confidence instead of
         // inserting a duplicate.
         let norm = super::extract::normalize(&cand.content);
@@ -472,6 +486,83 @@ mod tests {
         assert_eq!(raw, 1);
     }
 
+    // ---- 用户画像（plan-user-profile.md §3）----
+
+    #[test]
+    fn profile_candidates_write_both_facts_and_user_profile() {
+        let _guard = clock::pinned("2026-11-18T12:00:00Z");
+        let mut conn = mem();
+        say(&conn, "我叫许一");
+        say(&conn, "我在用 Ollama");
+        run_with_rules(
+            &mut conn,
+            &Options { trigger: "manual", window_start: START, window_end: END },
+        )
+        .unwrap();
+
+        // 出口一：facts 照旧落库（事件性留痕）。
+        let facts: i64 = conn
+            .query_row("SELECT COUNT(*) FROM facts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(facts, 2);
+        // 出口二：画像落库。
+        let rows = crate::memory::profile::get_all(&conn).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].key, "name");
+        assert_eq!(rows[0].value, "许一");
+        assert_eq!(rows[0].source, "rule");
+        assert_eq!(rows[1].key, "tools");
+    }
+
+    #[test]
+    fn q4_interception_covers_profile_extraction() {
+        use crate::onboarding::{apply_answers, SubmitAnswer};
+
+        let _guard = clock::pinned("2026-11-18T12:00:00Z");
+        let mut conn = mem();
+        apply_answers(
+            &conn,
+            &[SubmitAnswer {
+                question: "q4".into(),
+                answer: "体检报告".into(),
+                skipped: false,
+            }],
+        )
+        .unwrap();
+
+        say(&conn, "我叫许一，上周体检报告有问题");
+        run_with_rules(
+            &mut conn,
+            &Options { trigger: "manual", window_start: START, window_end: END },
+        )
+        .unwrap();
+        let profile: i64 = conn
+            .query_row("SELECT COUNT(*) FROM user_profile", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(profile, 0, "不准记录的内容连画像也不许进");
+    }
+
+    #[test]
+    fn manual_profile_survives_consolidate_extraction() {
+        let _guard = clock::pinned("2026-11-18T12:00:00Z");
+        let mut conn = mem();
+        // 用户先在工具页亲口写了称呼。
+        crate::memory::profile::apply(&conn, "name", "Jack", "manual", None, 1.0).unwrap();
+        say(&conn, "我叫许一");
+        run_with_rules(
+            &mut conn,
+            &Options { trigger: "manual", window_start: START, window_end: END },
+        )
+        .unwrap();
+        let rows = crate::memory::profile::get_all(&conn).unwrap();
+        assert_eq!(rows[0].value, "Jack", "manual 值不被自动抽取覆盖");
+        // facts 侧不受影响——两个出口是独立的。
+        let facts: i64 = conn
+            .query_row("SELECT COUNT(*) FROM facts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(facts, 1);
+    }
+
     #[test]
     fn error_rolls_back_and_keeps_events_unconsumed() {
         let _guard = clock::pinned("2026-11-18T12:00:00Z");
@@ -488,6 +579,8 @@ mod tests {
                     confidence: 0.7,
                     source_event_id: Some(999_999),
                     is_correction: false,
+                    profile: None,
+                    source: "rule",
                 }]
             }
         }
