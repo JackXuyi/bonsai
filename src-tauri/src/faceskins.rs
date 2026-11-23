@@ -382,6 +382,7 @@ mod tests {
         assert!(validate_skin_id(&m.id).is_ok());
         assert!(m.slots.is_empty());
 
+        std::thread::sleep(std::time::Duration::from_millis(2));
         let m2 = create_inner(&base, "第二套").unwrap();
         let all = list_inner(&base).unwrap();
         assert_eq!(all.len(), 2);
