@@ -461,6 +461,72 @@ fn plan_confirm_gate(mode: &str) -> bool {
     true
 }
 
+/// 某 task 当前最大审计行 id（关联真实审计行用，plan-planning §5.3）。
+/// `execute_audited` 在返回前同步落审计行；执行前后各取一次，只有 id 增大
+/// 才说明本次真的写了审计（模型臆造工具名 → find_owner 失败 → 无审计行，
+/// 不可误关联到上一次）。
+fn audit_max_id(conn: &rusqlite::Connection, task_id: &str) -> Option<i64> {
+    conn.query_row(
+        "SELECT MAX(id) FROM tool_calls WHERE task_id = ?1",
+        [task_id],
+        |r| r.get::<_, Option<i64>>(0),
+    )
+    .ok()
+    .flatten()
+}
+
+/// L2 状态桥（plan-planning §5.3）：把一次真实工具执行的结果回写 `plan_json`。
+///
+/// - `executed`：本轮第几次工具执行（1-based），按序号对齐计划步骤；
+/// - `outcome`：与 `TaskStep.status` 同域（`ok` / `denied` / `error`），映射为
+///   plan 语义 `done` / `skipped` / `failed`；
+/// - `audit_before`：执行前该 task 的审计行最大 id，用于确认本次审计行真实落库。
+///
+/// 无计划（单步任务）时零开销直接返回。按**执行序号**对齐（第 N 次执行 →
+/// 第 N 步），`tool_hint` 只是给模型/UI 的意图提示、不强制匹配——小模型换工具
+/// 是常态，强绑定会让计划步骤永远卡 pending。真实工具名通过 `tool_call_id`
+/// 关联审计行可查，不在这里双写。只有执行序号超出计划步数才算计划外，追加
+/// 一条 `tool_hint="*"` 的步骤，保证计划行数与真实审计一致——**不凭空造步骤**。
+fn bridge_plan_step(
+    store: &MemoryStore,
+    task_id: &str,
+    executed: usize,
+    call_name: &str,
+    outcome: &str,
+    audit_before: Option<i64>,
+) -> bool {
+    let Ok(conn) = lock_conn(store) else { return false; };
+    let Ok(Some(mut plan)) = db::plan_get(&conn, task_id) else { return false; };
+    let status = match outcome {
+        "ok" => "done",
+        "denied" => "skipped",
+        _ => "failed",
+    };
+    let after = audit_max_id(&conn, task_id);
+    let tool_call_id = match (audit_before, after) {
+        (_, Some(a)) if audit_before.map_or(true, |b| a > b) => Some(a),
+        _ => None,
+    };
+    let idx = executed.saturating_sub(1);
+    if idx < plan.steps.len() {
+        let step = &mut plan.steps[idx];
+        step.status = status.to_string();
+        step.attempts += 1;
+        step.tool_call_id = tool_call_id;
+    } else {
+        let seq = plan.steps.len() as i32;
+        plan.steps.push(db::PlanStep {
+            seq,
+            intent: format!("计划外调用：{call_name}"),
+            tool_hint: "*".into(),
+            status: status.to_string(),
+            attempts: 1,
+            tool_call_id,
+        });
+    }
+    db::plan_put(&conn, task_id, &plan).is_ok()
+}
+
 /// `AgentKit` → DeepSeek `tools[]`。skill 不进列表（提示注入、不可执行）；
 /// parameters 取 descriptor.detail 解析（MCP 的 detail 就是 inputSchema JSON；
 /// 解析失败 → None = 空参数表，执行期校验兜底）。
@@ -758,6 +824,15 @@ fn cloud_tool_loop(
             }
             let args_text = call.arguments.to_string();
             let t_tool = std::time::Instant::now();
+            // T3 状态桥：执行前记录审计水位，只有本次真的落了审计行才关联 id。
+            // 单步任务/无计划时 task_open=false，桥接读 plan_get 直接返回零开销。
+            let audit_before = if task_open.get() {
+                let tid = task.borrow().id.clone();
+                lock_conn(store).ok().and_then(|c| audit_max_id(&c, &tid))
+            } else {
+                None
+            };
+            let mut step_outcome = "ok";
             match crate::mcp_admin::execute_audited(store, kit, &call.name, call.arguments.clone()) {
                 Ok(out) => {
                     rec.tool_call(&call.name, &args_text, &out.full, "ok", None, t_tool.elapsed());
@@ -772,6 +847,7 @@ fn cloud_tool_loop(
                 }
                 Err(e) => {
                     let outcome = if e == "denied" { "denied" } else { "error" };
+                    step_outcome = outcome;
                     rec.tool_call(&call.name, &args_text, "", outcome, Some(&e), t_tool.elapsed());
                     // 失败事实回传给模型（脱敏后）——它可以说「查不到」，不许编造。
                     let masked = crate::agent_tools::mask_secrets(&e);
@@ -787,6 +863,11 @@ fn cloud_tool_loop(
                         t.steps.push(TaskStep { seq, tool: call.name.clone(), status: st });
                     }
                 }
+            }
+            // T3 状态桥：把真实执行结果回写 plan_json；task_step 事件形状不变（D6 消费）。
+            if task_open.get() {
+                let tid = task.borrow().id.clone();
+                bridge_plan_step(store, &tid, executed, &call.name, step_outcome, audit_before);
             }
             if let (Some(cb), true) = (on_task.as_deref_mut(), task_open.get()) {
                 let t = task.borrow();
@@ -2525,6 +2606,129 @@ mod tests {
         assert_eq!(out.reply, "这是最终答复。");
         let tasks = with_conn(&s, |conn| db::task_list(conn, 5).unwrap());
         assert!(tasks.is_empty(), "降级路径不产生 plan 任务行");
+    }
+
+    /// T3 状态桥用 kit：双工具都有 reply，保证 execute_audited 真的落审计行。
+    fn replied_dual_kit() -> crate::mcp_admin::AgentKit {
+        let mut a = crate::mcp::MockMcpProvider::with_tool("weather", "查天气", r#"{"type":"object"}"#);
+        a.replies.insert("weather".into(), "杭州今天多云 18 度".into());
+        let mut b = crate::mcp::MockMcpProvider::with_tool("notes", "记笔记", r#"{"type":"object"}"#);
+        b.replies.insert("notes".into(), "已记到笔记".into());
+        crate::mcp_admin::AgentKit {
+            providers: vec![Box::new(a), Box::new(b)],
+            gate: Box::new(crate::agent_tools::AutoAllowGate),
+            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
+            task_id: std::sync::Mutex::new(None),
+            prompt_trace: std::sync::Mutex::new(Vec::new()),
+            ..crate::mcp_admin::AgentKit::empty()
+        }
+    }
+
+    /// A3/A10（T3 状态桥）：计划内步骤执行后写 done + attempts + 真实审计行 id；
+    /// 计划外工具追加一条 status=done 的步骤，行数与审计一致，无凭空步骤。
+    #[test]
+    fn plan_step_bridge_marks_done_and_appends_out_of_plan_step() {
+        let s = mem();
+        let c = card();
+        let submit = tool_calls_reply(&[(
+            "submit_plan",
+            serde_json::json!({
+                "goal": "查天气记笔记",
+                "steps": [
+                    {"intent": "查杭州天气", "tool_hint": "weather"},
+                    {"intent": "记笔记", "tool_hint": "notes"}
+                ]
+            }),
+        )]);
+        // 计划轮 → 执行 weather（计划内，序号 0）→ notes（计划内，序号 1）
+        // → 再来一次 notes（计划外，超出 2 步）→ 最终作答。
+        let mut backend = cloud_backend(vec![
+            submit,
+            tool_calls_reply(&[("weather", serde_json::json!({}))]),
+            tool_calls_reply(&[("notes", serde_json::json!({}))]),
+            tool_calls_reply(&[("notes", serde_json::json!({}))]),
+            content_reply("都办好了。"),
+        ]);
+        let mut kit = replied_dual_kit();
+        chat_turn_with_kit(
+            &s, &mut backend, &c, "s-bridge", "先查下周三日程，再整理下载目录", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit,
+        )
+        .unwrap();
+
+        let tasks = with_conn(&s, |conn| db::task_list(conn, 5).unwrap());
+        let row = &tasks[0];
+        let plan = row.plan.as_ref().expect("plan_json 落库");
+        // 计划内两步：done / attempts=1 / tool_call_id 关联真实审计行。
+        assert_eq!(plan.steps.len(), 3, "计划外 notes 追加成第 3 步");
+        assert_eq!(plan.steps[0].status, "done");
+        assert_eq!(plan.steps[1].status, "done");
+        assert_eq!(plan.steps[0].attempts, 1);
+        let id0 = plan.steps[0].tool_call_id.expect("步 0 关联审计行");
+        let id1 = plan.steps[1].tool_call_id.expect("步 1 关联审计行");
+        assert!(id1 > id0, "审计行 id 按执行序递增");
+        // 计划外步骤：tool_hint=*、status=done、seq 为列表位置。
+        let extra = &plan.steps[2];
+        assert_eq!(extra.tool_hint, "*");
+        assert_eq!(extra.status, "done");
+        assert_eq!(extra.seq, 2);
+        assert!(extra.tool_call_id.is_some(), "计划外步骤也关联真实审计行");
+        // 行数与审计一致：3 步 = 3 条真实工具审计（submit_plan 不落审计）。
+        let audit_count = with_conn(&s, |conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM tool_calls WHERE task_id = ?1",
+                [&row.id],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+        });
+        assert_eq!(audit_count, 3, "计划/审计一一对应，无凭空步骤");
+    }
+
+    /// A3（T3 状态桥）：denied 步骤标 skipped，且没有审计行误关联。
+    #[test]
+    fn plan_step_bridge_marks_denied_as_skipped() {
+        let s = mem();
+        let c = card();
+        let submit = tool_calls_reply(&[(
+            "submit_plan",
+            serde_json::json!({
+                "goal": "查天气",
+                "steps": [{"intent": "查天气", "tool_hint": "weather"}]
+            }),
+        )]);
+        // Ask 档工具 + 无 UI 的 ask_gate → gate 直接 Deny → 审计行落
+        // denied（有 id），状态桥标 skipped。
+        let mut p = crate::mcp::MockMcpProvider::with_tool(
+            "weather", "查天气", r#"{"type":"object"}"#,
+        );
+        p.replies.insert("weather".into(), "杭州今天多云 18 度".into());
+        // with_tool 硬编码 Read 档；手动改写为 Ask 让它走 ask_gate。
+        p.tools[0].access = crate::agent_tools::ToolAccess::Ask;
+        let mut kit = crate::mcp_admin::AgentKit {
+            providers: vec![Box::new(p)],
+            gate: Box::new(crate::agent_tools::AutoAllowGate),
+            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(
+                std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None,
+            )),
+            task_id: std::sync::Mutex::new(None),
+            prompt_trace: std::sync::Mutex::new(Vec::new()),
+            ..crate::mcp_admin::AgentKit::empty()
+        };
+        let mut backend = cloud_backend(vec![
+            submit,
+            tool_calls_reply(&[("weather", serde_json::json!({}))]),
+            content_reply("没查成。"),
+        ]);
+        chat_turn_with_kit(
+            &s, &mut backend, &c, "s-bridge-deny", "帮我规划一下查天气", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit,
+        )
+        .unwrap();
+        let tasks = with_conn(&s, |conn| db::task_list(conn, 5).unwrap());
+        let plan = tasks[0].plan.as_ref().unwrap();
+        assert_eq!(plan.steps[0].status, "skipped", "denied → skipped");
+        assert_eq!(plan.steps[0].attempts, 1);
     }
 
     /// A2 协议层：单步任务零计划轮——第一次请求 tools[] 不含 submit_plan，

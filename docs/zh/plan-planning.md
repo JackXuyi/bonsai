@@ -360,9 +360,12 @@ ALTER TABLE tasks ADD COLUMN confirm_mode  TEXT NOT NULL DEFAULT 'auto'; -- D1: 
 | T | commit | 验证 | 备注 |
 |---|---|---|---|
 | T1 | `1a7a52f` | `cargo test --lib` 454 passed | schema v14 + 4 列读写；基线 452→454 |
-| T2 | 待提交 | `cargo test --lib` 462 passed；`plan_intent` 20 正/15 负全过 | 规划入口 + 计划轮 + D1 确认门 |
+| T2 | `4f4a116` | `cargo test --lib` 462 passed；`plan_intent` 20 正/15 负全过 | 规划入口 + 计划轮 + D1 确认门 |
+| T3 | 待提交 | `cargo test --lib` 464 passed | 步骤状态桥（done/skipped/failed + 审计 id 关联 + 计划外追加）|
 
 **T2 实现与设计的小偏差（不影响约束）**：计划轮在 `chat_with_tools` 的 msgs 尾部追加一条系统指令 user 消息（「只调用 submit_plan」），使模型明确协议；计划 msgs 用 `msgs.clone()`，不污染主循环消息序列。计划轮 HTTP 计入 `CLOUD_REQUEST_CAP`（不放大预算）。任务卡改为「计划成功即开卡」（原惰性开卡太晚，plan_json 需先有归属行），后续真实工具循环见 `task_open=true` 不再重复开卡。`submit_plan` 不落审计行（`execute_audited` 不认识它），只有真实工具审计关联 task。
+
+**T3 实现与设计的小偏差（不影响约束）**：§5.3 原文提到「不在 `tool_hint` 中算计划外」，实装改为**纯按执行序号对齐**（第 N 次执行 → 第 N 步）——`tool_hint` 仅作模型/UI 的意图提示，不强制匹配工具名。理由：小模型换工具是常态，强绑定会让计划步骤永久卡 pending、进度失真；真实工具名通过 `tool_call_id` 关联审计行可查，不双写。只有**执行序号超出计划步数**才算计划外并追加 `tool_hint="*"` 步骤。`execute_audited` 不返回审计行 id，状态桥用「执行前后查 `tool_calls` MAX(id)」关联，只有 id 增大才认（防臆造工具名时误关联上一次）。
 
 ---
 
