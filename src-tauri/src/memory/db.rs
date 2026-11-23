@@ -21,6 +21,7 @@ use super::clock;
 /// `user_profile`（身份 KV，key 白名单在 memory/profile.rs）+
 /// `user_profile_history`（被覆盖/删除的旧值归档）。画像 ≠ 事实：facts 是
 /// 事件性留痕，画像是可覆盖的身份快照，每轮固定注入 system prompt。
+///
 /// SCHEMA_VERSION = 12（2026-11-22）：任务卡外壳（plan-task-card v0.2 §8）——
 /// `tasks` 表（一次云端工具循环一行）+ `tool_calls.task_id` 关联列。
 /// 审计行不进 ACTIVITY_KINDS（自己陪自己防线的延伸）。
@@ -364,25 +365,33 @@ fn add_column_if_missing(
 ) -> rusqlite::Result<()> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let mut rows = stmt.query([])?;
+    let mut table_exists = false;
     while let Some(row) = rows.next()? {
+        table_exists = true;
         let name: String = row.get(1)?;
         if name == column {
             return Ok(());
         }
     }
+    // 表还不存在（PRAGMA 对缺失表返回零行）：跳过。紧接着的 SCHEMA 会按最新
+    // 定义把它建出来，列天然就在；硬 ALTER 只会报 "no such table"。
+    if !table_exists {
+        return Ok(());
+    }
     conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl};"))
 }
 
 /// Idempotent migrator. Handles:
-/// - fresh DB → full v2 schema;
+/// - fresh DB → full current schema;
 /// - v1 DB (scaffold-era, user_version 0 but tables exist) → in-place column
-///   additions + audit table (plan §4, "v1 旧库打开 → 升级 → 旧数据无损").
+///   additions + audit table (plan §4, "v1 旧库打开 → 升级 → 旧数据无损");
+/// - **stamped-but-incomplete DB** (user_version 已是最新但缺表) → 自愈。
+///
+/// 自愈这条是必须的：版本号只证明「迁移跑过」，不证明「表齐全」。2026-11-23
+/// 真机上出现过 user_version=13 而 `user_profile` 不存在的库（建表帧随 WAL
+/// 截断丢失，版本号已 checkpoint 落盘），旧实现的「版本够就 return」快路径
+/// 把它永久卡死，前端报 `no such table: user_profile`。
 pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
-    let version = user_version(conn)?;
-    if version >= SCHEMA_VERSION {
-        return Ok(());
-    }
-
     let has_events: bool = conn
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'events'",
@@ -393,33 +402,51 @@ pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
 
     if !has_events {
         conn.execute_batch(SCHEMA)?;
-    } else {
-        // v1 → v2: additive only, existing rows keep their defaults.
-        add_column_if_missing(conn, "events", "role", "TEXT")?;
-        add_column_if_missing(conn, "events", "session_id", "TEXT")?;
-        add_column_if_missing(conn, "events", "consumed", "INTEGER NOT NULL DEFAULT 0")?;
-        add_column_if_missing(conn, "facts", "confidence", "REAL NOT NULL DEFAULT 0.6")?;
-        add_column_if_missing(conn, "facts", "importance", "INTEGER NOT NULL DEFAULT 3")?;
-        add_column_if_missing(conn, "boundaries", "source_fact_id", "INTEGER REFERENCES facts(id)")?;
-        // SCHEMA uses IF NOT EXISTS everywhere, so re-running it only adds
-        // missing tables (consolidate_runs, mcp_servers) and indexes.
-        conn.execute_batch(SCHEMA)?;
-        // v7 → v8: audit columns for the agent tool pipeline (spec-s2).
-        add_column_if_missing(conn, "tool_calls", "params_summary", "TEXT")?;
-        add_column_if_missing(conn, "tool_calls", "result_status", "TEXT")?;
-        add_column_if_missing(conn, "tool_calls", "prompt_trace", "TEXT")?;
-        add_column_if_missing(conn, "tool_calls", "remote", "INTEGER DEFAULT 0")?;
-        // v9 trace tables + summary columns (spec-s8; additive on DBs that
-        // already created the tables in an earlier v9 build).
-        add_column_if_missing(conn, "turn_trace", "user_text", "TEXT")?;
-        add_column_if_missing(conn, "turn_trace", "reply_text", "TEXT")?;
-        // v11: step 级当前输入（user message 不在 system prompt 里，trace 盲点）
-        add_column_if_missing(conn, "trace_steps", "user_text", "TEXT")?;
-        // v12: 任务卡外壳（tasks 表由 SCHEMA 的 IF NOT EXISTS 建出）。
-        add_column_if_missing(conn, "tool_calls", "task_id", "TEXT")?;
+        set_user_version(conn, SCHEMA_VERSION)?;
+        return Ok(());
     }
 
-    set_user_version(conn, SCHEMA_VERSION)?;
+    // 已有库：**先补列再跑 SCHEMA**——SCHEMA 末尾的 idx_events_unconsumed
+    // 引用 events.consumed，v1 库里没这列时先建索引会直接报错。
+    // 不看版本号决定要不要跑：版本号只证明「迁移跑过」，不证明「表齐全」，
+    // 而两步都是幂等的（PRAGMA table_info 探测 / CREATE IF NOT EXISTS），
+    // 每次打开跑一遍就是自愈本身，代价只是十几条元数据检查。
+    add_column_if_missing(conn, "events", "role", "TEXT")?;
+    add_column_if_missing(conn, "events", "session_id", "TEXT")?;
+    add_column_if_missing(conn, "events", "consumed", "INTEGER NOT NULL DEFAULT 0")?;
+    add_column_if_missing(conn, "facts", "confidence", "REAL NOT NULL DEFAULT 0.6")?;
+    add_column_if_missing(conn, "facts", "importance", "INTEGER NOT NULL DEFAULT 3")?;
+    add_column_if_missing(conn, "boundaries", "source_fact_id", "INTEGER REFERENCES facts(id)")?;
+
+    // IF NOT EXISTS 的 SCHEMA：补出所有缺失的表、索引（含 v13 的画像表），
+    // 也顺手修好「版本号够但缺表」的死局。位置必须在下面的补列之前——
+    // turn_trace/trace_steps 在 v7 库里还不存在，ALTER 会报 no such table。
+    conn.execute_batch(SCHEMA)?;
+
+    // v7 → v8: audit columns for the agent tool pipeline (spec-s2).
+    add_column_if_missing(conn, "tool_calls", "params_summary", "TEXT")?;
+    add_column_if_missing(conn, "tool_calls", "result_status", "TEXT")?;
+    add_column_if_missing(conn, "tool_calls", "prompt_trace", "TEXT")?;
+    add_column_if_missing(conn, "tool_calls", "remote", "INTEGER DEFAULT 0")?;
+    // v9 trace tables + summary columns (spec-s8; additive on DBs that
+    // already created the tables in an earlier v9 build).
+    add_column_if_missing(conn, "turn_trace", "user_text", "TEXT")?;
+    add_column_if_missing(conn, "turn_trace", "reply_text", "TEXT")?;
+    // v11: step 级当前输入（user message 不在 system prompt 里，trace 盲点）
+    add_column_if_missing(conn, "trace_steps", "user_text", "TEXT")?;
+    // v12: 任务卡外壳（tasks 表由 SCHEMA 的 IF NOT EXISTS 建出）。
+    add_column_if_missing(conn, "tool_calls", "task_id", "TEXT")?;
+
+    set_user_version_if_behind(conn)?;
+    Ok(())
+}
+
+/// 表面上是一个 `if`，实则守住「版本号只增不减」：表结构由幂等步骤补齐，
+/// 版本号只是记录，落后时才写回（也避免无谓的 PRAGMA 写入）。
+fn set_user_version_if_behind(conn: &Connection) -> rusqlite::Result<()> {
+    if user_version(conn)? < SCHEMA_VERSION {
+        set_user_version(conn, SCHEMA_VERSION)?;
+    }
     Ok(())
 }
 
@@ -2299,6 +2326,41 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].content, "legacy row");
         migrate(&conn).unwrap();
+    }
+
+    #[test]
+    fn migrate_heals_a_db_stamped_at_current_version_without_tables() {
+        // 真机事故（2026-11-23）：user_version 已经 checkpoint 到 13，但建表
+        // 帧随 WAL 截断丢失 → 旧实现「版本够就 return」永久卡死，前端报
+        // "no such table: user_profile"。migrate 必须自己把表补回来。
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL,
+                 kind TEXT NOT NULL, content TEXT NOT NULL, role TEXT, session_id TEXT,
+                 consumed INTEGER NOT NULL DEFAULT 0);
+             PRAGMA user_version = 13;",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO events (ts, kind, content) VALUES ('2026-11-23T00:00:00Z', 'chat', 'kept')",
+            [],
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        for table in ["user_profile", "user_profile_history"] {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    [table],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "{table} 必须被自愈补出来");
+        }
+        assert_eq!(all_events(&conn).len(), 1, "旧数据不动");
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
     }
 
     #[test]
