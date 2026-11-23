@@ -49,6 +49,24 @@
 //! 能力。真实一周是几百条对话、几十条事实，所以 S0 的「精确片段 100% /
 //! 纯指代 50%」也有同样的虚高成分。两张表不可混比，只作演进记录。
 //!
+//! S2（2026-11-23，FTS5 索引 + `beyond` 跨时间腿，语料同上 + 4 条 90 天前
+//! 的事实）：
+//!
+//! ```text
+//! 问法          用例  腿纯净  命中  走兜底
+//! 精确片段      12    100%    100%  0%
+//! 字面自然句    12    100%    100%  0%
+//! 口语指代句    12    100%    100%  0%
+//! 近义改写      12    0%      8%    83%
+//! 纯指代        4     0%      0%    0%
+//! 久远事实      4     100%    100%  50%
+//! ```
+//!
+//! S2 换来的唯一大项是**久远事实 0% → 100%**：默认窗口只有最近 7 天，
+//! 「三个月前说过我对花生过敏」原先压根搜不到（不是排序问题，是没有通路）。
+//! 近义改写从 0 变成 1/12 是索引的 1 字 token 蹭到的，不改变「语义缺口仍在」
+//! 的结论——embedding 的触发条件仍然锚在这一行。
+//!
 //! ## 三处归因（S1 修复后仍是问题的）
 //! 1. **近义改写 0%**：与原文无公共二字切片，任何 LIKE 腿都命中不了。
 //!    这是 embedding **唯一**的正当靶子——83% 的用例会先降级到整窗再失败，
@@ -196,6 +214,17 @@ const ANAPHORA: [(&str, usize); 4] = [
     ("之前提过的那件事", 3),
 ];
 
+/// 久远事实（S2 新增的第六类）：事实只存在 90 天前，默认窗口（最近 7 天）
+/// 里根本没有它。这类问法唯一可能的通路是索引跨时间召回——`beyond` 腿
+/// 上线前它是 0%，上线后应当基本全中，这就是 S2 的收益量尺。
+/// (问法, 事实原文, 期望证据词)
+const LONG_AGO: [(&str, &str, &str); 4] = [
+    ("我对花生过敏吗", "用户对花生过敏，外出点餐要避开", "花生过敏"),
+    ("我的车牌号后四位是什么", "用户车牌尾号是 8823", "8823"),
+    ("我用的什么显示器", "用户用 27 寸 4K 显示器，外接一台", "显示器"),
+    ("我家猫叫什么名字", "用户养的猫叫团子，三岁", "团子"),
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Class {
     /// 问题本身就是原文片段——链路能力上限。
@@ -208,15 +237,18 @@ pub enum Class {
     Synonym,
     /// 只剩指代——窗口兜底与事实行上限。
     Anaphora,
+    /// 事实只在 90 天前——默认窗口之外，只有索引跨时间召回能救。
+    LongAgo,
 }
 
 impl Class {
-    pub const ALL: [Class; 5] = [
+    pub const ALL: [Class; 6] = [
         Class::ExactSlice,
         Class::Literal,
         Class::Colloquial,
         Class::Synonym,
         Class::Anaphora,
+        Class::LongAgo,
     ];
 
     pub fn label(self) -> &'static str {
@@ -226,6 +258,7 @@ impl Class {
             Class::Colloquial => "口语指代句",
             Class::Synonym => "近义改写",
             Class::Anaphora => "纯指代",
+            Class::LongAgo => "久远事实",
         }
     }
 }
@@ -240,20 +273,23 @@ pub struct Outcome {
     pub pure_leg: bool,
     pub hit_lines: bool,
     pub hit_facts: bool,
+    /// S2：命中来自窗口外的 `beyond` 腿（跨时间索引召回）。
+    pub hit_beyond: bool,
     pub degraded: bool,
 }
 
 impl Outcome {
     pub fn hit(&self) -> bool {
-        self.hit_lines || self.hit_facts
+        self.hit_lines || self.hit_facts || self.hit_beyond
     }
 
     fn source(&self) -> &'static str {
-        match (self.hit_lines, self.hit_facts) {
-            (true, true) => "对话+事实",
-            (true, false) => "仅对话行",
-            (false, true) => "仅事实行",
-            (false, false) => "未命中",
+        match (self.hit_lines, self.hit_facts, self.hit_beyond) {
+            (false, false, true) => "仅窗口外(索引)",
+            _ if self.hit_lines && self.hit_facts => "对话+事实",
+            _ if self.hit_lines => "仅对话行",
+            _ if self.hit_facts => "仅事实行",
+            _ => "未命中",
         }
     }
 }
@@ -309,7 +345,7 @@ impl Report {
     /// 人读的表格 + 失败明细（`--nocapture` 看）。
     pub fn render(&self) -> String {
         let mut out = String::new();
-        out.push_str("S0/S1 检索基线 · memory_search 端到端（pinned 2026-12-01，语料见 seed）\n");
+        out.push_str("S0/S1/S2 检索基线 · memory_search 端到端（pinned 2026-12-01，语料见 seed）\n");
         out.push_str(&format!(
             "{}{}{}{}{}\n",
             pad("问法", 14),
@@ -369,6 +405,8 @@ const NOISE_ROWS: usize = 60;
 /// 噪声事实 40 条（≈ 一周 5–8 条/天）。`MAX_FACT_ROWS = 10`，所以整窗兜底
 /// 只能带回最近 10 条噪声——「把整个窗口倒出来」在真实事实密度下并不成立。
 const NOISE_FACTS: usize = 40;
+/// 久远事实的时间戳：90 天前，稳稳在「最近一周」窗口之外。
+const LONG_AGO_TS: &str = "2026-09-01T03:00:00+00:00";
 
 /// 建库 + 播种：每个话题一条用户对话（原文）+ 一条事实（consolidate 的
 /// 产物），再压 60 条更晚的日常噪声。
@@ -402,6 +440,14 @@ pub fn seed(conn: &Connection) -> rusqlite::Result<()> {
             rusqlite::params![NOISE_EVENT_TS, format!("日常占位事实第{i}条")],
         )?;
     }
+    // 久远事实：只存在 90 天前（默认窗口之外）。`beyond` 腿没上线时，
+    // 这四条一个字都搜不到——这就是 S2 的收益量尺。
+    for (_, fact, _) in LONG_AGO {
+        conn.execute(
+            "INSERT INTO facts (ts, content, confidence) VALUES (?1, ?2, 0.8)",
+            rusqlite::params![LONG_AGO_TS, fact],
+        )?;
+    }
     Ok(())
 }
 
@@ -422,6 +468,9 @@ pub fn run(conn: &Connection) -> Report {
     for (question, topic) in ANAPHORA {
         outcomes.push(measure(conn, Class::Anaphora, question, topic));
     }
+    for (question, fact, expect) in LONG_AGO {
+        outcomes.push(measure_against(conn, Class::LongAgo, question, expect, fact));
+    }
 
     let scores = Class::ALL
         .iter()
@@ -440,22 +489,35 @@ pub fn run(conn: &Connection) -> Report {
 }
 
 /// 单例测量：切词（线上同一份实现）→ 腿纯净判定 → 端到端召回。
-/// 腿纯净只看**目标话题**的对话原文——拿别的话题算命中会把分数哄高。
+/// 腿纯净只看**目标话题**的原文——拿别的话题算命中会把分数哄高。
 fn measure(conn: &Connection, class: Class, question: &'static str, topic: usize) -> Outcome {
     let target = &TOPICS[topic];
+    measure_against(conn, class, question, target.expect, target.utterance)
+}
+
+/// 通用版：`expect` 是要在召回结果里看到的证据词，`doc` 是腿纯净判定的
+/// 比对原文（久远事实类没有「对话原文」，用事实原文本身）。
+fn measure_against(
+    conn: &Connection,
+    class: Class,
+    question: &'static str,
+    expect: &str,
+    doc: &str,
+) -> Outcome {
     let today = super::clock::now_local().date_naive();
     let phrase = memory_search::parse_window(question, today)
         .map(|(_, _, label)| label)
         .unwrap_or_default();
     let legs = memory_search::legs(question, &phrase);
-    let pure_leg = legs.iter().any(|k| target.utterance.contains(k.as_str()));
+    let pure_leg = legs.iter().any(|k| doc.contains(k.as_str()));
 
     let recall = memory_search::recall(conn, question);
     let hit_lines = recall
         .lines
         .iter()
-        .any(|(_, _, text)| text.contains(target.expect));
-    let hit_facts = recall.facts.iter().any(|f| f.contains(target.expect));
+        .any(|(_, _, text)| text.contains(expect));
+    let hit_facts = recall.facts.iter().any(|f| f.contains(expect));
+    let hit_beyond = recall.beyond.iter().any(|(_, text)| text.contains(expect));
 
     Outcome {
         class,
@@ -464,6 +526,7 @@ fn measure(conn: &Connection, class: Class, question: &'static str, topic: usize
         pure_leg,
         hit_lines,
         hit_facts,
+        hit_beyond,
         degraded: recall.degraded,
     }
 }
@@ -494,7 +557,7 @@ mod tests {
         // 结构自检：每个用例都必须落到某一类里，总数对得上。
         assert_eq!(
             report.outcomes.len(),
-            TOPICS.len() * 4 + ANAPHORA.len(),
+            TOPICS.len() * 4 + ANAPHORA.len() + LONG_AGO.len(),
             "用例总数"
         );
         assert_eq!(
@@ -524,15 +587,17 @@ mod tests {
             .iter()
             .map(|c| (*c, report.score(*c).hits))
             .collect();
-        // 2026-11-23 S1 后测得（用例数 12/12/12/12/4）。只许上调，永不为了
-        // 「让测试过」而下调。近义改写刻意留 0——它上移才是 embedding 值得
-        // 做的证据；纯指代留 0——它得靠 facts 常驻注入或上下文，不靠腿。
-        let floor: [(Class, usize); 5] = [
+        // 2026-11-23 S2 后测得（用例数 12/12/12/12/4/4）。只许上调，永不为了
+        // 「让测试过」而下调。近义改写只剩 1 条——索引的 1 字 token 让它蹭到
+        // 一条，但语义缺口仍在（其余 11 条照旧失败）；纯指代留 0——它得靠
+        // facts 常驻注入或上下文，不靠检索腿。
+        let floor: [(Class, usize); 6] = [
             (Class::ExactSlice, 12),
             (Class::Literal, 12),
             (Class::Colloquial, 12),
-            (Class::Synonym, 0),
+            (Class::Synonym, 1),
             (Class::Anaphora, 0),
+            (Class::LongAgo, 4),
         ];
         for ((class, got), (_, need)) in hits.iter().zip(floor.iter()) {
             assert!(*got >= *need, "{:?} 命中数从基线 {need} 掉到 {got}", class);

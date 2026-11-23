@@ -493,7 +493,14 @@ pub struct Recall {
     /// 关键词腿全落空后退回整窗扫描（S1 三级降级）。模型侧需要知道
     /// 这份结果「可能不完整」而不是「精确匹配为空」。
     pub degraded: bool,
+    /// 窗口外命中（S2）：`(标记, 内容)`，标记形如 `06-12 事实`。
+    /// 默认窗口只有最近 7 天，三个月前说过的事实原先压根搜不到——这条腿
+    /// 用索引按相关度跨时间取，只收长期记忆（事实/偏好/边界），不翻旧对话。
+    pub beyond: Vec<(String, String)>,
 }
+
+/// 跨时间补腿的条数上限：它是「补充」，不能把窗口内的结果挤下去。
+const MAX_BEYOND_ROWS: usize = 4;
 
 fn weekday_cn(w: Weekday) -> &'static str {
     match w {
@@ -560,9 +567,61 @@ fn clip(s: &str, n: usize) -> String {
 /// The deterministic recall: dialogue events + facts in the parsed window.
 pub fn recall(conn: &Connection, query: &str) -> Recall {
     let today = clock::now_local().date_naive();
-    let (start, end, phrase) = parse_window(query, today).unwrap_or_else(|| fallback_window(today));
+    let parsed = parse_window(query, today);
+    let has_date_phrase = parsed.is_some();
+    let (start, end, phrase) = parsed.unwrap_or_else(|| fallback_window(today));
     let legs = legs(query, &phrase);
-    recall_with_keywords(conn, start, end, &legs)
+    let mut out = recall_with_keywords(conn, start, end, &legs);
+    // 用户**没有**指定日期时，才跨时间补腿：给了「上周/11月18日」就是在
+    // 问那个窗口里的事，这时候塞进三个月前的事实只会答非所问。
+    if !has_date_phrase {
+        let start_iso = iso_pair(start, end).0;
+        out.beyond = beyond_window(conn, query, &start_iso, &out);
+    }
+    out
+}
+
+/// 窗口外的长期记忆（S2）。两条路径：
+///
+/// - 有内容词 → 走索引按相关度全库找，只留窗口之前的行。这是「三个月前
+///   说过我对花生过敏」唯一能被想起的通路（默认窗口只有 7 天）。
+/// - 没有内容词（「还记得吗」）→ 给出最该被想起的几条事实
+///   （importance × confidence × decay），比把最近 60 条对话整段倒出来
+///   有意义——后者是噪声，模型只能瞎猜。
+fn beyond_window(
+    conn: &Connection,
+    query: &str,
+    window_start_iso: &str,
+    out: &Recall,
+) -> Vec<(String, String)> {
+    let rows = if crate::memory::index::has_tokens(query) {
+        crate::memory::db::search(conn, query, 16, true).unwrap_or_default()
+    } else {
+        crate::memory::db::salient_facts(conn, MAX_BEYOND_ROWS).unwrap_or_default()
+    };
+    let mut out_rows = Vec::new();
+    for hit in rows {
+        // 长期记忆才跨时间翻；旧对话行只在窗口里看（跨时间翻对话噪声太大）。
+        if hit.kind == "event" || hit.ts.as_str() >= window_start_iso {
+            continue;
+        }
+        if out.facts.iter().any(|f| f == &hit.content) {
+            continue;
+        }
+        if out_rows.iter().any(|(_, c): &(String, String)| c == &hit.content) {
+            continue;
+        }
+        let kind = match hit.kind.as_str() {
+            "preference" => "偏好",
+            "boundary" => "边界",
+            _ => "事实",
+        };
+        out_rows.push((format!("{} {}", local_stamp(&hit.ts), kind), hit.content));
+        if out_rows.len() >= MAX_BEYOND_ROWS {
+            break;
+        }
+    }
+    out_rows
 }
 
 /// Explicit date-window scan: no keyword legs, the whole window. The caller
@@ -656,7 +715,13 @@ fn scan(conn: &Connection, start: NaiveDate, end: NaiveDate, kws: &[String]) -> 
         facts.reverse();
     }
 
-    Recall { window_label: window_label(start, end), lines, facts, degraded: false }
+    Recall {
+        window_label: window_label(start, end),
+        lines,
+        facts,
+        degraded: false,
+        beyond: Vec::new(),
+    }
 }
 
 impl Recall {
@@ -674,6 +739,12 @@ impl Recall {
         for f in &self.facts {
             out.push_str(&format!("【记忆】{}\n", clip(f, line_chars)));
         }
+        if !self.beyond.is_empty() {
+            out.push_str("【更早的记忆】（窗口外，按相关度）\n");
+            for (tag, content) in &self.beyond {
+                out.push_str(&format!("[{}] {}\n", tag, clip(content, line_chars)));
+            }
+        }
         out
     }
 
@@ -681,7 +752,7 @@ impl Recall {
     /// Deliberately NOT JSON: the consumer is the 2B model reading prose —
     /// escaped JSON hurts more than the fixed `[ts who] text` line shape.
     fn summary(&self) -> String {
-        if self.lines.is_empty() && self.facts.is_empty() {
+        if self.lines.is_empty() && self.facts.is_empty() && self.beyond.is_empty() {
             return format!("{}没有找到对话记录。", self.window_label);
         }
         crate::agent_tools::clip_chars(&self.render(SUMMARY_LINE_CHARS), SUMMARY_TOTAL_CHARS)
@@ -695,6 +766,10 @@ impl Recall {
             "dialogue_count": self.lines.len(),
             "fact_count": self.facts.len(),
             "degraded": self.degraded,
+            "beyond": self.beyond.iter().map(|(tag, text)| serde_json::json!({
+                "tag": tag,
+                "text": text,
+            })).collect::<Vec<_>>(),
             "lines": self.lines.iter().map(|(ts, who, text)| serde_json::json!({
                 "ts": ts,
                 "who": who,

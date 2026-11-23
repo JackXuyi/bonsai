@@ -15,6 +15,7 @@ pub mod db;
 pub mod eval_recall;
 pub mod eval;
 pub mod extract;
+pub mod index;
 pub mod overview;
 pub mod profile;
 pub mod scheduler;

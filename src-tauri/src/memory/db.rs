@@ -17,6 +17,11 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use super::clock;
 
+/// SCHEMA_VERSION = 16（2026-11-23）：检索索引（S2，见 `memory/index.rs`）——
+/// `search_docs`（自建 2-gram 的检索文档）+ `search_fts`（FTS5 unicode61，
+/// 外部内容指向 search_docs）+ `search_sync`（增量水位线）+ 源表删除级联
+/// 触发器。**不用 trigram**：实测对 2 字中文零命中，而中文检索单位就是 2 字词。
+///
 /// SCHEMA_VERSION = 15（2026-11-23）：上下文管理（docs/zh/plan-context.md §5）——
 /// `sessions`（会话索引：标题/时间/归档/摘要指针）+ `events(session_id,id)`
 /// 索引（多会话后每个会话都要查，从「可有可无」变成「必须有」）+
@@ -45,7 +50,7 @@ use super::clock;
 /// EXISTS 不会给已有表加列；v9→v9 不触发 migrate，INSERT 带 user_text 直接
 /// 报 "table turn_trace has no column named user_text"。教训：改 SCHEMA 必
 /// 须同时 bump 此版本号。
-pub(crate) const SCHEMA_VERSION: i64 = 15;
+pub(crate) const SCHEMA_VERSION: i64 = 16;
 
 /// 不进会话列表的保留 session id：主动搭话（bubble 照旧实时显示，但不占
 /// 用户能切换的对话窗口）。sessions 里**永不建行**（plan-context D6）。
@@ -393,9 +398,54 @@ CREATE TABLE IF NOT EXISTS trace_steps (
 );
 CREATE INDEX IF NOT EXISTS idx_trace_steps_turn ON trace_steps(turn_id, seq);
 
--- TODO(vector): vector index for hybrid retrieval (embeddings + time decay).
--- No embedding column yet — schema migration waits for the sqlite-vec vs
--- JSON decision so v1→v2→v3 stay cheap (plan §7).
+-- 检索索引（v16，S2，见 memory/index.rs）：正文 → 空格分隔 2-gram 存 bigrams，
+-- 再用 unicode61（按空格切）建 FTS5。**不是 trigram**——trigram 对 2 字中文
+-- 零命中（index.rs 的用例把这个结论钉住了），而中文的检索单位就是 2 字词。
+-- body 存原文，方便 /trace 与调试；检索只走 bigrams。
+CREATE TABLE IF NOT EXISTS search_docs (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind    TEXT NOT NULL,      -- 'event' | 'fact' | 'preference' | 'boundary'
+    ref_id  INTEGER NOT NULL,   -- 源表主键
+    ts      TEXT NOT NULL,
+    body    TEXT NOT NULL,
+    bigrams TEXT NOT NULL,
+    UNIQUE(kind, ref_id)
+);
+CREATE INDEX IF NOT EXISTS idx_search_docs_kind ON search_docs(kind, ref_id);
+CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(
+    bigrams, content='search_docs', content_rowid='id', tokenize='unicode61'
+);
+-- FTS 与 search_docs 的同步（外部内容表的 delete 命令需要原始 token，故用触发器）
+CREATE TRIGGER IF NOT EXISTS search_docs_ai AFTER INSERT ON search_docs BEGIN
+    INSERT INTO search_fts(rowid, bigrams) VALUES (new.id, new.bigrams);
+END;
+CREATE TRIGGER IF NOT EXISTS search_docs_ad AFTER DELETE ON search_docs BEGIN
+    INSERT INTO search_fts(search_fts, rowid, bigrams)
+        VALUES ('delete', old.id, old.bigrams);
+END;
+-- 增量同步水位线：插入要 Rust 分词（触发器做不到），所以按 id 追赶。
+CREATE TABLE IF NOT EXISTS search_sync (
+    kind    TEXT PRIMARY KEY,
+    last_id INTEGER NOT NULL
+);
+-- 用户「忘掉」必须连索引一起忘：源表删除 → 级联删 search_docs → 级联删 FTS。
+-- 这四条触发器是 forget_event / forget_session / forget_all 的唯一保证，
+-- 不依赖应用层记得调（漏一处就是「删了还能被搜出来」的合规事故）。
+CREATE TRIGGER IF NOT EXISTS events_search_ad AFTER DELETE ON events BEGIN
+    DELETE FROM search_docs WHERE kind = 'event' AND ref_id = old.id;
+END;
+CREATE TRIGGER IF NOT EXISTS facts_search_ad AFTER DELETE ON facts BEGIN
+    DELETE FROM search_docs WHERE kind = 'fact' AND ref_id = old.id;
+END;
+CREATE TRIGGER IF NOT EXISTS preferences_search_ad AFTER DELETE ON preferences BEGIN
+    DELETE FROM search_docs WHERE kind = 'preference' AND ref_id = old.id;
+END;
+CREATE TRIGGER IF NOT EXISTS boundaries_search_ad AFTER DELETE ON boundaries BEGIN
+    DELETE FROM search_docs WHERE kind = 'boundary' AND ref_id = old.id;
+END;
+
+-- vector leg 仍未做：G-13/P5-1 的触发条件是「S2 之后近义改写仍 <75%」，
+-- 基线与跑法见 memory/eval_recall.rs。
 "#;
 
 fn user_version(conn: &Connection) -> rusqlite::Result<i64> {
@@ -2499,101 +2549,187 @@ fn decay(age: f64) -> f64 {
     (-age / 45.0).exp() // plan §7 pins τ = 45 days
 }
 
+/// 事实行的统一打分（plan §7）：重要性 × 置信度 × 时间衰减，失效 ×0.1。
+/// `db::search` 与 `salient_facts` 共用——两处各写一遍必然漂移。
+fn fact_score(
+    importance: i64,
+    confidence: f64,
+    ts: &str,
+    invalidated: bool,
+    with_decayed: bool,
+) -> f64 {
+    (importance as f64 / 3.0)
+        * (0.5 + 0.5 * confidence)
+        * if with_decayed { decay(age_days(ts)) } else { 1.0 }
+        * if invalidated { 0.1 } else { 1.0 }
+}
+
+/// `IN (?,?,?)` 的占位串（ids 非空时才能调用）。
+fn placeholders(n: usize) -> String {
+    std::iter::repeat("?").take(n).collect::<Vec<_>>().join(",")
+}
+
 /// Keyword leg of hybrid retrieval across all three layers, with time-decay
 /// scoring (plan §7). Boundaries and preferences are exempt from decay and
 /// rank first; facts get importance × confidence × decay; events decay too.
 /// `with_decayed = false` turns decay off ("翻旧账" mode for growth stories).
+///
+/// S2（2026-11-23）：候选集改由 `index` 出（FTS5 + 自建 2-gram），不再对
+/// 四张表各扫一遍 `LIKE '%q%'`。**打分公式一个字没改**——换的是「谁能进
+/// 候选」，不是「候选怎么排」，所以既有精度/召回指标保持可比。顺带补上
+/// 旧实现缺的能力：旧的是「子串命中即全部同分，再按时间截断」，同一批
+/// 命中里谁更相关完全看不出来；现在是 bm25 先筛候选，再由时间/重要性排序。
 pub fn search(
     conn: &Connection,
     query: &str,
     limit: usize,
     with_decayed: bool,
 ) -> rusqlite::Result<Vec<super::MemoryHit>> {
-    let pattern = format!("%{}%", query.replace('%', ""));
+    // 候选池放大 8 倍再做重排：bm25 只看词频，最终排序要看 decay/importance，
+    // 池子太小会让「刚说过但词频低」的行拿不到出场机会。
+    let pool = (limit.saturating_mul(8)).clamp(16, 256);
+    super::index::sync(conn)?;
+    let cands = super::index::search(conn, query, pool)?;
+    if cands.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let ids_of = |kind: &str| -> Vec<i64> {
+        cands
+            .iter()
+            .filter(|(k, _)| k == kind)
+            .map(|(_, id)| *id)
+            .collect()
+    };
     let mut scored: Vec<(f64, super::MemoryHit)> = Vec::new();
 
     // Boundaries: constant top priority, never decayed.
-    let mut stmt = conn.prepare(
-        "SELECT id, ts, content FROM boundaries WHERE content LIKE ?1 ORDER BY id ASC LIMIT ?2",
-    )?;
-    let rows = stmt.query_map(params![pattern, limit as i64], |row| {
-        Ok(super::MemoryHit {
-            kind: "boundary".into(),
-            id: row.get(0)?,
-            ts: row.get(1)?,
-            content: row.get(2)?,
-            invalidated: false,
-        })
-    })?;
-    for row in rows {
-        scored.push((1.0, row?));
+    let ids = ids_of("boundary");
+    if !ids.is_empty() {
+        let sql = format!(
+            "SELECT id, ts, content FROM boundaries WHERE id IN ({})",
+            placeholders(ids.len())
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |row| {
+            Ok(super::MemoryHit {
+                kind: "boundary".into(),
+                id: row.get(0)?,
+                ts: row.get(1)?,
+                content: row.get(2)?,
+                invalidated: false,
+            })
+        })?;
+        for row in rows {
+            scored.push((1.0, row?));
+        }
     }
 
     // Preferences: constant, just below boundaries; invalidated ones sink.
-    let mut stmt = conn.prepare(
-        "SELECT id, ts, content, invalid_at FROM preferences
-         WHERE content LIKE ?1 ORDER BY (invalid_at IS NULL) DESC, ts DESC LIMIT ?2",
-    )?;
-    let rows = stmt.query_map(params![pattern, limit as i64], |row| {
-        let hit = super::MemoryHit {
-            kind: "preference".into(),
-            id: row.get(0)?,
-            ts: row.get(1)?,
-            content: row.get(2)?,
-            invalidated: row.get::<_, Option<String>>(3)?.is_some(),
-        };
-        let score = if hit.invalidated { 0.1 } else { 0.9 };
-        Ok((score, hit))
-    })?;
-    for row in rows {
-        scored.push(row?);
+    let ids = ids_of("preference");
+    if !ids.is_empty() {
+        let sql = format!(
+            "SELECT id, ts, content, invalid_at FROM preferences WHERE id IN ({})",
+            placeholders(ids.len())
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |row| {
+            let hit = super::MemoryHit {
+                kind: "preference".into(),
+                id: row.get(0)?,
+                ts: row.get(1)?,
+                content: row.get(2)?,
+                invalidated: row.get::<_, Option<String>>(3)?.is_some(),
+            };
+            let score = if hit.invalidated { 0.1 } else { 0.9 };
+            Ok((score, hit))
+        })?;
+        for row in rows {
+            scored.push(row?);
+        }
     }
 
     // Facts: importance/3 × (0.5 + 0.5·confidence) × decay; invalidated facts
     // take a 0.1 penalty so a superseded value never outranks its successor
     // (v1 semantics, kept in v2 — see eval 误记率 metric).
+    let ids = ids_of("fact");
+    if !ids.is_empty() {
+        let sql = format!(
+            "SELECT id, ts, content, invalid_at, confidence, importance FROM facts
+              WHERE id IN ({})",
+            placeholders(ids.len())
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |row| {
+            let invalidated = row.get::<_, Option<String>>(3)?.is_some();
+            let hit = super::MemoryHit {
+                kind: "fact".into(),
+                id: row.get(0)?,
+                ts: row.get(1)?,
+                content: row.get(2)?,
+                invalidated,
+            };
+            let confidence: f64 = row.get(4)?;
+            let importance: i64 = row.get(5)?;
+            let score = fact_score(importance, confidence, &hit.ts, invalidated, with_decayed);
+            Ok((score, hit))
+        })?;
+        for row in rows {
+            scored.push(row?);
+        }
+    }
+
+    // Events: plain decay.
+    let ids = ids_of("event");
+    if !ids.is_empty() {
+        let sql = format!(
+            "SELECT id, ts, content FROM events WHERE id IN ({})",
+            placeholders(ids.len())
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |row| {
+            Ok(super::MemoryHit {
+                kind: "event".into(),
+                id: row.get(0)?,
+                ts: row.get(1)?,
+                content: row.get(2)?,
+                invalidated: false,
+            })
+        })?;
+        for row in rows {
+            let hit = row?;
+            let score = 0.6 * if with_decayed { decay(age_days(&hit.ts)) } else { 1.0 };
+            scored.push((score, hit));
+        }
+    }
+
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    Ok(scored.into_iter().map(|(_, hit)| hit).take(limit).collect())
+}
+
+/// 「最该被想起来的几条事实」——无查询词的召回兜底（S2）。
+///
+/// 「还记得吗」这类问法没有任何内容词，关键词腿为空，旧行为是把窗口内
+/// 最近 60 条对话整段倒出来（S1 基线里这一行是 0%：倒出来的是噪声，
+/// 目标事实在里面也被挤掉了）。人这时候期待的是「我最在意的那几件事」，
+/// 所以按 importance × confidence × decay 取前 N 条有效事实。
+pub fn salient_facts(conn: &Connection, limit: usize) -> rusqlite::Result<Vec<super::MemoryHit>> {
     let mut stmt = conn.prepare(
-        "SELECT id, ts, content, invalid_at, confidence, importance FROM facts
-         WHERE content LIKE ?1 ORDER BY ts DESC LIMIT ?2",
+        "SELECT id, ts, content, confidence, importance FROM facts
+          WHERE invalid_at IS NULL",
     )?;
-    let rows = stmt.query_map(params![pattern, limit as i64], |row| {
+    let rows = stmt.query_map([], |row| {
         let hit = super::MemoryHit {
             kind: "fact".into(),
             id: row.get(0)?,
             ts: row.get(1)?,
             content: row.get(2)?,
-            invalidated: row.get::<_, Option<String>>(3)?.is_some(),
-        };
-        Ok((hit, row.get::<_, f64>(4)?, row.get::<_, i64>(5)?))
-    })?;
-    for row in rows {
-        let (hit, confidence, importance) = row?;
-        let score = (importance as f64 / 3.0)
-            * (0.5 + 0.5 * confidence)
-            * if with_decayed { decay(age_days(&hit.ts)) } else { 1.0 }
-            * if hit.invalidated { 0.1 } else { 1.0 };
-        scored.push((score, hit));
-    }
-
-    // Events: plain decay.
-    let mut stmt = conn.prepare(
-        "SELECT id, ts, content FROM events WHERE content LIKE ?1 ORDER BY ts DESC LIMIT ?2",
-    )?;
-    let rows = stmt.query_map(params![pattern, limit as i64], |row| {
-        Ok(super::MemoryHit {
-            kind: "event".into(),
-            id: row.get(0)?,
-            ts: row.get(1)?,
-            content: row.get(2)?,
             invalidated: false,
-        })
+        };
+        let score = fact_score(row.get(4)?, row.get(3)?, &hit.ts, false, true);
+        Ok((score, hit))
     })?;
-    for row in rows {
-        let hit = row?;
-        let score = 0.6 * if with_decayed { decay(age_days(&hit.ts)) } else { 1.0 };
-        scored.push((score, hit));
-    }
-
+    let mut scored: Vec<(f64, super::MemoryHit)> = rows.collect::<rusqlite::Result<_>>()?;
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     Ok(scored.into_iter().map(|(_, hit)| hit).take(limit).collect())
 }
