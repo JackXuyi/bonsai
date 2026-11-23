@@ -685,6 +685,13 @@ pub fn build_agent_kit(conn: &Connection, state: &AgentState, user_text: &str) -
         providers.push(Box::new(crate::memory_search::MemorySearchProvider));
     }
 
+    // plan-perception-tool：感知查询工具。独立门控 might_perceive（词表语义
+    // 与 recall 不同，不并入 might_recall）；本地路径由 dialogue.rs 的
+    // local_perception_answer 走同一 kit 的代码层强制路由。
+    if crate::perception_search::might_perceive(user_text) {
+        providers.push(Box::new(crate::perception_search::PerceptionSearchProvider));
+    }
+
     // P3-2 文件工具（plan-files.md §3.5）：总开关开 + roots 非空才挂载。
     // 空授权 = provider 不进 kit = tools[] 里模型根本看不到 fs_*——
     // 「最小授权」在挂载层生效，而不是执行层报错。

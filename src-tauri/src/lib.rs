@@ -31,6 +31,7 @@ pub mod memory_search;
 pub mod morph;
 pub mod onboarding;
 pub mod perception;
+pub mod perception_search;
 pub mod persona;
 pub mod predict;
 pub mod relationship;

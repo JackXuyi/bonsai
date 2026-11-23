@@ -53,7 +53,9 @@ const RECALL_MARKERS: &[&str] = &[
     "原文", "逐字",
 ];
 
-fn normalise(text: &str) -> String {
+/// Lowercase + strip whitespace. Shared with perception_search (single
+/// implementation, AGENTS.md 硬约束 1: 消费同一实现，不复制).
+pub fn normalise(text: &str) -> String {
     text.chars()
         .filter(|c| !c.is_whitespace())
         .collect::<String>()
@@ -104,13 +106,21 @@ fn has_weekday(t: &str) -> bool {
     false
 }
 
+/// `should the kit offer memory_search` gate 的日期短语半边：裸数字日期 /
+/// 星期词命中（不含 recall 动词表）。perception_search 用它 + 自己的动词表
+/// 组装 might_perceive——日期解析只有这一份实现（plan-perception-tool §4）。
+pub fn has_date_signal(text: &str) -> bool {
+    let t = normalise(text);
+    !t.is_empty() && (has_numbered_date(&t) || has_weekday(&t))
+}
+
 /// Should the kit offer `memory_search` for this user text?
 pub fn might_recall(text: &str) -> bool {
     let t = normalise(text);
     if t.is_empty() {
         return false;
     }
-    RECALL_MARKERS.iter().any(|w| t.contains(w)) || has_numbered_date(&t) || has_weekday(&t)
+    RECALL_MARKERS.iter().any(|w| t.contains(w)) || has_date_signal(&t)
 }
 
 // ---------------------------------------------------------------- date window
@@ -355,12 +365,17 @@ const STOP_CHARS: &[char] = &[
 
 /// What is left after the date phrase and the scaffolding fall off — the
 /// LIKE legs of the search. Empty = window-only scan (honest, still useful).
-fn keywords(text: &str, date_phrase: &str) -> Vec<String> {
+/// `extra_scaffolding` lets other consumers (perception_search) strip their
+/// own domain words with the SAME implementation (AGENTS.md 硬约束 1).
+/// Extra words are stripped BEFORE the generic list: domain phrases are
+/// longer and must win ("在用什么" must not be chopped to "在用" by the
+/// generic "什么").
+pub fn keywords_with(text: &str, date_phrase: &str, extra_scaffolding: &[&str]) -> Vec<String> {
     let mut t = normalise(text);
     if !date_phrase.is_empty() {
         t = t.replace(&normalise(date_phrase), "");
     }
-    for s in SCAFFOLDING {
+    for s in extra_scaffolding.iter().chain(SCAFFOLDING.iter()) {
         t = t.replace(s, "");
     }
     let segments = t
@@ -375,6 +390,11 @@ fn keywords(text: &str, date_phrase: &str) -> Vec<String> {
     out.sort_by_key(|s| std::cmp::Reverse(s.chars().count()));
     out.truncate(2);
     out
+}
+
+/// memory_search 自身的调用点（无额外脚手架词）。
+fn keywords(text: &str, date_phrase: &str) -> Vec<String> {
+    keywords_with(text, date_phrase, &[])
 }
 
 // ---------------------------------------------------------------- search core
@@ -402,7 +422,8 @@ fn fmt_md(d: NaiveDate) -> String {
     format!("{}月{}日", d.month(), d.day())
 }
 
-fn window_label(start: NaiveDate, end: NaiveDate) -> String {
+/// Window label for digest headers, shared with perception_search.
+pub fn window_label(start: NaiveDate, end: NaiveDate) -> String {
     if end - start == chrono::Duration::days(1) {
         format!("{}（{}）", fmt_md(start), weekday_cn(start.weekday()))
     } else {
@@ -414,7 +435,8 @@ fn window_label(start: NaiveDate, end: NaiveDate) -> String {
 }
 
 /// Local naive date window → UTC RFC3339 pair for the SQL window scan.
-fn iso_pair(start: NaiveDate, end: NaiveDate) -> (String, String) {
+/// Shared with perception_search (same window semantics, one implementation).
+pub fn iso_pair(start: NaiveDate, end: NaiveDate) -> (String, String) {
     let to_iso = |d: NaiveDate| -> String {
         let naive = d.and_time(NaiveTime::MIN);
         match chrono::Local.from_local_datetime(&naive) {
@@ -434,7 +456,8 @@ fn iso_pair(start: NaiveDate, end: NaiveDate) -> (String, String) {
     (to_iso(start), to_iso(end))
 }
 
-fn local_stamp(ts: &str) -> String {
+/// RFC3339 UTC → local `MM-DD HH:MM` stamp, shared with perception_search.
+pub fn local_stamp(ts: &str) -> String {
     match chrono::DateTime::parse_from_rfc3339(ts) {
         Ok(t) => t.with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string(),
         Err(_) => ts.to_string(),
@@ -649,9 +672,18 @@ mod tests {
     #[test]
     fn builtin_registry_matches_provider() {
         let reg = crate::agent_tools::builtin_tools();
-        // P3-2 起 registry = memory_search(1) + filetools(4)。fs 工具在
-        // 设置页常显，但 provider 只在 roots 非空时挂载（filetools 单测覆盖）。
-        assert_eq!(reg, [vec![builtin_descriptor()], crate::filetools::builtin_descriptors()].concat());
+        // P3-2 起 registry = memory_search(1) + perception_search(1) + filetools(4)。
+        // fs 工具在设置页常显，但 provider 只在 roots 非空时挂载（filetools 单测
+        // 覆盖）；perception_search 由 might_perceive 信号门控挂载。
+        assert_eq!(
+            reg,
+            [
+                vec![builtin_descriptor()],
+                vec![crate::perception_search::builtin_descriptor()],
+                crate::filetools::builtin_descriptors()
+            ]
+            .concat()
+        );
         let ms = &reg[0];
         assert_eq!(ms.name, "memory_search");
         assert_eq!(ms.kind, ToolKind::Builtin);

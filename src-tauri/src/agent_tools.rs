@@ -42,6 +42,10 @@ impl ToolKind {
 /// definition per tool, referenced here — not duplicated).
 pub fn builtin_tools() -> Vec<ToolDescriptor> {
     let mut tools = vec![crate::memory_search::builtin_descriptor()];
+    // plan-perception-tool：感知查询工具（内置工具第二枚），descriptor 单源
+    // 在 perception_search 模块。设置页常显（让用户知道能力存在）；provider
+    // 挂载由 build_agent_kit 按 might_perceive 信号门控。
+    tools.push(crate::perception_search::builtin_descriptor());
     // P3-2 文件工具（plan-files.md）：descriptor 单源在 filetools 模块。
     // 注意：设置页常显这四个条目（让用户知道能力存在），但 provider 只在
     // 总开关开且 roots 非空时才挂载（见 mcp_admin::build_agent_kit）。

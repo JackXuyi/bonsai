@@ -632,6 +632,55 @@ fn local_recall_answer(
     }
 }
 
+/// 本地模式的感知路由（plan-perception-tool §5.2）：与 local_recall_answer
+/// 同构——本地模型不做工具调用，`might_perceive` 信号命中时由**代码层**
+/// 强制执行 perception_search，摘要交给人格轮措辞（同一条 pass-3）。
+/// 执行失败回落直答（审计行已落，不静默）。
+#[allow(clippy::too_many_arguments)]
+fn local_perception_answer(
+    store: &MemoryStore,
+    backend: &mut dyn DialogueBackend,
+    kit: &mut crate::mcp_admin::AgentKit,
+    system: &str,
+    history: &[crate::persona::eval::Turn],
+    user_text: &str,
+    rec: &mut TraceRecorder,
+    on_delta: Option<&mut dyn FnMut(&str)>,
+) -> rusqlite::Result<Option<(String, Option<String>, bool)>> {
+    if !kit
+        .catalog_all()
+        .iter()
+        .any(|d| d.name == "perception_search")
+    {
+        return Ok(None);
+    }
+    kit.trace("local:forced-perception-search".into());
+    // 按日期筛选（沿 memory_search 裁决）：日期窗在服务端解析并显式进参数。
+    let args = memory_search_args(user_text);
+    let args_text = args.to_string();
+    let t_tool = std::time::Instant::now();
+    match crate::mcp_admin::execute_audited(store, kit, "perception_search", args) {
+        Err(e) => {
+            rec.tool_call("perception_search", &args_text, "", "error", Some(&e), t_tool.elapsed());
+            Ok(None) // 回落直答
+        }
+        Ok(out) => Ok(Some(summarize_tool_result(
+            backend,
+            kit,
+            history,
+            user_text,
+            system,
+            "perception_search",
+            &args_text,
+            Some("builtin:perception_search".to_string()),
+            &out,
+            t_tool.elapsed(),
+            rec,
+            on_delta,
+        )?)),
+    }
+}
+
 /// Build the pass-3 (result-summary) system prompt. When the tool's summary
 /// is itself JSON (prune tools return JSON payloads; ToolOutput.summary is
 /// the clipped raw text), the prompt must explicitly demand INTERPRETATION —
@@ -1001,7 +1050,8 @@ fn chat_turn_inner(
     // （recall 代码路由 + 直答）。Anything it returns is final for the
     // turn — record both sides, filter, out.
     if let Some(kit) = kit.take().filter(|k| k.has_capabilities()) {
-        let reborrow = on_delta.as_mut().map(|f| &mut **f as &mut dyn FnMut(&str));
+        let mut reborrow = on_delta.as_mut().map(|f| &mut **f as &mut dyn FnMut(&str));
+        let reborrow = &mut reborrow;
         let (raw, tool_label, task_card, streamed) = match backend.tool_client() {
             Some(client) => {
                 kit.trace("mode:cloud".into());
@@ -1009,21 +1059,33 @@ fn chat_turn_inner(
             }
             None => {
                 kit.trace("mode:local".into());
-                // 本地模式（2026-11-22 裁决）：模型不选工具。唯一例外是
-                // recall 信号 → 代码层强制 memory_search（None = 回落直答）。
+                // 本地模式（2026-11-22 裁决）：模型不选工具。代码层强制路由
+                // 两枚内置工具（None = 回落直答）：recall 信号 → memory_search；
+                // perceive 信号 → perception_search（plan-perception-tool §5.2）。
                 match local_recall_answer(
-                    store, backend, kit, &system, &history, user_text, &mut rec, reborrow,
+                    store, backend, kit, &system, &history, user_text, &mut rec,
+                    reborrow.as_mut().map(|f| &mut **f as &mut dyn FnMut(&str)),
                 )? {
                     Some(triple) => (triple.0, triple.1, None, triple.2),
                     None => {
-                        // 直答（原有单轮路径，人格全程在）。
-                        let raw = match on_delta.as_deref_mut() {
-                            Some(cb) => backend.reply_streaming(
-                                &system, &history, user_text, CHAT_TEMPERATURE, cb,
-                            ),
-                            None => backend.reply(&system, &history, user_text, CHAT_TEMPERATURE),
-                        };
-                        (raw, None, None, true)
+                        match local_perception_answer(
+                            store, backend, kit, &system, &history, user_text, &mut rec,
+                            reborrow.as_mut().map(|f| &mut **f as &mut dyn FnMut(&str)),
+                        )? {
+                            Some(triple) => (triple.0, triple.1, None, triple.2),
+                            None => {
+                                // 直答（原有单轮路径，人格全程在）。
+                                let raw = match on_delta.as_deref_mut() {
+                                    Some(cb) => backend.reply_streaming(
+                                        &system, &history, user_text, CHAT_TEMPERATURE, cb,
+                                    ),
+                                    None => {
+                                        backend.reply(&system, &history, user_text, CHAT_TEMPERATURE)
+                                    },
+                                };
+                                (raw, None, None, true)
+                            }
+                        }
                     }
                 }
             }
@@ -2381,6 +2443,25 @@ mod tests {
         }
     }
 
+    fn perception_kit() -> crate::mcp_admin::AgentKit {
+        crate::mcp_admin::AgentKit {
+            providers: vec![Box::new(crate::perception_search::PerceptionSearchProvider)],
+            gate: Box::new(crate::agent_tools::AutoAllowGate),
+            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
+            task_id: std::sync::Mutex::new(None),            prompt_trace: std::sync::Mutex::new(Vec::new()),
+            ..crate::mcp_admin::AgentKit::empty()
+        }
+    }
+
+    fn insert_perception(conn: &rusqlite::Connection, ts: &str, content: &str) {
+        conn.execute(
+            "INSERT INTO events (ts, kind, content, role, session_id)
+             VALUES (?1, 'perception', ?2, NULL, NULL)",
+            rusqlite::params![ts, content],
+        )
+        .unwrap();
+    }
+
     /// The screenshot regression: "总结一下我 18 号说了啥" must be answered
     /// from the event log (via memory_search), not from thin air.
     /// 云端版本：模型原生 tool_calls 调 memory_search → 结果回传 → 作答。
@@ -2537,6 +2618,88 @@ mod tests {
         let kit = with_conn(&s, |conn| crate::mcp_admin::build_agent_kit(conn, &state, "总结一下我18号说了啥"));
         assert!(kit.has_capabilities());
         assert!(kit.catalog().iter().any(|d| d.name == "memory_search"));
+        // plan-perception-tool §4：感知门独立于 recall 门——裸日期不挂感知工具。
+        let kit = with_conn(&s, |conn| crate::mcp_admin::build_agent_kit(conn, &state, "18号说了啥"));
+        assert!(!kit.catalog_all().iter().any(|d| d.name == "perception_search"));
+        let kit = with_conn(&s, |conn| crate::mcp_admin::build_agent_kit(conn, &state, "我今天在用什么应用"));
+        assert!(kit.has_capabilities());
+        assert!(kit.catalog().iter().any(|d| d.name == "perception_search"));
+    }
+
+    /// 云端全链路（plan-perception-tool §5.1）：模型原生 tool_calls 调
+    /// perception_search → 结果回传 → 作答；审计 kind=builtin。
+    #[test]
+    fn builtin_perception_search_full_chain_is_audited_and_labeled() {
+        let _g = crate::memory::clock::pinned("2026-11-23T07:00:00Z"); // 本地 11-23 15:00
+        let s = mem();
+        with_conn(&s, |conn| {
+            insert_perception(conn, "2026-11-23T01:10:00+00:00", "app: Cursor");
+            insert_perception(conn, "2026-11-23T02:30:00+00:00", "app: 微信");
+        });
+        let c = card();
+        let mut backend = cloud_backend(vec![
+            tool_calls_reply(&[("perception_search", serde_json::json!({"query": "今天在用什么应用"}))]),
+            content_reply("今天你主要在 Cursor 和微信里待着。"),
+        ]);
+        let mut kit = perception_kit();
+        let out = chat_turn_with_kit(
+            &s, &mut backend, &c, "s1", "我今天在用什么应用", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit,
+        )
+        .unwrap();
+        assert!(out.reply.contains("Cursor"));
+        assert_eq!(out.tool.as_deref(), Some("builtin:perception_search"));
+        let records = with_conn(&s, |conn| db::tool_call_records(conn, 10).unwrap());
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].tool, "builtin");
+        assert_eq!(records[0].action, "perception_search");
+        assert_eq!(records[0].result_status.as_deref(), Some("auto_allowed"));
+        assert!(records[0].params_summary.as_deref().unwrap_or("").contains("今天在用什么应用"), "model echoes the query (dates resolve server-side)");
+    }
+
+    /// 本地模式感知路由（plan-perception-tool §5.2）：perceive 信号命中时
+    /// 代码层强制执行 perception_search，摘要交给人格轮措辞（同一条 pass-3）。
+    #[test]
+    fn local_perception_route_executes_perception_search_with_persona() {
+        let _g = crate::memory::clock::pinned("2026-11-23T07:00:00Z"); // 本地 11-23 15:00
+        let s = mem();
+        with_conn(&s, |conn| {
+            insert_perception(conn, "2026-11-23T01:10:00+00:00", "app: Cursor");
+        });
+        let c = card();
+        let mut kit = perception_kit();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut backend = SpyBackend { reply: "今天你一直泡在 Cursor 里写代码呢。".into(), seen: seen.clone() };
+        let out = chat_turn_with_kit(
+            &s, &mut backend, &c, "s1", "今天在用什么应用", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit,
+        )
+        .unwrap();
+        assert_eq!(out.reply, "今天你一直泡在 Cursor 里写代码呢。");
+        assert_eq!(out.tool.as_deref(), Some("builtin:perception_search"));
+        let trace = kit.trace_ref();
+        assert!(trace.contains("mode:local"), "{trace}");
+        assert!(trace.contains("local:forced-perception-search"), "{trace}");
+        assert!(trace.contains("level3:answered"), "{trace}");
+        let prompts = seen.lock().unwrap();
+        assert!(prompts[0].contains("人格宪法"), "摘要措辞轮带人格: {}", prompts[0]);
+        assert!(prompts[0].contains("工具 perception_search 的结果"), "感知摘要进 prompt");
+        let records = with_conn(&s, |conn| db::tool_call_records(conn, 3).unwrap());
+        assert_eq!(records.len(), 1, "one audited call");
+        assert_eq!(records[0].action, "perception_search");
+
+        // 非 perceive 场景（kit 无 perception_search）→ 直答，零工具审计。
+        let s2 = mem();
+        let mut plain = SpyBackend { reply: "在呢。".into(), seen: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())) };
+        let mut wk = weather_kit();
+        let out2 = chat_turn_with_kit(
+            &s2, &mut plain, &c, "s1", "我今天好累", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut wk,
+        )
+        .unwrap();
+        assert_eq!(out2.reply, "在呢。");
+        assert_eq!(out2.tool, None);
+        assert!(with_conn(&s2, |conn| db::tool_call_records(conn, 10).unwrap()).is_empty());
     }
 
     /// 本地模式 recall 路由（v0.2 §5，2026-11-22 用户裁决）：本地模型不做
