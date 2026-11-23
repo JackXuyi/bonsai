@@ -8,6 +8,7 @@ import { ProfileCard } from "./ProfileCard";
 import { PerceptionCard } from "./PerceptionCard";
 import { CalendarCard } from "./CalendarCard";
 import { FileCard } from "./FileCard";
+import { WebCard } from "./WebCard";
 import { BoundaryCard } from "./BoundaryCard";
 import { RelationshipCard } from "./RelationshipCard";
 import { ToolResult } from "./ToolResult";
@@ -31,6 +32,7 @@ export function ToolsPane() {
       <ProfileCard active />
       <PerceptionCard active />
       <CalendarCard active />
+      <WebCard active />
       <FileCard active />
       <BoundaryCard active />
       <RelationshipCard />

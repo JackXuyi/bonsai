@@ -37,6 +37,7 @@ import type {
   ToolDescriptor,
   ProactiveReply,
   TurnTrace,
+  WebStatus,
 } from "./types";
 
 async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -105,6 +106,11 @@ export const calendarClearCache = () =>
   call<CalendarStatus>("calendar_clear_cache");
 export const calendarMuteToday = () => call<void>("calendar_mute_today");
 export const calendarOpenSettings = () => call<void>("calendar_open_settings");
+
+// ---------- webtools（P3-3，plan-web.md §3.7） ----------
+export const webStatus = () => call<WebStatus>("web_status");
+export const webSetConfig = (opts: { enabled?: boolean }) =>
+  call<WebStatus>("web_set_config", opts);
 
 // ---------- filetools（P3-2，plan-files.md §3.6） ----------
 export const fsStatus = () => call<FsStatus>("fs_status");

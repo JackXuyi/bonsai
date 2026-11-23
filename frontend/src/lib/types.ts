@@ -98,6 +98,11 @@ export interface FsStatus {
   cloud_read: boolean;
 }
 
+/** P3-3 Web 检索状态（src-tauri/src/webtools.rs WebStatus）。 */
+export interface WebStatus {
+  enabled: boolean;
+}
+
 // ── onboarding（onboarding.rs）────────────────────────────────
 export interface OnboardingQuestion {
   id: string;
