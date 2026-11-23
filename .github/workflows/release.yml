@@ -1,0 +1,85 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-14
+            args: "--target aarch64-apple-darwin"
+            sidecar: macos
+          - platform: windows-latest
+            args: ""
+            sidecar: windows
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.sidecar == 'macos' && 'aarch64-apple-darwin' || '' }}
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Ollama sidecar (macOS)
+        if: matrix.sidecar == 'macos'
+        run: bash scripts/fetch_sidecar.sh
+
+      - name: Install Ollama sidecar (Windows)
+        if: matrix.sidecar == 'windows'
+        shell: bash
+        run: bash scripts/fetch_sidecar.sh
+
+      - name: Build and publish release assets
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "bonsai ${{ github.ref_name }}"
+          releaseBody: |
+            bonsai v0.2.0 — 内置本地 LLM 的桌面养成系 AI 搭档。
+
+            ## 本版包含
+            - 表情自定义皮肤 M0–M3：7 槽位上传、asset protocol 存储、形象卡管理界面与 404 修复
+            - 轮内工具缓存：Read 档工具命中缓存、cache_hit 审计
+            - trace 视图：assistant 工具调用声明消息的结构化渲染
+            - 文件读取工具 fs_read 分段读：长文件附大纲与续读提示
+            - 修复表情皮肤路径双重嵌套导致的 404
+
+            ## 下载
+            - macOS (Apple Silicon): `bonsai_0.2.0_aarch64.dmg`
+            - Windows (x64): `.msi` 或 `.nsis` 安装包
+
+            两个平台均内置 Ollama sidecar 与 CPU 推理运行时，本地模型开箱可用；
+            首次启动会自动拉起 127.0.0.1:11435，不占用系统级 Ollama 的 11434。
+            Windows 安装包因内置完整 CPU 运行时体积较大。
+
+            ## 云端增强
+            工具调用 / Skill 注入仅在显式开启云端 DeepSeek 时可用；本地模型为零工具调用的纯聊天。
+          releaseDraft: false
+          prerelease: false
+          uploadUpdaterJson: false
+          retryAttempts: 3
+          args: ${{ matrix.args }}
