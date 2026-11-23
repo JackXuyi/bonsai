@@ -224,7 +224,7 @@ tokens(s) = 4                                   # 每条消息结构开销
 ### 6.3 装配（`context::build`）
 
 ```rust
-// T2 实际落地形状（`truncated_tools` 随 T3 轮内压缩一起加，先不占位）
+// T2 实际落地形状（`truncated_tools` 不需要了：目录裁剪在 cloud_tool_loop 里做，见 §6.6）
 pub struct BuildInput<'a> {
     pub env: &'a str,              // 环境段（拼接在最前，与旧行为一致）
     pub body: &'a str,             // 画像 + 宪法 + 边界 + skill 段
@@ -269,14 +269,22 @@ pub struct Built {
 - 输出约束：≤300 字，纯文本；解析失败或超时 10s → 保留 L1 文本，不重试。
 - 开关：`settings.ctx_digest_model = "off" | "local"`，默认 `off`。
 
-### 6.6 轮内压缩（`context::compact`）
+### 6.6 轮内压缩（`context::compact_tool_result` / `context::trim_tool_catalog`）
 
-只做两件事，都在每次 `chat_with_tools` 之前调用：
+只做两件事：
 
-1. **长 `tool` 结果降级**：单条超 1500 tokens → 保留 head 70% + tail 20% + `\n…（已省略 N 字）`。
-2. **工具目录截断**：`tool_specs()` 后按「总 tokens ≤1500」裁剪——先截单条 description 到 240 字，再按条目顺序砍到预算内；被砍掉的工具名记 trace。
+1. **长 `tool` 结果降级**：单条超 `CAP_TOOL_RESULT = 1500` tokens → head 70% + tail 20% + `\n…（已省略 N 字）`。
+2. **工具目录截断**：`tool_specs()` 后按「总 tokens ≤ `CAP_TOOL_CATALOG = 1500`」裁剪——先截单条 description 到 240 字（末尾补 `…`），再按目录顺序装，装不下的**从该条起整条丢弃**；被砍掉的名字进 trace（`step_kind=tools_truncated`）。
 
 **绝不删 `assistant(tool_calls)` / `tool` 配对**：Chat Completion 协议要求 `tool_call_id` 一一对应，删一条就 400。所以轮内压缩只能是「换内容」，不能是「删消息」。
+
+> **落地细节（T3，与初稿的三处差异）**
+>
+> 1. **head/tail 按上限算，不按原文比例**：留原文的 90% 等于没压（8k 字结果照旧占 8k tokens），预算永远算不准。现在 1500 tokens 是**目标值**，超了就往 0.9×1500 收。
+> 2. **降级发生在 `tool` 消息落地那一刻**，不是每次 `chat_with_tools` 之前重压一遍：同一个结果只压一次，`/trace` 里 `llm_round` 存的就是模型当时看到的那份；原文仍在 `tool_call` 审计步的 `summary` 里，`/trace` 可查。
+> 3. **目录裁剪发生在 `cloud_tool_loop`**（`tools[]` 的唯一构建点），`BuildInput` 不知道工具目录，所以 §6.3 预留的 `truncated_tools` 字段不需要了。
+>
+> **已知取舍**：`web_fetch` 的摘要上限是 8000 字，现在会被压到 ~1350 字（head 1050 + tail 300）。读长网页再总结的质量会下降——这是「不压就烧 8k tokens」的对价。`CAP_TOOL_RESULT` 是一行常量，真机上觉得读网页变笨就调到 2500；反过来本地 8192 窗口跑长任务时也可以调小。工具 `parameters` 不截（截了参数就填错），只能整条丢。
 
 ### 6.7 会话命令（新模块 `src-tauri/src/session.rs`）
 
@@ -422,7 +430,7 @@ pub struct Built {
 |---|---|---|---|
 | T1 | `b2737c3` | `cargo test --lib` 486 passed（+16：估算器 6 / 窗口表 3 / 预算 5 / 分段表 2）；`cargo check` 仅既有 `dialogue.rs:101` dead_code | `context.rs` 落地：估算器（汉字 1.0 / 拉丁 1/4 / 符号 0.75，整体向上取整）+ 窗口表（deepseek 128k / claude 200k / openai 128k / 本地取 `num_ctx` / 未知 32k）+ `Budget`（`usable = min(window,soft) − 4096`、`tool_room` 40%、`history_room` 饱和减法）+ 7 个固定段上限。**零接线**：`dialogue.rs` 一行未改 |
 | T2 | `bb4c8da` | `cargo test --lib` 495 passed（+9：装配 7 / 接线 1 / num_ctx 1）；`tsc --noEmit` 0 错；`vitest run` 170 passed；`cargo check` 仅既有 `TraceRecorder::new` dead_code | `context::build`（`BuildInput`/`Built`/L0/摘要位）+ 唯一装配点接线（原 `1531-1536` 的 `format!(env+body)` 改为 build）；**D5 = 8192** 落地（`ollama::NUM_CTX`，请求带显式 `num_ctx`）；历史上限 6 → `HISTORY_MAX_TURNS=12`；本地不预留给工具额度（云端才留）；trace 增 `context_budget` 步（est/usable/window/dropped） |
-| T3 | | | |
+| T3 | `ae75530` | `cargo test --lib` 505 passed（+8：压缩 3 / 目录 3 / 接线 2）；`tsc --noEmit` 0 错；`vitest run` 170 passed；`cargo check` 仅既有 `TraceRecorder::new` dead_code | `context::compact_tool_result`（>1500 tokens → head 70% + tail 20% + 省略标记）+ `context::trim_tool_catalog`（description 截 240 字 + 顺序砍尾部，第一条永留）；接线两处：`cloud_tool_loop` 建 `tools[]` 时裁目录并记 `tools_truncated`、`tool_result` 落地时降级内容；**配对不破**（`tool_call_id` 与 assistant 一一对应，单测断言 roles 相邻）；原文仍在 `tool_call` 审计步 |
 | T4 | | | |
 | T5 | | | |
 | T6 | | | |
@@ -437,3 +445,4 @@ pub struct Built {
 | v0.1 | 2026-11-23 | 初稿：现状锚点、三段预算、三级压缩、schema v15、T1–T7、A1–A17、D1–D8 |
 | v0.1.1 | 2026-11-23 | T1 落地：`context.rs` 估算器 / 窗口表 / `Budget` / 分段上限；方案本身无变更 |
 | v0.2 | 2026-11-23 | T2 落地：§6.3 换成实际签名（`BuildInput` / `reserve_tool_room`，`truncated_tools` 延到 T3）；D5 裁决 8192、历史 6 → 12；trace 增 `context_budget` 步 |
+| v0.3 | 2026-11-23 | T3 落地：§6.6 换成实际函数名与三处差异（head/tail 按上限算、降级在落地时一次、目录裁剪在 `cloud_tool_loop`）；§6.3 明确 `truncated_tools` 不再需要；记录 `web_fetch` 8000 字摘要被压到 ~1350 字的取舍 |
