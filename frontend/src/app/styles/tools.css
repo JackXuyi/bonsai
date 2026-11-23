@@ -391,8 +391,7 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* ── 工具页 · 边界清单 ─────────────────────────────────────────── */
-.boundary-row {
+/* ── 工具页 · 边界清单 ─────────────────────────────────────────── */.boundary-row {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -420,6 +419,70 @@
 
 .boundary-del:hover {
   color: #b0533a;
+}
+
+/* ── 工具页 · 用户画像（plan-user-profile.md §6.2）────────────────── */
+.profile-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 2px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.profile-row:last-child {
+  border-bottom: none;
+}
+
+.profile-key {
+  flex: none;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.profile-badge {
+  flex: none;
+  font-size: 11px;
+  color: var(--muted);
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+
+.profile-op {
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 4px;
+  white-space: nowrap;
+}
+
+.profile-op:hover {
+  color: var(--ink);
+}
+
+.profile-clear:hover {
+  color: #b0533a;
+}
+
+.profile-input {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  padding: 3px 6px;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  background: var(--panel, transparent);
+  color: var(--ink);
+}
+
+.profile-input:focus {
+  outline: none;
+  border-color: var(--ink-soft, var(--muted));
 }
 
 /* ── 工具页 · 关系线（plan-relationship.md §3.8）────────────────── */

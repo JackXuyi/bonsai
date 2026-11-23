@@ -130,6 +130,17 @@ export interface Boundary {
   content: string;
 }
 
+// ── 用户画像（memory/profile.rs ProfileRow，plan-user-profile.md §6.3）──
+export type ProfileSource = "rule" | "model" | "manual";
+
+export interface ProfileEntry {
+  key: string;
+  value: string;
+  source: ProfileSource;
+  confidence: number;
+  updatedAt: string;
+}
+
 // ── dialogue（dialogue.rs DialogueOutcome）──────────────────────
 export interface DialogueFilter {
   unconditional_affirmation?: boolean;

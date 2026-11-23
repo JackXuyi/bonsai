@@ -28,6 +28,7 @@ import type {
   PersonaSnapshot,
   PerceptionConfig,
   PerceptionStatus,
+  ProfileEntry,
   RelationshipStatus,
   SkillCreateInput,
   SkillDetail,
@@ -127,6 +128,14 @@ export const onboardingSubmit = (payload: {
 export const onboardingReset = () => call<void>("onboarding_reset");
 export const boundaryList = () => call<Boundary[]>("boundary_list");
 export const boundaryDelete = (id: number) => call<void>("boundary_delete", { id });
+
+// ---------- user profile（memory/profile.rs，plan-user-profile.md §6.3） ----------
+/** UI 保存一律落 manual——从界面进来的都是用户亲口定的。 */
+export const profileList = () => call<ProfileEntry[]>("profile_list");
+export const profileSet = (key: string, value: string) =>
+  call<boolean>("profile_set", { key, value });
+export const profileDelete = (key: string) =>
+  call<number>("profile_delete", { key });
 
 // ---------- memory ----------
 export const memoryConsolidate = () =>
