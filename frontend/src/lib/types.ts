@@ -420,6 +420,30 @@ export interface SkillView {
   errorCode?: string | null;
 }
 
+/** 技能预览：全文 + 已加载引用（skill_read）。 */
+export interface SkillRefView {
+  name: string;
+  content: string;
+}
+
+export interface SkillDetail {
+  id: string;
+  name: string;
+  description: string;
+  body: string;
+  refs: SkillRefView[];
+  enabled: boolean;
+  sizeBytes: number;
+}
+
+/** 手写创建技能包的入参（skill_create）。 */
+export interface SkillCreateInput {
+  id: string;
+  name: string;
+  description: string;
+  body: string;
+}
+
 export interface ToolCallRecord {
   id: number;
   ts: string;

@@ -1,14 +1,18 @@
 "use client";
 
-// Skill 管理卡（spec-s6 §2）：目录扫描 + 启停 + 拒载标红 + 预算提示。
+// Skill 管理卡（spec-s6 §2）：目录扫描 + 启停 + 拒载标红 + 预算提示 + 预览 + 添加外部技能。
 import { useCallback, useEffect, useState } from "react";
 import { humanizeAgentError, skillList, skillRemove, skillToggle } from "@/lib/commands";
 import type { SkillView } from "@/lib/types";
+import { SkillAddDialog } from "./SkillAddDialog";
+import { SkillPreviewDialog } from "./SkillPreviewDialog";
 
 export function SkillSection() {
   const [rows, setRows] = useState<SkillView[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [previewId, setPreviewId] = useState<string | null>(null);
+  const [addOpen, setAddOpen] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -40,12 +44,22 @@ export function SkillSection() {
 
   return (
     <div className="card agent-card" data-testid="skill-section">
-      <p className="card-title">技能包（Skill）</p>
+      <div className="agent-approval">
+        <p className="card-title">技能包（Skill）</p>
+        <button
+          type="button"
+          className="btn-ghost"
+          data-testid="skill-add-open"
+          onClick={() => setAddOpen(true)}
+        >
+          ＋ 添加技能
+        </button>
+      </div>
       {error && <p className="model-error">{error}</p>}
       {rows.length === 0 ? (
         <p className="hint-line">
-          把技能包放进应用数据目录的 skills/&lt;id&gt;/（SKILL.md ≤8KB + references/*.md ≤4KB×5），
-          刷新本页即可看到（列表每次实时扫描，无需手动导入）。
+          把技能包放进应用数据目录的 skills/&lt;id&gt;/（SKILL.md ≤16KB + references/*.md ≤4KB×5），
+          或点「＋ 添加技能」目录导入 / 手写创建 / 从 GitHub 等远端加载。列表实时扫描，无需手动刷新。
         </p>
       ) : (
         <div className="agent-list">
@@ -58,6 +72,15 @@ export function SkillSection() {
               <div className="agent-row-actions">
                 {s.valid ? (
                   <>
+                    <button
+                      type="button"
+                      className="btn-ghost"
+                      disabled={busyId === s.id}
+                      data-testid={`skill-preview-${s.id}`}
+                      onClick={() => setPreviewId(s.id)}
+                    >
+                      预览
+                    </button>
                     <button
                       type="button"
                       className={s.enabled ? "btn-danger" : "btn"}
@@ -100,6 +123,12 @@ export function SkillSection() {
         已启用 {enabledCount} 个 · 启用即注入提示段（标注 untrusted，与人格宪法冲突时以宪法为准）；
         全文合计超预算会拖慢 2B 模型，按需启停。
       </p>
+      <SkillPreviewDialog
+        open={previewId !== null}
+        id={previewId}
+        onClose={() => setPreviewId(null)}
+      />
+      <SkillAddDialog open={addOpen} onClose={() => setAddOpen(false)} onChanged={() => void refresh()} />
     </div>
   );
 }

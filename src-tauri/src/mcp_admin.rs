@@ -1119,6 +1119,103 @@ pub fn skill_remove(
     skill_toggle(store, agent, removed, false)
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillRefView {
+    pub name: String,
+    pub content: String,
+}
+
+/// Full pack body for the settings-page preview (skill_read). Engine packs
+/// are previewable too — they are just packs with a reserved consumer.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillDetail {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub body: String,
+    pub refs: Vec<SkillRefView>,
+    pub enabled: bool,
+    /// body + loaded references, the exact bytes the prompt budget pays for.
+    pub size_bytes: usize,
+}
+
+#[tauri::command]
+pub fn skill_read(
+    store: tauri::State<'_, crate::memory::MemoryStore>,
+    agent: tauri::State<'_, AgentState>,
+    id: String,
+) -> Result<SkillDetail, String> {
+    crate::skill::check_skill_id(&id).map_err(|e| e.code().to_string())?;
+    let conn = now_conn(&store)?;
+    let enabled = crate::skill::enabled_ids(db::get_setting(&conn, "skill_enabled").ok().flatten())
+        .iter()
+        .any(|x| x == &id);
+    let dir = agent.skills_dir.join(&id);
+    let pack = crate::skill::load_skill(&dir).map_err(|e| e.code().to_string())?;
+    Ok(SkillDetail {
+        size_bytes: pack.body.len() + pack.refs.iter().map(|(_, c)| c.len()).sum::<usize>(),
+        refs: pack
+            .refs
+            .into_iter()
+            .map(|(name, content)| SkillRefView { name, content })
+            .collect(),
+        enabled,
+        id: pack.id,
+        name: pack.name,
+        description: pack.description,
+        body: pack.body,
+    })
+}
+
+/// Import an external pack directory (path from the system folder picker).
+/// Returns the imported id; failures carry a mapping key for humanizeAgentError.
+#[tauri::command]
+pub fn skill_import(
+    agent: tauri::State<'_, AgentState>,
+    source: String,
+) -> Result<String, String> {
+    crate::skill::import_skill_dir(&agent.skills_dir, std::path::Path::new(&source))
+        .map_err(|e| e.map_key())
+}
+
+/// Create a pack from fields typed in the settings UI.
+#[tauri::command]
+pub fn skill_create(
+    agent: tauri::State<'_, AgentState>,
+    id: String,
+    name: String,
+    description: String,
+    body: String,
+) -> Result<(), String> {
+    crate::skill::create_skill_pack(&agent.skills_dir, &id, &name, &description, &body)
+        .map_err(|e| e.map_key())
+}
+
+/// Load a pack from a remote URL (GitHub repo/tree/raw, GitLab blob, or any
+/// https SKILL.md). Network runs on the blocking pool — the fetch is
+/// user-initiated and nothing happens until this command is called.
+#[tauri::command]
+pub async fn skill_load_remote(
+    agent: tauri::State<'_, AgentState>,
+    url: String,
+    id: Option<String>,
+) -> Result<String, String> {
+    let root = agent.skills_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (derived, files) = crate::skill_remote::fetch(&url)?;
+        let id = id
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(derived);
+        crate::skill::install_pack_files(&root, &id, &files).map_err(|e| e.map_key())?;
+        Ok(id)
+    })
+    .await
+    .map_err(|_| "skill_network".to_string())?
+}
+
 /// Audit read for the tool-page records card (spec-s6 §3).
 #[tauri::command]
 pub fn tool_call_records(

@@ -37,6 +37,7 @@ pub mod predict;
 pub mod relationship;
 pub mod report;
 pub mod skill;
+pub mod skill_remote;
 pub mod summary;
 pub mod tools;
 pub mod tray;
@@ -303,6 +304,10 @@ pub fn run() {
             mcp_admin::skill_list,
             mcp_admin::skill_toggle,
             mcp_admin::skill_remove,
+            mcp_admin::skill_read,
+            mcp_admin::skill_import,
+            mcp_admin::skill_create,
+            mcp_admin::skill_load_remote,
             mcp_admin::tool_call_records,
             mcp_admin::mcp_approval_reply,
             mcp_admin::agent_approval_get,

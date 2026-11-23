@@ -572,3 +572,111 @@
 .log-empty {
   color: #8a8574;
 }
+
+/* ── skill dialog（添加/预览）─────────────────────────────────
+   原生 dialog 默认宽度随内容撑开，长提示语会把弹窗拉成又宽又扁；
+   这里钉死宽度 + 内部滚动，三段式：头 / 可滚 body / 右对齐动作区。 */
+dialog.skill-dialog {
+  width: min(540px, 92vw);
+  max-height: min(620px, 84vh);
+  border-radius: 15px;
+}
+dialog.skill-dialog[open] {
+  display: flex;
+  flex-direction: column;
+}
+/* flex 会覆盖 UA 的 dialog:not([open]){display:none} */
+dialog.skill-dialog:not([open]) {
+  display: none;
+}
+.skill-dialog .dialog-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0; /* flex 子项允许收缩，超出时才滚 */
+  padding: 14px 16px 16px;
+  overflow-y: auto;
+}
+.skill-dialog .dialog-head {
+  flex: none;
+}
+
+.skill-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg-sunk);
+}
+.skill-tab {
+  flex: 1;
+  padding: 6px 4px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+  transition: 0.15s;
+}
+.skill-tab:hover {
+  color: var(--ink);
+}
+.skill-tab[data-active="true"] {
+  background: var(--card);
+  color: var(--ink);
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(40, 36, 24, 0.12);
+}
+.skill-tab:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-wash);
+}
+
+.skill-note {
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--card);
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.65;
+}
+.skill-note code {
+  padding: 0 3px;
+  border-radius: 4px;
+  background: var(--bg-sunk);
+  color: var(--ink);
+  font-size: 11px;
+}
+.skill-note ul {
+  margin: 4px 0 0;
+  padding-left: 16px;
+}
+
+.skill-input-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.skill-input-row > input {
+  flex: 1;
+  min-width: 0;
+}
+.skill-input-row > button {
+  flex: none;
+  white-space: nowrap;
+}
+.skill-dialog-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 2px;
+}
+/* 主操作比卡片里的小按钮更有分量（仅限本弹窗，不动全局 .btn） */
+.skill-dialog-foot .btn {
+  padding: 6px 20px;
+  font-size: 12px;
+}

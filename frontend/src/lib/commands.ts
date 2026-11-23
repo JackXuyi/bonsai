@@ -29,6 +29,8 @@ import type {
   PerceptionConfig,
   PerceptionStatus,
   RelationshipStatus,
+  SkillCreateInput,
+  SkillDetail,
   SkillView,
   ToolCallRecord,
   ToolDescriptor,
@@ -209,6 +211,18 @@ export const skillToggle = (id: string, enable: boolean) =>
   call<void>("skill_toggle", { id, enable });
 export const skillRemove = (id: string) =>
   call<void>("skill_remove", { id });
+/** 技能全文预览（body + references，skill_read）。 */
+export const skillRead = (id: string) => call<SkillDetail>("skill_read", { id });
+/** 从本地目录导入技能包（目录名即 id，含 SKILL.md），返回导入的 id。 */
+export const skillImport = (source: string) =>
+  call<string>("skill_import", { source });
+/** 手写创建技能包（四项必填，后端走同一套校验）。 */
+export const skillCreate = (input: SkillCreateInput) =>
+  call<void>("skill_create", input as unknown as Record<string, unknown>);
+/** 从远端加载技能包（GitHub repo/tree/raw、GitLab blob、任意 https SKILL.md）。
+ *  联网只发生在这次显式点击；id 留空则从链接推导。返回最终 id。 */
+export const skillLoadRemote = (url: string, id?: string) =>
+  invokeWithTimeout<string>("skill_load_remote", { url, id: id ?? null }, 60000);
 export const toolCallRecords = (limit?: number) =>
   call<ToolCallRecord[]>("tool_call_records", { limit });
 
@@ -229,9 +243,28 @@ export function humanizeAgentError(err: unknown): string {
   if (s.includes("bad_url")) return "地址不对：要以 http:// 或 https:// 开头";
   if (s.includes("bad_command")) return "要填可执行文件的路径";
   if (s.includes("server_not_found")) return "这条配置已经不在了，刷新一下";
-  if (s.includes("skill_invalid")) return "技能包格式不对（缺 name/description）";
-  if (s.includes("skill_too_large")) return "技能包太大：SKILL.md ≤8KB，引用 ≤4KB×5";
+  if (s.includes("skill_invalid")) {
+    if (s.includes("source is not a directory"))
+      return "目录不对：所选文件夹里要有 SKILL.md";
+    if (s.includes("missing fields")) return "名称 / 描述 / 正文都不能为空";
+    if (s.includes("newline in frontmatter field"))
+      return "名称和描述里不能有换行";
+    if (s.includes("bad skill id"))
+      return "技能 ID 不合法：只能小写字母、数字和连字符";
+    if (s.includes("bad_skill_id")) return "技能 ID 不合法";
+    return "技能包格式不对（缺 name/description）";
+  }
+  if (s.includes("skill_too_large")) return "技能包太大：SKILL.md ≤16KB，引用 ≤4KB×5";
   if (s.includes("skill_injection")) return "技能包试图改写人格边界，已拒绝载入";
+  if (s.includes("skill_exists")) return "同名技能包已存在，换个 id 或先删掉旧的";
+  if (s.includes("skill_reserved")) return "这个 id 是内置引擎包（日报/周报）保留的";
+  if (s.includes("skill_io")) return "读写失败：源目录里要有 SKILL.md（引用为可选 references/*.md）";
+  if (s.includes("skill_not_found")) return "链接里没找到 SKILL.md：确认仓库/分支/目录写对了";
+  if (s.includes("skill_rate_limited")) return "GitHub 限流了（未登录每小时 60 次），过一会儿再试";
+  if (s.includes("skill_network")) return "网络不通：检查网络后重试（本地技能不受影响）";
+  if (s.includes("bad_skill_url"))
+    return "链接形式不支持：贴 GitHub 仓库/目录/raw 链接，或任意以 .md 结尾的 https 链接";
+  if (s.includes("missing SKILL.md")) return "这个文件夹里没有 SKILL.md";
   if (s.includes("bad_skill_id")) return "技能 ID 不合法";
   if (s.includes("no_tool_cache")) return "还没拿到工具清单：先启用或测试连接";
   if (s.includes("no_home")) return "读不到用户主目录，无法扫描本机";

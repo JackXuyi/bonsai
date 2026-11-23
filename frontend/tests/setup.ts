@@ -13,4 +13,13 @@ if (typeof window !== "undefined") {
       dispatchEvent: () => false,
     })) as unknown as typeof window.matchMedia;
   }
+  // jsdom 没实现 <dialog>；SkillAdd/SkillPreview/Report dialog 的 showModal 需要它。
+  if (!window.HTMLDialogElement.prototype.showModal) {
+    window.HTMLDialogElement.prototype.showModal = function () {
+      this.setAttribute("open", "");
+    };
+    window.HTMLDialogElement.prototype.close = function () {
+      this.removeAttribute("open");
+    };
+  }
 }

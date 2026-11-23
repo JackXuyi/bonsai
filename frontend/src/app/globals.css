@@ -56,7 +56,14 @@
 }
 .agent-transport-pick { display: flex; gap: 6px; }
 .agent-field { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; font-size: 12px; }
-.agent-field input { padding: 6px 8px; border: 1px solid var(--line, rgba(0,0,0,.12)); border-radius: 8px; }
+.agent-field input,
+.agent-field textarea {
+  padding: 6px 8px;
+  border: 1px solid var(--line, rgba(0,0,0,.12));
+  border-radius: 8px;
+  font: inherit;
+}
+.agent-field textarea { min-height: 120px; resize: vertical; }
 .agent-form .mconfirm-actions { margin-top: 12px; }
 .agent-record {
   display: flex; align-items: center; gap: 8px; width: 100%;
