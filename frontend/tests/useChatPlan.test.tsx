@@ -69,7 +69,8 @@ beforeEach(() => {
     ch.onmessage?.({ task_step: { event: "task_step", id: "t1", seq: 0, tool: "calendar_list", status: "ok" } });
     ch.onmessage?.({ task_step: { event: "task_done", id: "t1", status: "done" } });
     ch.onmessage?.({ delta: "好啦，摘要写完了。" });
-    return { reply: "好啦，摘要写完了。", turn_id: 7 };
+    // P1：终态走事件，命令本身立即返回（这里 return undefined）
+    ch.onmessage?.({ turn_done: { reply: "好啦，摘要写完了。", turn_id: 7 } });
   });
 });
 
@@ -127,14 +128,27 @@ describe("useChat × 计划事件", () => {
     expect(all).not.toContain("没发出去");
   });
 
-  it("点「停」用本轮 task id 叫停后端", async () => {
-    let release!: () => void;
+  it("turn_error 事件：气泡说明失败原因，不静默", async () => {
+    chatMock.mockImplementation(async (_t: string, _s: string, ch: { onmessage: ((m: unknown) => void) | null }) => {
+      ch.onmessage?.({ task_step: { event: "task_start", id: "t2", goal: "g", planned: true } });
+      ch.onmessage?.({ turn_error: "model_unreachable" });
+    });
+    render(<Harness />);
+    fireEvent.click(screen.getByText("发"));
+
+    await waitFor(() => {
+      const bot = useChatStore.getState().messages.filter((m) => m.kind === "bot");
+      expect(bot.some((m) => m.text.includes("model_unreachable"))).toBe(true);
+    });
+  });
+
+  it("点「停」用本轮 task id 叫停后端", async () => {    let release!: () => void;
     chatMock.mockImplementation(async (_t: string, _s: string, ch: { onmessage: ((m: unknown) => void) | null }) => {
       ch.onmessage?.({ task_step: { event: "task_start", id: "t9", goal: "g", planned: true } });
       await new Promise<void>((r) => {
         release = r;
       });
-      return { reply: "停了", turn_id: 1 };
+      ch.onmessage?.({ turn_done: { reply: "停了", turn_id: 1 } });
     });
     render(<Harness />);
     fireEvent.click(screen.getByText("发"));

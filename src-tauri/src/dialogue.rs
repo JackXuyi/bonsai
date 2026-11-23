@@ -2015,13 +2015,18 @@ pub async fn dialogue_chat(
     .map_err(|e| e.to_string())?
 }
 
-/// Streaming chat command: deltas go to the frontend via the IPC channel
-/// while the model is still generating; the final outcome (filter report,
-/// fallback flag) returns once the reply is complete. The full reply is ALSO
-/// in the outcome, so a client that ignores the channel still works.
+/// Streaming chat command: **fire-and-forget**（2026-11-23，P1）。
 ///
-/// The whole pipeline runs in `spawn_blocking` — see the MAIN-THREAD RULE
-/// above (the stream itself is channel pushes, safe from a worker thread).
+/// 命令立即返回受理结果，整轮结果通过同一 Channel 的
+/// `turn_done`（完整 `DialogueOutcome`）/ `turn_error`（字符串）事件回传。
+/// 为什么不按旧做法「命令等整轮再 resolve」：一轮真实对话是分钟级
+/// （计划轮 1 次 + ≤6 次云端请求，单次上限 120s，+ 工具执行 + 有界重试），
+/// 前端任何固定 IPC 兜底都会在它还在正常跑的时候先判失败——2026-11-23 实录
+/// 一条查天气的消息后端跑了 28s+，前端 15s 就撤气泡、后端继续落库。
+/// 现在前端只按「事件静默」判死（见 useChat 的 IDLE_TIMEOUT_MS）。
+///
+/// 管线仍在 `spawn_blocking` 里跑（MAIN-THREAD RULE 见上），事件推送本身
+/// 是线程安全的 channel send。
 #[tauri::command]
 pub async fn dialogue_chat_stream(
     app: tauri::AppHandle,
@@ -2029,46 +2034,55 @@ pub async fn dialogue_chat_stream(
     session_id: Option<String>,
     raining: Option<bool>,
     on_delta: tauri::ipc::Channel<serde_json::Value>,
-) -> Result<DialogueOutcome, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let store = app.state::<MemoryStore>();
-        let card = app.state::<Persona>();
-        let calendar = app.state::<crate::calendar::CalendarState>();
-        let agent = app.state::<crate::mcp_admin::AgentState>();
-        let session = session_id.unwrap_or_else(|| "default".to_string());
-        let hour = chrono::Local::now().hour() as u32;
-        let mut backend = crate::persona::backend().map_err(|e| e.to_string())?;
-        // Short lock for the gate + kit build; the turn locks per phase.
-        let mut kit = {
-            let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
-            crate::onboarding::ensure_not_minor(&conn)?;
-            crate::mcp_admin::build_agent_kit(&conn, agent.inner(), &user_text)
+) -> Result<(), String> {
+    let done_chan = on_delta.clone();
+    tauri::async_runtime::spawn(async move {
+        let res = tauri::async_runtime::spawn_blocking(move || {
+            let store = app.state::<MemoryStore>();
+            let card = app.state::<Persona>();
+            let calendar = app.state::<crate::calendar::CalendarState>();
+            let agent = app.state::<crate::mcp_admin::AgentState>();
+            let session = session_id.unwrap_or_else(|| "default".to_string());
+            let hour = chrono::Local::now().hour() as u32;
+            let mut backend = crate::persona::backend().map_err(|e| e.to_string())?;
+            // Short lock for the gate + kit build; the turn locks per phase.
+            let mut kit = {
+                let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+                crate::onboarding::ensure_not_minor(&conn)?;
+                crate::mcp_admin::build_agent_kit(&conn, agent.inner(), &user_text)
+            };
+            let mut emit = |delta: &str| {
+                let _ = on_delta.send(serde_json::json!({ "delta": delta }));
+            };
+            // 任务卡进度（v12）：同一 Channel 上的结构化消息——前端按
+            // msg.task_step 分流渲染，不进正文气泡。
+            let mut emit_task = |v: serde_json::Value| {
+                let _ = on_delta.send(serde_json::json!({ "task_step": v }));
+            };
+            chat_turn_streaming_with_kit(
+                store.inner(),
+                backend.as_mut(),
+                &card,
+                &session,
+                &user_text,
+                hour,
+                raining.unwrap_or(false),
+                calendar.inner().source().access(),
+                &mut kit,
+                &mut emit,
+                &mut emit_task,
+            )
+            .map_err(|e| e.to_string())
+        })
+        .await;
+        let payload = match res {
+            Ok(Ok(outcome)) => serde_json::json!({ "turn_done": outcome }),
+            Ok(Err(e)) => serde_json::json!({ "turn_error": e }),
+            Err(e) => serde_json::json!({ "turn_error": e.to_string() }),
         };
-        let mut emit = |delta: &str| {
-            let _ = on_delta.send(serde_json::json!({ "delta": delta }));
-        };
-        // 任务卡进度（v12）：同一 Channel 上的结构化消息——前端按
-        // msg.task_step 分流渲染，不进正文气泡。
-        let mut emit_task = |v: serde_json::Value| {
-            let _ = on_delta.send(serde_json::json!({ "task_step": v }));
-        };
-        chat_turn_streaming_with_kit(
-            store.inner(),
-            backend.as_mut(),
-            &card,
-            &session,
-            &user_text,
-            hour,
-            raining.unwrap_or(false),
-            calendar.inner().source().access(),
-            &mut kit,
-            &mut emit,
-            &mut emit_task,
-        )
-        .map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| e.to_string())?
+        let _ = done_chan.send(payload);
+    });
+    Ok(())
 }
 
 /// Manual proactive trigger result: the message plus its trace turn id.

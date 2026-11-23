@@ -10,7 +10,6 @@ import type {
   CloudEntryView,
   CloudTestReport,
   ConsolidateResult,
-  DialogueOutcome,
   DialogueBubble,
   DiscoveredServer,
   FsStatus,
@@ -62,17 +61,16 @@ export const relationshipAck = (id: number) =>
 export const relationshipReset = () => call<void>("relationship_reset");
 
 // ---------- dialogue ----------
-/** 一轮对话是最长的 IPC：计划轮 + ≤6 次云端请求（单次上限 120s）+ 工具执行
- *  + 有界重试。默认 15s 的 invoke 兜底会在一轮真的跑着时先判失败
- *  （2026-11-23 实录：一条查天气的消息后端跑了 28s+，前端 15s 就放弃，
- *  气泡被撤、后端继续跑）。这里给到 10 分钟——只防 IPC 真挂死，不判业务慢。 */
+/** 一轮对话是最长的 IPC，命令本身 **fire-and-forget**（立即返回受理结果），
+ *  正文与终态都走 Channel：delta* → turn_done / turn_error（P1，2026-11-23）。
+ *  保留 10 分钟兜底只防 IPC 真挂死——业务慢由前端的「事件静默」看门狗判。 */
 const DIALOGUE_IPC_TIMEOUT_MS = 600000;
 export const dialogueChatStream = (
   userText: string,
   sessionId: string,
   onDelta: unknown
 ) =>
-  invokeWithTimeout<DialogueOutcome>(
+  invokeWithTimeout<void>(
     "dialogue_chat_stream",
     { userText, sessionId, onDelta },
     DIALOGUE_IPC_TIMEOUT_MS

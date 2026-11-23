@@ -1,10 +1,11 @@
 "use client";
 
-// 发送 + 流式接收（旧 sendMessage：Channel onDelta 渐增气泡，typing 占位
-// 首块替换；无 delta 时整段渲染；错误撤气泡）。
-// 工具调用过程不进消息流（2026-11-22 用户裁决）：Channel 上的 task_* 事件
-// 只转给 planStore（工具页进度面板，T6），消息只展示结果；调用明细在气泡
-// 「查看详情」的 /trace 页（后端 rec.tool_call 已把每次调用落进 trace_steps）。
+// 发送 + 事件驱动的流式接收（2026-11-23 重构，P1）。
+// 后端 `dialogue_chat_stream` 现在是 **fire-and-forget**：命令立即返回，整轮
+// 结果通过同一 Channel 的 `turn_done` / `turn_error` 事件回传。这样一轮真的
+// 跑几分钟也不会被 IPC 兜底超时误判（旧实现是「命令整轮才 resolve」）。
+// 兜底改为**事件静默看门狗**：超过 IDLE_TIMEOUT_MS 没有任何事件才算断。
+// 工具调用过程不进消息流（2026-11-22 裁决）：task_* 只转 planStore。
 import { useCallback, useRef, useState } from "react";
 import { Channel } from "@tauri-apps/api/core";
 import { dialogueCancel, dialogueChatStream, facePreview } from "@/lib/commands";
@@ -13,8 +14,20 @@ import { noteFor } from "@/components/face/frames";
 import { useChatStore } from "@/lib/stores/chatStore";
 import { usePlanStore } from "@/lib/stores/planStore";
 import { toast } from "@/lib/stores/uiStore";
+import type { DialogueOutcome } from "@/lib/types";
 
 const SESSION_ID = "default";
+
+/** 事件静默上限：一轮真实对话里最长静默是单次云端 HTTP（上限 120s），
+ *  取 150s 留余量——只判「真断了」，不判「慢」。 */
+export const IDLE_TIMEOUT_MS = 150000;
+
+type StreamMsg = {
+  delta?: string;
+  task_step?: unknown;
+  turn_done?: DialogueOutcome;
+  turn_error?: string;
+};
 
 export function useChat() {
   const [chatting, setChatting] = useState(false);
@@ -38,7 +51,7 @@ export function useChat() {
     }
   }, []);
 
-  const send = useCallback(async (raw: string) => {
+  const send = useCallback((raw: string) => {
     const text = raw.trim();
     if (!text || chattingRef.current) return;
 
@@ -57,13 +70,47 @@ export function useChat() {
     setChatting(true);
     const typingId = store.add({ kind: "typing", text: "" });
 
-    // Streaming: deltas arrive while the model is still generating; the
-    // typing placeholder is swapped for a real bubble on the first chunk.
-    // task_step 事件改转 planStore（T6 进度面板）——仍不进消息流。
-    let bubbleId: number | null = null;
     const plan = usePlanStore.getState();
-    const onDelta = new Channel<{ delta?: string; task_step?: unknown }>();
+    let bubbleId: number | null = null;
+    let settled = false;
+    let idle: ReturnType<typeof setTimeout> | undefined;
+
+    const endTurn = () => {
+      activeTaskRef.current = null;
+      chattingRef.current = false;
+      setChatting(false);
+      if (idle) clearTimeout(idle);
+      idle = undefined;
+    };
+
+    // 失败/断流：已流出的字一个都不撤（后端可能仍在跑，撤了就前后端各说一套）。
+    const fail = (reason: unknown) => {
+      store.remove(typingId);
+      const tail = `\n\n（这一轮没等到结果：${reason}。它可能还在后台跑——别急着重发，稍等再看。）`;
+      if (bubbleId !== null) {
+        store.appendText(bubbleId, tail);
+        store.patch(bubbleId, { streaming: false });
+      } else {
+        store.add({ kind: "bot", text: tail.trim() });
+      }
+    };
+
+    const armIdle = () => {
+      if (idle) clearTimeout(idle);
+      idle = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        fail(`静默超过 ${IDLE_TIMEOUT_MS / 1000} 秒`);
+        endTurn();
+        toast("等太久了：它可能还在后台跑");
+      }, IDLE_TIMEOUT_MS);
+    };
+
+    const onDelta = new Channel<StreamMsg>();
     onDelta.onmessage = (msg) => {
+      if (settled) return;
+      armIdle();
+
       if (msg?.task_step) {
         const ev = msg.task_step as { event?: string; id?: string };
         if (ev?.event === "task_start" && typeof ev.id === "string") {
@@ -72,53 +119,67 @@ export function useChat() {
         plan.applyTaskEvent(msg.task_step);
         // 计划语义（goal + 每步 intent）只有 plan_list 有：开卡与收尾各拉一次
         // 做基线/终态对齐，执行中靠事件增量推进，不做定时轮询。
-        const kind = (msg.task_step as { event?: string })?.event;
-        if (kind === "task_start" || kind === "task_done" || kind === "task_canceled") {
+        if (
+          ev?.event === "task_start" ||
+          ev?.event === "task_done" ||
+          ev?.event === "task_canceled"
+        ) {
           void plan.refresh();
         }
         return;
       }
+
+      // 终态事件：整轮的权威结果（P1 之后不再有「命令返回值」这条路）
+      if (msg?.turn_done) {
+        settled = true;
+        const outcome = msg.turn_done;
+        if (bubbleId === null) {
+          store.remove(typingId);
+          bubbleId = store.add({
+            kind: "bot",
+            text: "",
+            ts: new Date().toISOString(),
+          });
+        }
+        store.setText(bubbleId, outcome.reply);
+        store.setNote(bubbleId, noteFor(outcome));
+        if (outcome.turn_id) {
+          store.patch(bubbleId, { turnId: outcome.turn_id });
+          store.patch(userId, { turnId: outcome.turn_id });
+        }
+        facePreview("greeted").catch(() => {});
+        endTurn();
+        return;
+      }
+
+      if (msg?.turn_error) {
+        settled = true;
+        fail(msg.turn_error);
+        endTurn();
+        return;
+      }
+
       if (!msg?.delta) return;
       if (bubbleId === null) {
         store.remove(typingId);
-        bubbleId = store.add({ kind: "bot", text: "", streaming: true, ts: new Date().toISOString() });
+        bubbleId = store.add({
+          kind: "bot",
+          text: "",
+          streaming: true,
+          ts: new Date().toISOString(),
+        });
       }
       store.appendText(bubbleId, msg.delta);
     };
 
-    try {
-      const outcome = await dialogueChatStream(text, SESSION_ID, onDelta);
-      const finishedAt = new Date().toISOString();
-      if (bubbleId === null) {
-        // No deltas at all (fallback line / dead model) — render whole reply.
-        store.remove(typingId);
-        bubbleId = store.add({ kind: "bot", text: "", ts: finishedAt });
-      }
-      store.setText(bubbleId, outcome.reply);
-      store.setNote(bubbleId, noteFor(outcome));
-      // Trace linkage (spec-s8): both sides of the turn link to the trace page.
-      if (outcome.turn_id) {
-        store.patch(bubbleId, { turnId: outcome.turn_id });
-        store.patch(userId, { turnId: outcome.turn_id });
-      }
-      // Speaking counts as "being talked to": flash the greeted face.
-      facePreview("greeted").catch(() => {});
-    } catch (err) {
-      // 超时 ≠ 没发出去：IPC 放弃等待时后端通常还在跑，已流出的字一个都不能撤
-      // （2026-11-23 实录：撤气泡后后端把回复照常落库，前后端各说一套）。
-      store.remove(typingId);
-      if (bubbleId !== null) {
-        store.appendText(bubbleId, `\n\n（这一轮没等到结果：${err}。它可能还在后台跑——别急着重发，稍等再看。）`);
-        store.patch(bubbleId, { streaming: false });
-      } else {
-        store.add({ kind: "bot", text: `（这一轮没等到结果：${err}。它可能还在后台跑，稍等再看。）` });
-      }
-      toast("等太久了：它可能还在后台跑");
-    } finally {
-      activeTaskRef.current = null;
-      chattingRef.current = false;
-      setChatting(false);
-    }
+    armIdle();
+    // 命令只负责「受理」；结果一律走 Channel 事件。
+    dialogueChatStream(text, SESSION_ID, onDelta).catch((err) => {
+      if (settled) return;
+      settled = true;
+      fail(err);
+      endTurn();
+    });
   }, [chat]);
 
   return { send, chatting, cancel };
