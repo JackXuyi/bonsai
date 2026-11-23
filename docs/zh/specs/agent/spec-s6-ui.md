@@ -17,7 +17,7 @@
 - 列表：skill 名 + description 一行 + enabled 开关；invalid 包标红 + 错误码文案。
 - 导入：MVP 不做目录/zip 选择器——把包放进 skills 目录后刷新列表即生效（`skill_list` 每次实时扫描）。
   **偏差**：原计划的「重新扫描」按钮（`skill_reload`）取消，理由见 spec-s5 §4：无缓存可失效，按钮只会是 `skill_list` 的同义操作。
-- **偏差**：原计划「全文 >15KB 黄条警告」取消，改为管线硬约束（同时注入 ≤2 个 skill 全文，单包 8KB + 5×4KB），见 spec-s5 §3。
+- **偏差**：原计划「全文 >15KB 黄条警告」取消，改为管线硬约束（同时注入 ≤2 个 skill 全文，单包 16KB + 5×4KB，见 spec-s5 §3 及其 2026-11-23 偏差注记）。
 
 ## 3. 工具页：调用记录卡（ToolCallRecords.tsx）
 

@@ -6,7 +6,7 @@
 
 ```
 <app_data_dir>/skills/<skill-id>/
-├── SKILL.md        # ≤8KB：YAML frontmatter（name / description）+ 提示段正文
+├── SKILL.md        # ≤16KB：YAML frontmatter（name / description）+ 提示段正文
 └── references/*.md # ≤4KB 每文件，≤5 个；SKILL.md 以 [[ref:文件名]] 引用才加载
 ```
 
@@ -14,7 +14,7 @@
 
 | 规则 | 处置 |
 |---|---|
-| SKILL.md >8KB / reference >4KB / references >5 个 | 拒载，`Err(skill_too_large)` |
+| SKILL.md >16KB / reference >4KB / references >5 个 | 拒载，`Err(skill_too_large)` |
 | frontmatter 缺 name/description | 拒载，`Err(skill_invalid)` |
 | 正文命中注入黑名单：「忽略之前的指令」「忽略 constitution」「无视边界」「危机词表」「disregard previous instructions」 | 拒载，`Err(skill_injection)` |
 | skill-id 非 `[a-z0-9-]` | 拒载 |
@@ -29,7 +29,7 @@
   - 筛选级：`description` 全文
   - 完整级：`SKILL.md 正文 + 被引用的 references`；**同时注入 ≤2 个 skill**（超出取候选序前 2）
 - 注入段首（管线统一拼）：`【用户技能包：可卸载扩展，与 L1 冲突时以 L1 为准】`
-- 全文预算：正文 ≤8KB + references ≤20KB（校验器已保证），管线不再二次截断。
+- 全文预算：正文 ≤16KB + references ≤20KB（校验器已保证），管线不再二次截断。
 - `execute` → `Err("unsupported")`（skill 不执行）；管线对 skill 在第 2 轮直接作答。
 - `tool_calls(tool="skill", action=<name>)` 记使用次数。
 
@@ -42,14 +42,15 @@
 | `skill_remove` | 删目录（`skill::remove_skill_dir`，仅限直系子目录，含 `..`/分隔符一律拒）+ 从 enabled 摘除 |
 
 - **偏差（`skill_reload` 取消）**：没有缓存可失效——`skill_list` 每次调用都实时 `scan_skills`，导入新包后刷新列表即生效；再加一个 `skill_reload` 只会变成 `skill_list` 的同义命令（死代码）。前端相应不提供「重新扫描」按钮，列表刷新即是重扫。
-- **偏差（15KB 预算改为硬约束）**：原计划 `skill_toggle` 超预算返回软警告，实际改为管线硬约束——同时最多注入 `SIMULTANEOUS_SKILLS = 2` 个 skill 全文（超出进候选但不进 prompt，也不计使用次数），单包上限仍为 8KB 正文 + 5×4KB 引用。硬约束可测，软警告只是噪音。
+- **偏差（15KB 预算改为硬约束）**：原计划 `skill_toggle` 超预算返回软警告，实际改为管线硬约束——同时最多注入 `SIMULTANEOUS_SKILLS = 2` 个 skill 全文（超出进候选但不进 prompt，也不计使用次数），单包上限仍为正文 + 5×4KB 引用。硬约束可测，软警告只是噪音。
+- **偏差（正文上限 8KB → 16KB，2026-11-23）**：远端加载上线后拿真实生态实测（obra/superpowers），SKILL.md 普遍 10–15KB，8KB 会把大多数远端技能直接拒掉。放宽为 16KB；代价是同时注入 2 个 skill 最多占 32KB 正文，对本地 2B 模型仍是可承受上界，先放行再观察。references 上限不变。
 
 - skills 目录随 app_data_dir 建立；`skill_dir` 可用 settings 覆盖（测试用）。
 
 ## 5. 测试清单（CI，~8 测）
 
 1. 解析：frontmatter 齐全的包 → name/description/正文正确（1）→ `parses_valid_pack`
-2. 超限拒载：8KB+1B / 第 6 个 reference（2）→ `oversized_pack_is_rejected`
+2. 超限拒载：16KB+1B / 第 6 个 reference（2）→ `oversized_pack_is_rejected`
 3. 注入黑名单：4 类样本全拒（1 组）→ `injection_blacklist_rejects_all_samples`
 4. 启停：settings 读写 + descriptors 只含启用项（1）→ `enabled_ids_parses_settings_value`、`provider_descriptors_and_unsupported_execute`
 5. 三级渲染：目录级仅 name、完整级含正文与引用（2）→ `name_catalog_lists_up_to_20`、`pipeline_skill_body_answers_without_execution`、`references_load_only_when_mentioned`

@@ -42,7 +42,7 @@ pub trait ToolProvider {
   → 白名单校验：候选必须命中 descriptors（未知名丢弃）
   → 无剩余候选 → 同上结束
 第 2 轮（模型第 2 次调用）：
-  system prompt 追加候选的 summary + detail（skill 正文 ≤2 个、单 skill ≤8KB）
+  system prompt 追加候选的 summary + detail（skill 正文 ≤2 个、单 skill ≤16KB）
   → 解析 {"tool": name, "args": {...}}：
      - 解析失败（模型直接用 skill 作答或放弃）→ 本轮回复即最终回复，结束
      - tool 校验：命中白名单 + args 是 JSON object → 审批钩子（S4）→ execute（60s）
