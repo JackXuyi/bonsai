@@ -423,6 +423,10 @@ pub struct AgentKit {
     /// 定向取用。它们不进 `providers`——两个包会占满 SIMULTANEOUS_SKILLS，
     /// 把用户自己的 skill 挤掉。
     pub engine_skills: Vec<crate::skill::SkillPack>,
+    /// 轮内工具结果缓存（plan-tool-cache v2）：随 kit 生、随 kit 死——
+    /// `build_agent_kit` 每轮新建，调用结束即弃。只对 Read 档生效，
+    /// 详见 `crate::tool_cache`。
+    pub tool_cache: crate::tool_cache::TurnToolCache,
 }
 
 impl AgentKit {
@@ -434,6 +438,7 @@ impl AgentKit {
             task_id: Mutex::new(None),
             prompt_trace: Mutex::new(Vec::new()),
             engine_skills: Vec::new(),
+            tool_cache: crate::tool_cache::TurnToolCache::new(),
         }
     }
 
@@ -586,6 +591,26 @@ pub fn execute_audited(
     } else {
         "auto_allowed"
     };
+    // 轮内缓存（plan-tool-cache v2）：Read 档在 gate 照常通过后查本轮
+    // 记忆——同 (tool, args) 的第二次调用不再真执行，但 gate/审批语义
+    // 零绕过。Ask/Forbidden 永不读缓存（每次执行都要见 gate）。
+    if descriptor.access == crate::agent_tools::ToolAccess::Read {
+        if let Some(out) = kit.tool_cache.get(name, &call.args) {
+            audit_log(
+                store,
+                descriptor.kind.as_str(),
+                &descriptor.name,
+                "ok",
+                "cache_hit",
+                Some(&args_summary),
+                Some(kit.trace_ref().as_str()),
+                descriptor.remote,
+                Some(started.elapsed().as_millis() as i64),
+                kit_task_id(kit).as_deref(),
+            );
+            return Ok(out);
+        }
+    }
     let result = if provider.needs_conn() {
         let conn = store.0.lock().map_err(|_| "store_poisoned".to_string())?;
         provider.execute_with_conn(&conn, &call)
@@ -607,6 +632,13 @@ pub fn execute_audited(
                 duration,
                 kit_task_id(kit).as_deref(),
             );
+            // 缓存写入/失效（plan-tool-cache §2）：Read 成功入缓存；
+            // 非 Read（写/ask 档）成功 → 清空整表，写后读必须新鲜。
+            if descriptor.access == crate::agent_tools::ToolAccess::Read {
+                kit.tool_cache.put(name, &call.args, out.clone());
+            } else {
+                kit.tool_cache.clear();
+            }
             Ok(out)
         }
         Err(e) => {
@@ -764,7 +796,7 @@ pub fn build_agent_kit(conn: &Connection, state: &AgentState, user_text: &str) -
     let ask_gate: Box<dyn ApprovalGate> =
         Box::new(AskFirstGate::new(state.approvals.clone(), state.app.clone()));
 
-    AgentKit { providers, gate, ask_gate, task_id: Mutex::new(None), prompt_trace: Mutex::new(Vec::new()), engine_skills }
+    AgentKit { providers, gate, ask_gate, task_id: Mutex::new(None), prompt_trace: Mutex::new(Vec::new()), engine_skills, tool_cache: crate::tool_cache::TurnToolCache::new() }
 }
 
 /// One-at-a-time approval handshake (spec-s4): the chat turn reserves a slot
@@ -1478,7 +1510,7 @@ pub(crate) mod tests {
             providers: vec![Box::new(ok)],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
             ask_gate: Box::new(AskFirstGate::new(std::sync::Arc::new(ApprovalBroker::default()), None)),
-            task_id: Mutex::new(None),            prompt_trace: Mutex::new(Vec::new()),
+            task_id: Mutex::new(None),            prompt_trace: Mutex::new(Vec::new()),            tool_cache: Default::default(),
             ..AgentKit::empty()
         };
         kit.trace("round1:candidates=1".into());
@@ -1509,7 +1541,7 @@ pub(crate) mod tests {
             providers: vec![Box::new(broken)],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
             ask_gate: Box::new(AskFirstGate::new(std::sync::Arc::new(ApprovalBroker::default()), None)),
-            task_id: Mutex::new(None),            prompt_trace: Mutex::new(Vec::new()),
+            task_id: Mutex::new(None),            prompt_trace: Mutex::new(Vec::new()),            tool_cache: Default::default(),
             ..AgentKit::empty()
         };
         let err = execute_audited(&s, &kit_broken, "weather", serde_json::json!({})).unwrap_err();
@@ -1533,7 +1565,7 @@ pub(crate) mod tests {
             providers: vec![Box::new(provider)],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
             ask_gate: Box::new(AskFirstGate::new(std::sync::Arc::new(ApprovalBroker::default()), None)),
-            task_id: Mutex::new(None),            prompt_trace: Mutex::new(Vec::new()),
+            task_id: Mutex::new(None),            prompt_trace: Mutex::new(Vec::new()),            tool_cache: Default::default(),
             ..AgentKit::empty()
         };
 
@@ -1650,7 +1682,7 @@ pub(crate) mod tests {
             ],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
             ask_gate: Box::new(AskFirstGate::new(std::sync::Arc::new(ApprovalBroker::default()), None)),
-            task_id: Mutex::new(None),            prompt_trace: Mutex::new(Vec::new()),
+            task_id: Mutex::new(None),            prompt_trace: Mutex::new(Vec::new()),            tool_cache: Default::default(),
             ..AgentKit::empty()
         };
         let names: Vec<String> = kit.catalog().into_iter().map(|d| d.name).collect();
@@ -1679,7 +1711,7 @@ pub(crate) mod tests {
             providers: vec![Box::new(p)],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
             ask_gate: Box::new(AskFirstGate::new(std::sync::Arc::new(ApprovalBroker::default()), None)),
-            task_id: Mutex::new(None),            prompt_trace: Mutex::new(Vec::new()),
+            task_id: Mutex::new(None),            prompt_trace: Mutex::new(Vec::new()),            tool_cache: Default::default(),
             ..AgentKit::empty()
         }
     }
@@ -1717,7 +1749,7 @@ pub(crate) mod tests {
             providers: vec![Box::new(p)],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
             ask_gate: Box::new(AllowAllGate),
-            task_id: Mutex::new(None),            prompt_trace: Mutex::new(Vec::new()),
+            task_id: Mutex::new(None),            prompt_trace: Mutex::new(Vec::new()),            tool_cache: Default::default(),
             ..AgentKit::empty()
         };
         let out = execute_audited(&s, &kit, "send_mail", serde_json::json!({})).unwrap();
@@ -1738,5 +1770,66 @@ pub(crate) mod tests {
         .unwrap();
         assert_eq!(old.access, crate::agent_tools::ToolAccess::Read);
         assert_eq!(old.access.as_str(), "read");
+    }
+
+    // ---- 轮内工具缓存（plan-tool-cache v2）
+
+    #[test]
+    fn execute_audited_memoizes_read_tools_within_one_kit() {
+        let s = mem_store();
+        let mut p = crate::mcp::MockMcpProvider::with_tool("weather", "查天气", "{}");
+        p.replies.insert("weather".into(), "杭州多云 18 度".into());
+        let kit = AgentKit {
+            providers: vec![Box::new(p)],
+            gate: Box::new(crate::agent_tools::AutoAllowGate),
+            ask_gate: Box::new(AskFirstGate::new(std::sync::Arc::new(ApprovalBroker::default()), None)),
+            task_id: Mutex::new(None),            prompt_trace: Mutex::new(Vec::new()),            tool_cache: Default::default(),
+            ..AgentKit::empty()
+        };
+        let args = serde_json::json!({"city": "杭州", "unit": "c"});
+        let out1 = execute_audited(&s, &kit, "weather", args.clone()).unwrap();
+        // 键序不同的同参数对象 → 同一缓存键 → 命中，provider 不再执行。
+        let out2 = execute_audited(&s, &kit, "weather", serde_json::json!({"unit": "c", "city": "杭州"})).unwrap();
+        assert_eq!(out1.summary, out2.summary);
+
+        // 审计诚实：一次真执行 + 一次 cache_hit（新行在前）。
+        let records = with_conn(&s, |conn| db::tool_call_records(conn, 10).unwrap());
+        assert_eq!(records[0].result_status.as_deref(), Some("cache_hit"));
+        assert_eq!(records[0].outcome, "ok");
+        assert_eq!(records[1].result_status.as_deref(), Some("auto_allowed"));
+    }
+
+    #[test]
+    fn write_tool_success_clears_the_turn_cache() {
+        let s = mem_store();
+        let mut read_p = crate::mcp::MockMcpProvider::with_tool("weather", "查天气", "{}");
+        read_p.replies.insert("weather".into(), "执行结果".into());
+        let mut write_p = crate::mcp::MockMcpProvider::with_tool("send_mail", "发邮件", "{}");
+        write_p.replies.insert("send_mail".into(), "已执行".into());
+        let mut d = write_p.tools[0].clone();
+        d.access = crate::agent_tools::ToolAccess::Ask;
+        write_p.tools[0] = d;
+        let kit = AgentKit {
+            providers: vec![Box::new(read_p), Box::new(write_p)],
+            gate: Box::new(crate::agent_tools::AutoAllowGate),
+            // ask 门放行（模拟用户点了允许）→ 写成功 → 必须清缓存。
+            ask_gate: Box::new(AllowAllGate),
+            task_id: Mutex::new(None),            prompt_trace: Mutex::new(Vec::new()),            tool_cache: Default::default(),
+            ..AgentKit::empty()
+        };
+        let args = serde_json::json!({"city": "杭州"});
+        execute_audited(&s, &kit, "weather", args.clone()).unwrap();
+        // 命中一次，证明缓存确实在工作。
+        let hit = execute_audited(&s, &kit, "weather", args.clone()).unwrap();
+        assert_eq!(hit.summary, "执行结果");
+        // 写成功 → 清空 → 第三次 weather 重新真执行（非 cache_hit）。
+        execute_audited(&s, &kit, "send_mail", serde_json::json!({})).unwrap();
+        let out3 = execute_audited(&s, &kit, "weather", args.clone()).unwrap();
+        assert_eq!(out3.summary, "执行结果");
+        let records = with_conn(&s, |conn| db::tool_call_records(conn, 10).unwrap());
+        assert_eq!(records[0].result_status.as_deref(), Some("auto_allowed"));
+        assert_eq!(records[0].action, "weather");
+        assert_eq!(records[1].result_status.as_deref(), Some("asked_allowed"));
+        assert_eq!(records[2].result_status.as_deref(), Some("cache_hit"));
     }
 }
