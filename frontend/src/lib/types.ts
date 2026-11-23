@@ -103,6 +103,15 @@ export interface WebStatus {
   enabled: boolean;
 }
 
+/** 表情自定义皮肤 manifest（src-tauri/src/faceskins.rs FaceSkinManifest）。
+ *  slots: 表情槽位（FACE_STATES）→ 槽位文件名；缺键 = 未上传。 */
+export interface FaceSkinManifest {
+  id: string;
+  name: string;
+  created_at: number;
+  slots: Record<string, string>;
+}
+
 // ── onboarding（onboarding.rs）────────────────────────────────
 export interface OnboardingQuestion {
   id: string;

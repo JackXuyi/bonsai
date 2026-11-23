@@ -161,7 +161,7 @@ svg[data-dormant="true"] .flower {
   stroke-linecap: round;
 }
 
-/* ── image skin（图片形象，skins.tsx makeImageSkin） ──────────────── */
+/* ── image / custom skin（图片形象，skins.tsx resolveSkinImage） ───── */
 .face img {
   position: relative;
   width: 100%;

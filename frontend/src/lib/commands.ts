@@ -38,6 +38,7 @@ import type {
   ProactiveReply,
   TurnTrace,
   WebStatus,
+  FaceSkinManifest,
 } from "./types";
 
 async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -123,6 +124,18 @@ export const fsRootRemove = (path: string) =>
 /** 系统目录选择器；null = 用户取消。拿到路径后必须再走 fsRootAdd 校验。 */
 export const fsPickDirectory = () =>
   call<string | null>("fs_pick_directory");
+
+// ---------- faceskins（表情自定义皮肤，plan-face-custom-skins.md §5.1） ----------
+export const faceSkinList = () => call<FaceSkinManifest[]>("face_skin_list");
+export const faceSkinCreate = (name: string) =>
+  call<FaceSkinManifest>("face_skin_create", { name });
+/** 系统文件选择器 + 校验 + 落盘，Rust 全权处理（字节不过 IPC）。 */
+export const faceSkinPickAndImport = (skinId: string, slot: string) =>
+  call<FaceSkinManifest>("face_skin_pick_and_import", { skinId, slot });
+export const faceSkinClearSlot = (skinId: string, slot: string) =>
+  call<FaceSkinManifest>("face_skin_clear_slot", { skinId, slot });
+export const faceSkinDelete = (skinId: string) =>
+  call<void>("face_skin_delete", { skinId });
 
 // ---------- onboarding / boundaries ----------
 export const onboardingStatus = () => call<OnboardingStatus>("onboarding_status");
