@@ -39,6 +39,11 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 # 手输路径（防注入任意路径）。AsyncFileDialog 在 Tauri 命令的 tokio 上下文
 # 里安全（macOS 走 NSOpenPanel 主线程派发）。
 rfd = "0.15"
+# P3-3 Web 检索（plan-web.md）：URL 解析（validate_url 内核）+ 启发式正文
+# 提取（scraper = html5ever 系）。代码库 HTTP 惯例是 ureq 同步客户端，
+# 重定向控制走 redirects(0) 手动逐跳校验（plan §3.2 不变量 4）。
+url = "2"
+scraper = "0.29"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 active-win-pos-rs = "0.9"

@@ -38,6 +38,7 @@ pub mod relationship;
 pub mod report;
 pub mod skill;
 pub mod skill_remote;
+pub mod webtools;
 pub mod summary;
 pub mod tools;
 pub mod tray;
