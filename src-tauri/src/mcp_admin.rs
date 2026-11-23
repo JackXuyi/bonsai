@@ -1312,6 +1312,18 @@ pub fn tool_call_records(
     db::tool_call_records(&conn, limit.unwrap_or(20).clamp(1, 200)).map_err(|e| e.to_string())
 }
 
+/// 计划历史（T6 / plan-planning §5.6）：工具页进度面板首屏基线。
+/// 复用 `db::task_list`（含解析后的 plan_json），不另写一份状态逻辑；
+/// 默认 10 条、上限 50——面板只看最近几轮，不做无限历史。
+#[tauri::command]
+pub fn plan_list(
+    store: tauri::State<'_, crate::memory::MemoryStore>,
+    limit: Option<i64>,
+) -> Result<Vec<db::TaskRow>, String> {
+    let conn = now_conn(&store)?;
+    db::task_list(&conn, limit.unwrap_or(10).clamp(1, 50)).map_err(|e| e.to_string())
+}
+
 /// Answer for the approval card (spec-s4/s6). Returns whether a turn was
 /// actually waiting — a stale card (timeout already fired) gets `false` and
 /// changes nothing. Deliberately touches no DB: the chat turn holds the store

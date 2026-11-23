@@ -11,6 +11,7 @@ import { FileCard } from "./FileCard";
 import { WebCard } from "./WebCard";
 import { BoundaryCard } from "./BoundaryCard";
 import { RelationshipCard } from "./RelationshipCard";
+import { PlanProgressCard } from "./PlanProgressCard";
 import { ToolResult } from "./ToolResult";
 import { ReportDialog } from "./ReportDialog";
 import { ToolCallRecords } from "@/components/agent/ToolCallRecords";
@@ -36,6 +37,7 @@ export function ToolsPane() {
       <FileCard active />
       <BoundaryCard active />
       <RelationshipCard />
+      <PlanProgressCard active />
       <ToolCallRecords />
       <ToolResult />
       <ReportDialog

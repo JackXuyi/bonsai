@@ -150,8 +150,8 @@ git commit -m "<中文 subject>"
 | T2 | `feat(planning): 规划入口与计划轮（D1 确认门）` | `cargo check` 通过；`cargo test --lib` 462 passed（20 正/15 负样本 + 6 个计划轮单测） | — | 基线 454→462；计划轮云端专属，`submit_plan` 不进 catalog |
 | T3 | `cdf1ea8` `feat(planning): 计划步骤状态桥` | `cargo check` 通过；`cargo test --lib` 464 passed | — | 基线 462→464；按执行序号对齐，审计 id 前后水位关联，计划外追加 |
 | T4 | `010dfba` `feat(planning): 失败恢复与取消` | `cargo check` 通过；`cargo test --lib` 469 passed | — | 基线 464→469；AgentKit.canceled + 全局注册表 + dialogue_cancel 命令 |
-| T5 | `feat(planning): trace 计划卡可读化`（待提交） | `cargo test --lib` 469 passed；`npx tsc --noEmit` 0 错；`vitest run` 148 passed | — | 后端补 `step_state` 记录点（`bridge_plan_step` 返回审计 id）；前端类型补三枚举 + 计划卡（`PlanSubmitBlock`/`PlanStateBlock`）+ 7 个解析/渲染单测 |
-| T6 | | | | |
+| T5 | `d84035f` `feat(planning): trace 计划卡可读化` | `cargo test --lib` 469 passed；`npx tsc --noEmit` 0 错；`vitest run` 148 passed | — | 后端补 `step_state` 记录点（`bridge_plan_step` 返回审计 id）；前端类型补三枚举 + 计划卡（`PlanSubmitBlock`/`PlanStateBlock`）+ 7 个解析/渲染单测 |
+| T6 | `feat(planning): 工具页计划进度面板`（待提交） | `cargo test --lib` 469 passed；`npx tsc --noEmit` 0 错；`vitest run` 165 passed | — | 148→165：`planStore`（事件乱序/重复/终态对齐 10）+ 卡片（首屏回放/实时推进/只读/历史/空态 5）+ 消息流隔离 A15（2）。`plan_list` 实装在 `mcp_admin.rs`（命令都住模块里，`lib.rs` 只登记）；`task_canceled` 无 id → store 归到 current；新增 `--ok/--warn/--danger` 语义色 |
 | T7 | | | | |
 
 ---
@@ -164,6 +164,8 @@ git commit -m "<中文 subject>"
 - **`submit_plan` 是协议工具不是能力**：不进 `agent_tools.rs` 的 provider catalog，只由循环特判，否则违反「能力不重复实现」。
 - **`manual` 本版不得真的阻塞**：`plan_confirm_gate()` 恒 `Allow`；A12 单测锁死「设了 manual 也不卡」。
 - **面板首屏与实时态的来源分工**：首屏 `plan_list` 建基线，执行中 `task_step` 增量覆盖，终态以 `tasks` 表为准；不做定时轮询。
+- **`task_canceled` 事件不带 id**（后端只发 `reason`）：`planStore` 把它归到 `current`；新增事件若要带 id 再改 store 的 `asEvent`，不要在组件里猜。
+- **`plan_json` 嵌套字段仍是 snake_case**：`TaskRow` 的 `rename_all` 不下钻，前端必须经 `progressFromRow` 显式映射，不能直接当 camelCase 用。
 - **tsc 是前端唯一可靠门禁**：WorkBuddy 宿主 shell 里 `next build` 必败（fs shim），只跑 `tsc --noEmit` + `vitest run`。
 
 ---

@@ -316,6 +316,7 @@ pub fn run() {
             mcp_admin::skill_create,
             mcp_admin::skill_load_remote,
             mcp_admin::tool_call_records,
+            mcp_admin::plan_list,
             mcp_admin::mcp_approval_reply,
             mcp_admin::agent_approval_get,
             mcp_admin::agent_approval_set,

@@ -363,13 +363,16 @@ ALTER TABLE tasks ADD COLUMN confirm_mode  TEXT NOT NULL DEFAULT 'auto'; -- D1: 
 | T2 | `4f4a116` | `cargo test --lib` 462 passed；`plan_intent` 20 正/15 负全过 | 规划入口 + 计划轮 + D1 确认门 |
 | T3 | `cdf1ea8` | `cargo test --lib` 464 passed | 步骤状态桥（done/skipped/failed + 审计 id 关联 + 计划外追加）|
 | T4 | `010dfba` | `cargo test --lib` 469 passed | 有界重试 + 取消标志 + dialogue_cancel 命令 + 预算/取消收尾 |
-| T5 | 待提交 | `cargo test --lib` 469 passed；`tsc --noEmit` 0 错；`vitest run` 148 passed | `step_state` 记录点 + `/trace` 计划卡（`plan_submit` 目标+步骤、`step_state` 状态+审计 id）；前端类型补三枚举 + 解析容错单测 |
+| T5 | `d84035f` | `cargo test --lib` 469 passed；`tsc --noEmit` 0 错；`vitest run` 148 passed | `step_state` 记录点 + `/trace` 计划卡（`plan_submit` 目标+步骤、`step_state` 状态+审计 id）；前端类型补三枚举 + 解析容错单测 |
+| T6 | 待提交 | `cargo test --lib` 469 passed；`tsc --noEmit` 0 错；`vitest run` 165 passed | `plan_list` 命令 + `planStore`（回放/实时合流）+ 工具页 `PlanProgressCard` 只读卡；17 个新单测（store 10 / 卡片 5 / 消息流隔离 2）|
 
 **T2 实现与设计的小偏差（不影响约束）**：计划轮在 `chat_with_tools` 的 msgs 尾部追加一条系统指令 user 消息（「只调用 submit_plan」），使模型明确协议；计划 msgs 用 `msgs.clone()`，不污染主循环消息序列。计划轮 HTTP 计入 `CLOUD_REQUEST_CAP`（不放大预算）。任务卡改为「计划成功即开卡」（原惰性开卡太晚，plan_json 需先有归属行），后续真实工具循环见 `task_open=true` 不再重复开卡。`submit_plan` 不落审计行（`execute_audited` 不认识它），只有真实工具审计关联 task。
 
 **T3 实现与设计的小偏差（不影响约束）**：§5.3 原文提到「不在 `tool_hint` 中算计划外」，实装改为**纯按执行序号对齐**（第 N 次执行 → 第 N 步）——`tool_hint` 仅作模型/UI 的意图提示，不强制匹配工具名。理由：小模型换工具是常态，强绑定会让计划步骤永久卡 pending、进度失真；真实工具名通过 `tool_call_id` 关联审计行可查，不双写。只有**执行序号超出计划步数**才算计划外并追加 `tool_hint="*"` 步骤。`execute_audited` 不返回审计行 id，状态桥用「执行前后查 `tool_calls` MAX(id)」关联，只有 id 增大才认（防臆造工具名时误关联上一次）。
 
 **T5 实现要点（不改 schema）**：`step_kind` 是 TEXT 无约束，三个新枚举（`plan_submit`/`step_state`/`retry`）零迁移。`plan_submit`（T2）/`retry`（T4）此前已落库，T5 只补 **`step_state` 记录点**：`bridge_plan_step` 改为返回 `(idx, status, tool_call_id)`，调用点据此记结构化 JSON（`seq/status/attempts/tool_call_id`），前端 `/trace` 计划卡用它把步骤状态与真实审计行关联（A10）。**前端零新增命令**：计划卡消费 `plan_submit.output`（完整 PlanJson），与 T6 的 `plan_list` 命令干净分离。前端 `parseSubmittedPlan`/`parsePlanState` 对坏 JSON 一律回落原文块（不炸）。
+
+**T6 实现要点（D6 落地，不改 schema / 不改事件形状）**：面板两条通道合成一份状态——回放 `plan_list`（`tasks` 表权威终态）+ 实时 Channel 事件（`task_start`/`task_step`/`task_done`/`task_canceled`），全部收敛在 `planStore`，组件只订阅。合并规则写死在 store：**语义取回放**（`intent`/`toolHint` 只有 `plan_json` 有），**状态只升阶**（pending < running < 终态），迟到/重复事件不会把 `done` 打回 `running`，也不会去重成两行（A13/A14）。三处与设计的小偏差：① `plan_list` 落在 `mcp_admin.rs`（命令住在模块里，`lib.rs` 只登记；runbook 原写 `lib.rs`）；② `task_canceled` 事件**不带 id**（后端只发 reason），store 把它归到 `current`；③ `plan_json` 嵌套字段沿落库契约保持 snake_case，前端 `progressFromRow` 显式映射，不靠 serde 改名。此外补了三个语义色 token（`--ok`/`--warn`/`--danger`）到 `base.css`，面板状态色**不散写十六进制**。刷新时机只有两个：`task_start` 与终态事件各拉一次 `plan_list`（补 `intent` 与对齐终态），**不做定时轮询**。A15 由 `useChatPlan.test.tsx` 锁定：同一条流里 `task_*` 只进 `planStore`，`chatStore.messages` 始终只有用户话 + 最终回复。
 
 ---
 

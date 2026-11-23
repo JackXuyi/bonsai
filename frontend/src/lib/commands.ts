@@ -26,6 +26,7 @@ import type {
   MemoryOverview,
   OnboardingSubmitResult,
   PersonaSnapshot,
+  PlanTaskRow,
   PerceptionConfig,
   PerceptionStatus,
   ProfileEntry,
@@ -253,6 +254,9 @@ export const skillLoadRemote = (url: string, id?: string) =>
   invokeWithTimeout<string>("skill_load_remote", { url, id: id ?? null }, 60000);
 export const toolCallRecords = (limit?: number) =>
   call<ToolCallRecord[]>("tool_call_records", { limit });
+/** 计划历史（plan-planning §5.6）：进度面板首屏基线，含解析后的 plan_json。 */
+export const planList = (limit?: number) =>
+  call<PlanTaskRow[]>("plan_list", { limit });
 
 /** 审批回执：返回 false 表示该请求已过期（30s 超时已拒绝或已答复过）。 */
 export const mcpApprovalReply = (id: number, allow: boolean) =>

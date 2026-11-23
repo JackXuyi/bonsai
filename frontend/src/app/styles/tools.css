@@ -565,3 +565,189 @@
   font-style: normal;
   color: #a07a2a;
 }
+
+/* ── 计划进度卡（plan-planning.md §5.6，T6）─────────────────────
+   只读：目标 + 进度条 + 步骤列表 + 历史；状态色走 base.css 语义变量。 */
+
+.plan-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.plan-goal {
+  flex: 1;
+  min-width: 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--ink);
+}
+
+.plan-task-state {
+  flex: none;
+  font-size: 9px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  background: var(--card);
+}
+
+.plan-task-running {
+  color: var(--warn);
+  border-color: rgba(176, 125, 34, 0.4);
+  background: rgba(176, 125, 34, 0.08);
+}
+
+.plan-task-done {
+  color: var(--ok);
+  border-color: rgba(76, 140, 43, 0.4);
+  background: var(--accent-wash);
+}
+
+.plan-task-failed {
+  color: var(--danger);
+  border-color: rgba(181, 83, 60, 0.4);
+  background: rgba(181, 83, 60, 0.08);
+}
+
+.plan-task-canceled {
+  color: var(--muted);
+}
+
+.plan-bar {
+  position: relative;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--bg-sunk);
+  overflow: hidden;
+}
+
+.plan-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--ok);
+  transition: width 0.25s ease;
+}
+
+.plan-bar-failed .plan-bar-fill {
+  background: var(--danger);
+}
+
+.plan-bar-canceled .plan-bar-fill {
+  background: var(--faint);
+}
+
+.plan-count {
+  font-size: 9.5px;
+  color: var(--faint);
+}
+
+.plan-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  list-style: none;
+}
+
+.plan-step {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
+.plan-step-seq {
+  flex: none;
+  width: 14px;
+  font-size: 9px;
+  color: var(--faint);
+  text-align: right;
+}
+
+.plan-step-intent {
+  flex: 1;
+  min-width: 0;
+  color: var(--ink);
+}
+
+.plan-step-attempts {
+  flex: none;
+  font-size: 9px;
+  color: var(--warn);
+}
+
+.plan-chip {
+  flex: none;
+  font-size: 9px;
+  padding: 0 5px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--faint);
+}
+
+.plan-chip-running {
+  color: var(--warn);
+  border-color: rgba(176, 125, 34, 0.4);
+}
+
+.plan-chip-done {
+  color: var(--ok);
+  border-color: rgba(76, 140, 43, 0.35);
+}
+
+.plan-chip-failed {
+  color: var(--danger);
+  border-color: rgba(181, 83, 60, 0.35);
+}
+
+.plan-chip-skipped {
+  color: var(--muted);
+}
+
+.plan-history-toggle {
+  align-self: flex-start;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 9.5px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.plan-history-toggle:hover {
+  color: var(--accent-ink);
+}
+
+.plan-history {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  list-style: none;
+}
+
+.plan-history-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.plan-history-goal {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plan-history-count {
+  flex: none;
+  font-size: 9px;
+  color: var(--faint);
+}

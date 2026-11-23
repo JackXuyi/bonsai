@@ -515,3 +515,58 @@ export interface McpImportReport {
   inserted: number;
   skipped: number;
 }
+
+// ── 计划进度（plan-planning.md §4.2 / §5.6，T6）────────────────
+/** 落库契约（Rust `PlanJson`，嵌套字段保持 snake_case）。 */
+export interface PlanStepRow {
+  seq: number;
+  intent: string;
+  tool_hint?: string;
+  status?: string;
+  attempts?: number;
+  tool_call_id?: number | null;
+}
+
+export interface PlanJsonRow {
+  version?: number;
+  goal: string;
+  steps: PlanStepRow[];
+  replans?: number;
+}
+
+/** `plan_list` 行（Rust `TaskRow`，camelCase）。 */
+export interface PlanTaskRow {
+  id: string;
+  createdAt: string;
+  goal: string;
+  status: string;
+  toolCalls: number;
+  finalReply?: string | null;
+  plan?: PlanJsonRow | null;
+  planMode: string;
+  cancelReason?: string | null;
+  confirmMode: string;
+}
+
+/** 步骤态：库/事件里是 `done|skipped|failed` 与 `ok|denied|error` 两套，
+ *  统一收敛到这一组（store 里映射，组件只认这一份）。 */
+export type PlanStepStatus = "pending" | "running" | "done" | "failed" | "skipped";
+
+/** 面板视图模型：id/goal 来自 tasks，steps 由 plan_json + task_step 合并。 */
+export interface PlanStepView {
+  seq: number;
+  intent: string;
+  toolHint: string;
+  status: PlanStepStatus;
+  attempts: number;
+  toolCallId?: number | null;
+}
+
+export interface PlanProgress {
+  id: string;
+  goal: string;
+  /** tasks.status：running / done / failed / canceled */
+  status: string;
+  cancelReason?: string | null;
+  steps: PlanStepView[];
+}
