@@ -18,9 +18,8 @@ jobs:
           - platform: macos-latest
             args: ""
             sidecar: macos
-          - platform: windows-latest
-            args: ""
-            sidecar: windows
+          # Windows entry is restored in a follow-up commit. Keeping it out of
+          # this rebuild avoids two concurrent runs uploading the same assets.
     runs-on: ${{ matrix.platform }}
 
     steps:
