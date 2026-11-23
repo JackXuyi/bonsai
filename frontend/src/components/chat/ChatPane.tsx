@@ -73,6 +73,10 @@ export function ChatPane() {
   // 消息变化时的滚动策略：前插历史页 → 按差值复位（用户在顶部翻旧消息，
   // 不贴底）；首次有内容 → 跳到最新；贴底（含流式增量）→ 始终跟到最新；
   // 不贴底 → 只同步「回到底部」按钮显隐，不打扰用户阅读。
+  // 贴底写入放进 rAF：DOM 滚动写在 passive effect 的 flush 阶段内会与
+  // scroll 事件回调交错（WebKit 真机可同步派发），onScroll 里的 setState
+  // 就可能滚进嵌套更新链 → Maximum update depth exceeded。rAF 把写入挪到
+  // flush 之外，事件回调变成普通任务，链路必断。
   useEffect(() => {
     const el = scrollRef.current;
     if (!el || messages.length === 0) return;
@@ -88,8 +92,12 @@ export function ChatPane() {
       el.scrollTop = el.scrollHeight;
       syncToBottom();
     } else if (pinnedRef.current) {
-      el.scrollTop = el.scrollHeight;
-      syncToBottom();
+      requestAnimationFrame(() => {
+        const cur = scrollRef.current;
+        if (!cur || !pinnedRef.current) return;
+        cur.scrollTop = cur.scrollHeight;
+        syncToBottom();
+      });
     } else {
       syncToBottom();
     }
