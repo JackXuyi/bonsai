@@ -18,6 +18,7 @@ pub mod decision;
 pub mod dialogue;
 pub mod face;
 pub mod faceskins;
+pub mod failure;
 pub mod filetools;
 pub mod generation;
 pub mod llm;

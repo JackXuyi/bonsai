@@ -236,6 +236,11 @@ Err(e) => {
 - Write 档失败时，回传给模型的文案固定为：「执行失败（该操作可能已部分生效，不要重复调用）：<脱敏原因>」——**明确告诉模型不要重试**，比指望它自己克制可靠。
 - 文案进 trace 的 `tool_call` output（现状已存 error，保持）。
 
+> **落地细节（T1 分类）**：`mcp_unreachable` 归 `Transport`（连接层失败，
+> Read 档允许 1 次重试，与 T4 现状一致）；`Unavailable` 只留给
+> `tool_not_found` / `not_configured` 这类「重试一百次也一样」的错误。
+> 陌生错误串按 `Internal` 处理——**不把不认识的错误当成抖动**。
+
 ### 5.5 作业层：JobGuard
 
 ```rust
@@ -410,7 +415,7 @@ failure?: { kind: string; text: string; retryable: boolean };
 
 | 期 | 提交 | 门禁 | 说明 |
 |---|---|---|---|
-| T1 | | | |
+| T1 | 本提交 | `cargo test --lib` **552 passed / 1 ignored**（+10 `failure::`）；`cargo check` 无新告警 | 新增 `src-tauri/src/failure.rs`：11 个 `FailureKind`（含 `retryable` / `hint` / `parse`）、`Failure::{new, downgrade, from_llm, from_tool, from_db}`、`is_corrupt_db` / `is_busy_db`、`Backoff`（splitmix64 确定性抖动、cap 为硬上限）与五层预算常量、`JobState`（`after_fail` 第 5 次推到明天 03:00）。零接线 |
 | T2 | | | |
 | T3 | | | |
 | T4 | | | |
@@ -425,3 +430,4 @@ failure?: { kind: string; text: string; retryable: boolean };
 | 版本 | 日期 | 变更 |
 |---|---|---|
 | v0.1 | 2026-11-23 | 初稿：现状 17 条实测锚点、`Failure` 分类法、分层策略表、T1–T7、A1–A12、D1–D8 |
+| v0.2 | 2026-11-23 | T1 落地：`Backoff` 的 cap 改为硬上限（抖动不许越过）；`mcp_unreachable` 归 `Transport` 而非 `Unavailable`（连接层失败该重试 1 次，与 T4 现状一致，见 §5.4 落地细节） |
