@@ -6,7 +6,8 @@
 //! and the live transport construction.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use rusqlite::Connection;
@@ -427,6 +428,52 @@ pub struct AgentKit {
     /// `build_agent_kit` 每轮新建，调用结束即弃。只对 Read 档生效，
     /// 详见 `crate::tool_cache`。
     pub tool_cache: crate::tool_cache::TurnToolCache,
+    /// T4 取消标志：与全局 `CANCEL_FLAGS` 中 task_id 对应的 Arc 共享，
+    /// `dialogue_cancel` 命令置 true，云端循环每轮/每步前检查。默认独立
+    /// 标志（无任务/本地路径永不取消）。
+    pub canceled: Arc<AtomicBool>,
+}
+
+/// T4 取消注册表：task_id → 取消标志。命令与执行循环跨线程共享同一个
+/// Arc<AtomicBool>。用 OnceLock + RwLock（Rust 1.77 无 LazyLock；沿
+/// llm_admin.rs 的 OnceLock 先例）。生命周期由循环收尾时 unregister 清理。
+static CANCEL_FLAGS: OnceLock<RwLock<std::collections::HashMap<String, Arc<AtomicBool>>>> =
+    OnceLock::new();
+
+fn cancel_registry() -> &'static RwLock<std::collections::HashMap<String, Arc<AtomicBool>>> {
+    CANCEL_FLAGS.get_or_init(|| RwLock::new(std::collections::HashMap::new()))
+}
+
+/// 开卡时注册取消标志，返回该 task 的共享 Arc。
+pub fn register_cancel(task_id: &str) -> Arc<AtomicBool> {
+    let flag = Arc::new(AtomicBool::new(false));
+    if let Ok(mut m) = cancel_registry().write() {
+        m.insert(task_id.to_string(), flag.clone());
+    }
+    flag
+}
+
+/// 收尾时注销，防止注册表随任务数无限增长。
+pub fn unregister_cancel(task_id: &str) {
+    if let Ok(mut m) = cancel_registry().write() {
+        m.remove(task_id);
+    }
+}
+
+/// Tauri 命令：前端「停止」按钮调用；task_id 不存在时静默 OK（幂等）。
+#[tauri::command]
+pub fn dialogue_cancel(task_id: String) -> Result<(), String> {
+    if let Ok(m) = cancel_registry().read() {
+        if let Some(flag) = m.get(&task_id) {
+            flag.store(true, Ordering::SeqCst);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub fn cancel_requested(flag: &Arc<AtomicBool>) -> bool {
+    flag.load(Ordering::SeqCst)
 }
 
 impl AgentKit {
@@ -439,6 +486,7 @@ impl AgentKit {
             prompt_trace: Mutex::new(Vec::new()),
             engine_skills: Vec::new(),
             tool_cache: crate::tool_cache::TurnToolCache::new(),
+            canceled: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -796,7 +844,7 @@ pub fn build_agent_kit(conn: &Connection, state: &AgentState, user_text: &str) -
     let ask_gate: Box<dyn ApprovalGate> =
         Box::new(AskFirstGate::new(state.approvals.clone(), state.app.clone()));
 
-    AgentKit { providers, gate, ask_gate, task_id: Mutex::new(None), prompt_trace: Mutex::new(Vec::new()), engine_skills, tool_cache: crate::tool_cache::TurnToolCache::new() }
+    AgentKit { providers, gate, ask_gate, task_id: Mutex::new(None), prompt_trace: Mutex::new(Vec::new()), engine_skills, tool_cache: crate::tool_cache::TurnToolCache::new(), canceled: Arc::new(AtomicBool::new(false)) }
 }
 
 /// One-at-a-time approval handshake (spec-s4): the chat turn reserves a slot

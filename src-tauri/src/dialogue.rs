@@ -14,7 +14,11 @@
 //! model is unavailable it falls back to an honest "not myself right now"
 //! line instead of pretending.
 
+use std::sync::atomic::Ordering;
 use std::time::Duration;
+
+/// T4：read 档失败重试退避（plan-planning §5.4，500ms）。
+const RETRY_BACKOFF: Duration = Duration::from_millis(500);
 
 use chrono::Timelike;
 use rusqlite::Connection;
@@ -494,6 +498,7 @@ fn bridge_plan_step(
     call_name: &str,
     outcome: &str,
     audit_before: Option<i64>,
+    attempts: usize,
 ) -> bool {
     let Ok(conn) = lock_conn(store) else { return false; };
     let Ok(Some(mut plan)) = db::plan_get(&conn, task_id) else { return false; };
@@ -511,7 +516,7 @@ fn bridge_plan_step(
     if idx < plan.steps.len() {
         let step = &mut plan.steps[idx];
         step.status = status.to_string();
-        step.attempts += 1;
+        step.attempts = attempts as i32;
         step.tool_call_id = tool_call_id;
     } else {
         let seq = plan.steps.len() as i32;
@@ -520,11 +525,68 @@ fn bridge_plan_step(
             intent: format!("计划外调用：{call_name}"),
             tool_hint: "*".into(),
             status: status.to_string(),
-            attempts: 1,
+            attempts: attempts as i32,
             tool_call_id,
         });
     }
     db::plan_put(&conn, task_id, &plan).is_ok()
+}
+
+/// T4：某工具能否重试（plan-planning §5.4）。只有 read 档的暂时性失败
+/// 才重试：bad_args（模型臆造参数）、denied/forbidden（权限）重试无意义，
+/// ask/写档重试有重复副作用风险。
+fn should_retry(err: &str, access: crate::agent_tools::ToolAccess) -> bool {
+    use crate::agent_tools::ToolAccess;
+    if access != ToolAccess::Read {
+        return false;
+    }
+    !(err.starts_with("bad_args")
+        || err == "denied"
+        || err == "forbidden"
+        || err == "unsupported"
+        || err == "unknown_tool")
+}
+
+/// T4：从 kit catalog 查工具权限档（catalog_all 公开且含 access；
+/// find_owner 私有，这里只读 descriptor 不执行）。未知工具按 Read 处理——
+/// unknown_tool 已被 should_retry 排除。
+fn tool_access(kit: &crate::mcp_admin::AgentKit, name: &str) -> crate::agent_tools::ToolAccess {
+    kit.catalog_all()
+        .into_iter()
+        .find(|d| d.name == name)
+        .map(|d| d.access)
+        .unwrap_or(crate::agent_tools::ToolAccess::Read)
+}
+
+/// T4：把计划里剩余 pending 步骤标 skipped，并写 cancel_reason。
+/// 用于取消/护栏触发的强制收尾——已执行步骤不动（不回滚、不造假）。
+fn skip_remaining_steps(store: &MemoryStore, task_id: &str, reason: &str) {
+    let Ok(conn) = lock_conn(store) else { return; };
+    if let Ok(Some(mut plan)) = db::plan_get(&conn, task_id) {
+        let mut changed = false;
+        for step in &mut plan.steps {
+            if step.status == "pending" || step.status.is_empty() {
+                step.status = "skipped".into();
+                changed = true;
+            }
+        }
+        if changed {
+            let _ = db::plan_put(&conn, task_id, &plan);
+        }
+    }
+    let _ = db::task_set_cancel_reason(&conn, task_id, reason);
+}
+
+/// T4：自然语言取消意图（纯规则，零成本）。仅识别明确的停止指令，
+/// 避免误伤「别做了那件事吧」这类含「别做」的正常表达——要求短句或
+/// 取消词独立成词。
+fn cancel_intent(user_text: &str) -> bool {
+    let t = user_text.trim();
+    const FULL_STOPS: [&str; 6] = ["别做了", "停一下", "停停", "取消吧", "不做了", "停手"];
+    if FULL_STOPS.iter().any(|s| t == *s || t.len() <= s.len() + 2 && t.contains(s)) {
+        return true;
+    }
+    t == "停" || t == "取消" || t == "别做" || t == "不要了"
 }
 
 /// `AgentKit` → DeepSeek `tools[]`。skill 不进列表（提示注入、不可执行）；
@@ -648,6 +710,9 @@ fn cloud_tool_loop(
     let mut requests = 0usize;
     let mut summaries: Vec<String> = Vec::new();
     let mut forced_note_sent = false;
+    // T4 取消状态：命令置 kit.canceled，或用户自然语言取消。收尾据此写
+    // cancel_reason 与 task_finish(status="canceled")。
+    let mut cancel_reason: Option<&'static str> = None;
     let mut reply;
 
     // ---- L1 规划入口（plan-planning v0.2 §5.2）：云端专属 ----
@@ -692,6 +757,8 @@ fn cloud_tool_loop(
                                     if let Ok(mut g) = kit.task_id.lock() {
                                         *g = Some(id.clone());
                                     }
+                                    // T4：注册取消标志，命令与循环共享同一 Arc。
+                                    kit.canceled = crate::mcp_admin::register_cancel(&id);
                                     task_open.set(true);
                                     let _ = db::plan_put(&conn, &id, &plan);
                                     let _ = db::task_set_confirm_mode(&conn, &id, &confirm_mode);
@@ -741,15 +808,40 @@ fn cloud_tool_loop(
     }
 
     loop {
+        // T4-L4 取消检查：每轮循环开始检查命令标志与用户自然语言取消。
+        // 一旦命中 → 剩余计划步骤标 skipped、写 cancel_reason、强制收尾。
+        let external_cancel = kit.canceled.load(Ordering::SeqCst);
+        let verbal_cancel = cancel_intent(user_text);
+        if (external_cancel || verbal_cancel) && cancel_reason.is_none() {
+            cancel_reason = Some(if verbal_cancel { "user" } else { "external" });
+            if task_open.get() {
+                skip_remaining_steps(store, &task.borrow().id, cancel_reason.unwrap());
+            }
+            if let Some(cb) = on_task.as_deref_mut() {
+                cb(serde_json::json!({ "event": "task_canceled", "reason": cancel_reason }));
+            }
+        }
+
         // 护栏触发 → 强制收尾：去掉 tools（协议默认 tool_choice=none），
         // 模型只能基于已有结果散文作答。
-        let force_answer =
+        let budget_hit =
             executed >= CLOUD_TOOL_CALL_CAP || requests + 1 >= CLOUD_REQUEST_CAP;
+        let force_answer = budget_hit || cancel_reason.is_some();
+        if budget_hit && cancel_reason.is_none() {
+            // A7：预算耗尽 → 剩余步骤 skipped + cancel_reason='budget'。
+            cancel_reason = Some("budget");
+            if task_open.get() {
+                skip_remaining_steps(store, &task.borrow().id, "budget");
+            }
+        }
         if force_answer && !forced_note_sent {
             forced_note_sent = true;
-            msgs.push(crate::llm::ToolMsg::user(
-                "（系统注入的一次性指令：工具调用已达上限。请基于上面已获得的工具结果，直接面向用户作答；不要再调用工具。）",
-            ));
+            let note = if cancel_reason.is_some() {
+                "（系统注入的一次性指令：用户已取消/触及上限。请基于上面已获得的工具结果，简短说明现状并收尾，不要再调用工具。）"
+            } else {
+                "（系统注入的一次性指令：工具调用已达上限。请基于上面已获得的工具结果，直接面向用户作答；不要再调用工具。）"
+            };
+            msgs.push(crate::llm::ToolMsg::user(note));
         }
         let t = std::time::Instant::now();
         let out = if force_answer {
@@ -801,6 +893,14 @@ fn cloud_tool_loop(
                 .collect(),
         ));
         for call in &reply_text.tool_calls {
+            // T4-L4：每步执行前检查取消（命令可能在多步循环中途置位）。
+            if kit.canceled.load(Ordering::SeqCst) && cancel_reason.is_none() {
+                cancel_reason = Some("external");
+                if task_open.get() {
+                    skip_remaining_steps(store, &task.borrow().id, "external");
+                }
+                break;
+            }
             executed += 1;
             if !task_open.get() {
                 let conn = lock_conn(store)?;
@@ -808,8 +908,10 @@ fn cloud_tool_loop(
                     Ok(id) => {
                         task.borrow_mut().id = id.clone();
                         if let Ok(mut g) = kit.task_id.lock() {
-                            *g = Some(id);
+                            *g = Some(id.clone());
                         }
+                        // T4：注册取消标志（单步任务无计划，但也支持随时取消）。
+                        kit.canceled = crate::mcp_admin::register_cancel(&id);
                         task_open.set(true);
                         if let Some(cb) = on_task.as_deref_mut() {
                             cb(serde_json::json!({
@@ -823,52 +925,61 @@ fn cloud_tool_loop(
                 }
             }
             let args_text = call.arguments.to_string();
-            let t_tool = std::time::Instant::now();
-            // T3 状态桥：执行前记录审计水位，只有本次真的落了审计行才关联 id。
-            // 单步任务/无计划时 task_open=false，桥接读 plan_get 直接返回零开销。
-            let audit_before = if task_open.get() {
-                let tid = task.borrow().id.clone();
-                lock_conn(store).ok().and_then(|c| audit_max_id(&c, &tid))
-            } else {
-                None
+            let access = tool_access(kit, &call.name);
+            // T4 有界重试：read 档暂时性失败最多重试 1 次（总 attempts ≤2），
+            // 500ms 退避；bad_args/denied/forbidden/ask/写档不重试。
+            // 所有 attempt 完成后只过一次桥接（attempts=真实尝试数），
+            // 只发一条 tool_result（Chat Completion 协议：一个 call.id 一条结果）。
+            let mut attempts = 0usize;
+            let mut first_audit_before = None;
+            let (step_outcome, final_summary) = loop {
+                attempts += 1;
+                let t_tool = std::time::Instant::now();
+                // 审计水位只取首次 attempt 前的值：桥接据此取"最后一次"审计行 id。
+                if attempts == 1 && task_open.get() {
+                    let tid = task.borrow().id.clone();
+                    first_audit_before = lock_conn(store).ok().and_then(|c| audit_max_id(&c, &tid));
+                }
+                match crate::mcp_admin::execute_audited(store, kit, &call.name, call.arguments.clone()) {
+                    Ok(out) => {
+                        rec.tool_call(&call.name, &args_text, &out.full, "ok", None, t_tool.elapsed());
+                        let summary = out.summary;
+                        summaries.push(format!("{}：{}", call.name, summary));
+                        if attempts > 1 {
+                            rec.simple("retry", "工具重试成功", "ok", Some(&call.name));
+                        }
+                        break ("ok", summary);
+                    }
+                    Err(e) => {
+                        let outcome = if e == "denied" { "denied" } else { "error" };
+                        rec.tool_call(&call.name, &args_text, "", outcome, Some(&e), t_tool.elapsed());
+                        if should_retry(&e, access) && attempts < 2 {
+                            rec.simple("retry", "工具重试", "pending", Some(&e));
+                            std::thread::sleep(RETRY_BACKOFF);
+                            continue;
+                        }
+                        // 不重试 / 重试耗尽：失败事实回传（脱敏），不编造。
+                        let masked = crate::agent_tools::mask_secrets(&e);
+                        break (
+                            outcome,
+                            format!("执行失败：{}", crate::agent_tools::clip_chars(&masked, 200)),
+                        );
+                    }
+                }
             };
-            let mut step_outcome = "ok";
-            match crate::mcp_admin::execute_audited(store, kit, &call.name, call.arguments.clone()) {
-                Ok(out) => {
-                    rec.tool_call(&call.name, &args_text, &out.full, "ok", None, t_tool.elapsed());
-                    summaries.push(format!("{}：{}", call.name, out.summary));
-                    label = tool_label(kit, &call.name).or_else(|| label.clone());
-                    {
-                        let mut t = task.borrow_mut();
-                        let seq = t.steps.len();
-                        t.steps.push(TaskStep { seq, tool: call.name.clone(), status: "ok".into() });
-                    }
-                    msgs.push(crate::llm::ToolMsg::tool_result(&call.id, &out.summary));
-                }
-                Err(e) => {
-                    let outcome = if e == "denied" { "denied" } else { "error" };
-                    step_outcome = outcome;
-                    rec.tool_call(&call.name, &args_text, "", outcome, Some(&e), t_tool.elapsed());
-                    // 失败事实回传给模型（脱敏后）——它可以说「查不到」，不许编造。
-                    let masked = crate::agent_tools::mask_secrets(&e);
-                    msgs.push(crate::llm::ToolMsg::tool_result(
-                        &call.id,
-                        format!("执行失败：{}", crate::agent_tools::clip_chars(&masked, 200)),
-                    ));
-                    label = tool_label(kit, &call.name).or_else(|| label.clone());
-                    {
-                        let mut t = task.borrow_mut();
-                        let seq = t.steps.len();
-                        let st = if e == "denied" { "denied".into() } else { "error".into() };
-                        t.steps.push(TaskStep { seq, tool: call.name.clone(), status: st });
-                    }
-                }
-            }
-            // T3 状态桥：把真实执行结果回写 plan_json；task_step 事件形状不变（D6 消费）。
+            // T3 状态桥：把最终结果 + 真实 attempts 回写 plan_json（无计划零开销）。
             if task_open.get() {
                 let tid = task.borrow().id.clone();
-                bridge_plan_step(store, &tid, executed, &call.name, step_outcome, audit_before);
+                bridge_plan_step(store, &tid, executed, &call.name, step_outcome, first_audit_before, attempts);
             }
+            label = tool_label(kit, &call.name).or_else(|| label.clone());
+            {
+                let mut t = task.borrow_mut();
+                let seq = t.steps.len();
+                let st = if step_outcome == "ok" { "ok" } else if step_outcome == "denied" { "denied" } else { "error" };
+                t.steps.push(TaskStep { seq, tool: call.name.clone(), status: st.into() });
+            }
+            msgs.push(crate::llm::ToolMsg::tool_result(&call.id, &final_summary));
             if let (Some(cb), true) = (on_task.as_deref_mut(), task_open.get()) {
                 let t = task.borrow();
                 let last = t.steps.last().unwrap();
@@ -893,20 +1004,33 @@ fn cloud_tool_loop(
     if reply.trim().is_empty() && !summaries.is_empty() {
         reply = format!("（查到的先放这儿：{}——盆栽这会儿没组织好语言。）", summaries.join("；"));
     }
-    // 任务卡收尾：有产出（正文或摘要）= done；全程颗粒无收 = failed。
-    let status = if reply.trim().is_empty() { "failed" } else { "done" };
+    // 任务卡收尾：取消 = canceled；有产出（正文或摘要）= done；颗粒无收 = failed。
+    let status = if cancel_reason.is_some() {
+        "canceled"
+    } else if reply.trim().is_empty() {
+        "failed"
+    } else {
+        "done"
+    };
     let mut card = None;
     if task_open.get() {
         let t = task.borrow();
+        let task_id = t.id.clone();
         let conn = lock_conn(store)?;
-        let _ = db::task_finish(&conn, &t.id, status, executed as i64, Some(&reply));
+        let _ = db::task_finish(&conn, &task_id, status, executed as i64, Some(&reply));
+        // 无计划取消（skip_remaining_steps 未走到）也要写 cancel_reason。
+        if let Some(reason) = cancel_reason {
+            let _ = db::task_set_cancel_reason(&conn, &task_id, reason);
+        }
         if let Ok(mut g) = kit.task_id.lock() {
             *g = None;
         }
-        card = Some(TaskCard { id: t.id.clone(), status: status.to_string(), steps: t.steps.clone() });
+        card = Some(TaskCard { id: task_id.clone(), status: status.to_string(), steps: t.steps.clone() });
         drop(t);
+        // T4：注销取消标志，防止注册表随任务无限增长。
+        crate::mcp_admin::unregister_cancel(&task_id);
         if let Some(cb) = on_task.as_deref_mut() {
-            cb(serde_json::json!({ "event": "task_done", "id": card.as_ref().unwrap().id, "status": status }));
+            cb(serde_json::json!({ "event": "task_done", "id": task_id, "status": status }));
         }
     }
     Ok((reply, label, card, false))
@@ -2530,7 +2654,8 @@ mod tests {
             tool_calls_reply(&[("weather", serde_json::json!({"city": "杭州"}))]),
             content_reply("日程查好了，目录也整理了。"),
         ]);
-        let mut kit = dual_kit();
+        // 用有 reply 的 kit：工具成功 → 不触发重试 → 审计恰 1 条（本测试断言）。
+        let mut kit = replied_dual_kit();
         let out = chat_turn_with_kit(
             &s, &mut backend, &c, "s-plan", "先查下周三日程，再整理下载目录", 10, false,
             crate::calendar::CalendarAccess::Denied, &mut kit,
@@ -2616,6 +2741,55 @@ mod tests {
         b.replies.insert("notes".into(), "已记到笔记".into());
         crate::mcp_admin::AgentKit {
             providers: vec![Box::new(a), Box::new(b)],
+            gate: Box::new(crate::agent_tools::AutoAllowGate),
+            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
+            task_id: std::sync::Mutex::new(None),
+            prompt_trace: std::sync::Mutex::new(Vec::new()),
+            ..crate::mcp_admin::AgentKit::empty()
+        }
+    }
+
+    /// T4 测试用 provider：前 `fail_times` 次返回超时，之后成功。
+    /// 用于验证 read 档有界重试（A4）。
+    struct FlakyProvider {
+        descriptor: crate::agent_tools::ToolDescriptor,
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        fail_times: usize,
+        fail_kind: &'static str,
+    }
+    impl crate::agent_tools::ToolProvider for FlakyProvider {
+        fn descriptors(&self) -> Vec<crate::agent_tools::ToolDescriptor> {
+            vec![self.descriptor.clone()]
+        }
+        fn execute(&self, _call: &crate::agent_tools::ToolCall) -> Result<crate::agent_tools::ToolOutput, String> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n < self.fail_times {
+                return Err(self.fail_kind.into());
+            }
+            Ok(crate::agent_tools::ToolOutput {
+                summary: "杭州今天多云 18 度".into(),
+                full: "杭州今天多云 18 度".into(),
+            })
+        }
+    }
+
+    fn flaky_kit(fail_times: usize, fail_kind: &'static str) -> crate::mcp_admin::AgentKit {
+        let descriptor = crate::agent_tools::ToolDescriptor {
+            name: "weather".into(),
+            summary: "查天气".into(),
+            detail: r#"{"type":"object"}"#.into(),
+            kind: crate::agent_tools::ToolKind::Mcp,
+            remote: false,
+            access: crate::agent_tools::ToolAccess::Read,
+        };
+        let p = FlakyProvider {
+            descriptor,
+            calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            fail_times,
+            fail_kind,
+        };
+        crate::mcp_admin::AgentKit {
+            providers: vec![Box::new(p)],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
             ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
             task_id: std::sync::Mutex::new(None),
@@ -2729,6 +2903,134 @@ mod tests {
         let plan = tasks[0].plan.as_ref().unwrap();
         assert_eq!(plan.steps[0].status, "skipped", "denied → skipped");
         assert_eq!(plan.steps[0].attempts, 1);
+    }
+
+    /// A4（T4 有界重试）：read 工具第 1 次 mcp_timeout、第 2 次成功 →
+    /// 步骤 attempts=2、status=done，两条审计行关联同一 task。
+    #[test]
+    fn read_step_retries_once_then_succeeds() {
+        let s = mem();
+        let c = card();
+        let submit = tool_calls_reply(&[(
+            "submit_plan",
+            serde_json::json!({
+                "goal": "查天气",
+                "steps": [{"intent": "查天气", "tool_hint": "weather"}]
+            }),
+        )]);
+        let mut backend = cloud_backend(vec![
+            submit,
+            tool_calls_reply(&[("weather", serde_json::json!({}))]),
+            content_reply("查好了。"),
+        ]);
+        // 单步计划也命中：强 cue 输入。
+        let mut kit = flaky_kit(1, "mcp_timeout");
+        chat_turn_with_kit(
+            &s, &mut backend, &c, "s-retry", "帮我规划一下查天气", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit,
+        )
+        .unwrap();
+        let tasks = with_conn(&s, |conn| db::task_list(conn, 5).unwrap());
+        let plan = tasks[0].plan.as_ref().unwrap();
+        assert_eq!(plan.steps[0].status, "done");
+        assert_eq!(plan.steps[0].attempts, 2, "read 失败重试 1 次，总 attempts=2");
+        let audit = with_conn(&s, |conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM tool_calls WHERE task_id = ?1",
+                [&tasks[0].id], |r| r.get::<_, i64>(0),
+            ).unwrap()
+        });
+        assert_eq!(audit, 2, "两次尝试各落一条审计");
+    }
+
+    /// A4（不重试）：bad_args 是模型臆造参数，重试无意义 → attempts=1、
+    /// status=failed，只落一条审计。
+    #[test]
+    fn bad_args_never_retries() {
+        let s = mem();
+        let c = card();
+        let submit = tool_calls_reply(&[(
+            "submit_plan",
+            serde_json::json!({
+                "goal": "查天气",
+                "steps": [{"intent": "查天气", "tool_hint": "weather"}]
+            }),
+        )]);
+        let mut backend = cloud_backend(vec![
+            submit,
+            tool_calls_reply(&[("weather", serde_json::json!({}))]),
+            content_reply("没查成。"),
+        ]);
+        let mut kit = flaky_kit(99, "bad_args:missing:city");
+        chat_turn_with_kit(
+            &s, &mut backend, &c, "s-badargs", "帮我规划一下查天气", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit,
+        )
+        .unwrap();
+        let tasks = with_conn(&s, |conn| db::task_list(conn, 5).unwrap());
+        let plan = tasks[0].plan.as_ref().unwrap();
+        assert_eq!(plan.steps[0].status, "failed");
+        assert_eq!(plan.steps[0].attempts, 1, "bad_args 不重试");
+    }
+
+    /// A5（自然语言取消识别）：纯规则零成本，明确停止指令命中，
+    /// 含「别做」的正常表达不误伤。单轮架构下计划不跨轮（D7），
+    /// 端到端 canceled 收尾由 A7 覆盖。
+    #[test]
+    fn cancel_intent_recognizes_stops_without_false_positives() {
+        for text in ["别做了", "停", "停一下", "取消", "不做了", "别做"] {
+            assert!(cancel_intent(text), "应识别取消: {text}");
+        }
+        for text in ["帮我规划一下周末去哪", "别做了那件事吧先放着", "天气怎么样", "取消订阅功能怎么开"] {
+            assert!(!cancel_intent(text), "不应误伤: {text}");
+        }
+    }
+
+    /// A5（外部取消命令）：dialogue_cancel 置位注册表 flag，幂等且可跨线程读。
+    #[test]
+    fn dialogue_cancel_sets_registered_flag() {
+        let flag = crate::mcp_admin::register_cancel("s-cancel-cmd");
+        assert!(!crate::mcp_admin::cancel_requested(&flag));
+        crate::mcp_admin::dialogue_cancel("s-cancel-cmd".into()).unwrap();
+        assert!(crate::mcp_admin::cancel_requested(&flag), "命令置位共享 flag");
+        // 不存在 id 幂等，不 panic。
+        crate::mcp_admin::dialogue_cancel("no-such-task".into()).unwrap();
+        crate::mcp_admin::unregister_cancel("s-cancel-cmd");
+    }
+
+    /// A7（预算护栏）：CLOUD_REQUEST_CAP 触顶 → 剩余步骤 skipped、
+    /// cancel_reason='budget'、强制收尾有正文。
+    #[test]
+    fn budget_guard_skips_remaining_with_reason() {
+        let s = mem();
+        let c = card();
+        // 计划轮消耗 1 请求；此后每次工具轮 +1，到 requests+1>=6 触发护栏。
+        // 计划 6 步但只跑 3 步就触顶（第 5 次请求 force_answer），剩 3 步 skipped。
+        let steps: Vec<_> = (0..6)
+            .map(|i| serde_json::json!({"intent": format!("查天气 {i}"), "tool_hint": "weather"}))
+            .collect();
+        let submit = tool_calls_reply(&[(
+            "submit_plan",
+            serde_json::json!({ "goal": "反复查天气", "steps": steps }),
+        )]);
+        let mut script = vec![submit];
+        for _ in 0..4 {
+            script.push(tool_calls_reply(&[("weather", serde_json::json!({}))]));
+        }
+        script.push(content_reply("先到这儿。"));
+        let mut backend = cloud_backend(script);
+        let mut kit = replied_dual_kit();
+        let out = chat_turn_with_kit(
+            &s, &mut backend, &c, "s-budget", "帮我规划一下反复查天气", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit,
+        )
+        .unwrap();
+        assert!(!out.reply.is_empty(), "护栏强制收尾有正文");
+        let tasks = with_conn(&s, |conn| db::task_list(conn, 5).unwrap());
+        assert_eq!(tasks[0].cancel_reason.as_deref(), Some("budget"));
+        assert_eq!(tasks[0].status, "canceled", "护栏触发 = 取消终态");
+        let plan = tasks[0].plan.as_ref().unwrap();
+        assert!(plan.steps.iter().any(|st| st.status == "skipped"), "剩余步骤 skipped");
     }
 
     /// A2 协议层：单步任务零计划轮——第一次请求 tools[] 不含 submit_plan，
@@ -3317,7 +3619,8 @@ mod tests {
         let cap = seen.lock().unwrap();
         assert!(cap[1].2.contains("执行失败"), "failure fed back: {}", cap[1].2);
         let records = with_conn(&s, |conn| db::tool_call_records(conn, 5).unwrap());
-        assert_eq!(records.len(), 1);
+        // T4：read 档 mcp_unreachable 重试 1 次 → 2 条审计，最终失败仍回传模型。
+        assert_eq!(records.len(), 2, "T4 read 失败重试一次，两条审计");
         assert_eq!(records[0].outcome, "unavailable");
         assert_eq!(records[0].result_status.as_deref(), Some("mcp_unreachable"));
     }

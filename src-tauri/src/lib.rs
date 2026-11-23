@@ -281,6 +281,7 @@ pub fn run() {
             memory::profile::profile_delete,
             dialogue::dialogue_chat,
             dialogue::dialogue_chat_stream,
+            mcp_admin::dialogue_cancel,
             dialogue::dialogue_proactive_now,
             dialogue::dialogue_history,
             dialogue::turn_trace_get,
