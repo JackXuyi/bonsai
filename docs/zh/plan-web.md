@@ -1,7 +1,7 @@
 # 方案：Web 检索（P3-3，roadmap G-06）
 
-> **状态**：v0.1 待评审
-> **日期**：2026-11-22
+> **状态**：T0–T2 已实施（2026-11-23，见 §11）；T3 真机验收待做
+> **日期**：2026-11-22（实施 2026-11-23）
 > **依赖**：云端工具循环（dialogue.rs `cloud_tool_loop`，已落地）、权限三档（`ToolAccess::Read`，已落地）、内置工具挂载模式（`builtin_tools()` + `build_agent_kit` 开关门控，filetools 先例）、工具调用审计（`tool_calls` 表，已落地）、reqwest 0.13 + rustls（Cargo.toml:37，已在依赖树）
 > **对应 roadmap**：G-06（改造档）、G-12（untrusted 标签随本项落地）、P4-3（外部内容安全前置）、RK-01/RK-02（隐私）
 > **一句话**：让阿盆能搜网页、抓网页正文并总结——搜索词与网页内容会外发，这是**知情开关默认关**的能力；断网明示、注入防御、URL 可溯源。
@@ -272,3 +272,38 @@ impl ToolProvider for WebToolsProvider {
 | 版本 | 日期 | 说明 |
 | --- | --- | --- |
 | v0.1 | 2026-11-22 | 初稿：两工具分层、URL 安全内核四不变量、抓取闸门、DDG trait 可插拔、T0–T3 里程碑 |
+| v0.2 | 2026-11-23 | 实施记录回写（§11）：T0–T2 落地，435 Rust + 122 前端单测全绿；reqwest→ureq 等四处偏差记档 |
+
+## 11. 实施记录（2026-11-23）
+
+**Commits**：`090108f`（T0 URL 安全内核 + 抓取引擎）→ `a822a12`（T1 搜索后端 + provider + 挂载接线）→ `ce45baa`（T2 前端 Web 卡）。
+
+**已落地**
+
+- `webtools.rs`（~800 行含单测）：
+  - **内核 `validate_url`**：scheme 白名单（http/https）→ 主机门（`url::Host` 枚举分流：IPv4/IPv6 字面量零 DNS 直接裁决；Domain 先拒 `localhost`/`.localhost`，再 DNS 解析出每个记录都必须是公网）→ 端口门（仅 80/443）。私网 denylist：RFC1918 / 环回 / 链路本地 / CGNAT 100.64/10 / 0.0.0.0 / 广播 / TEST-NET / IPv6 ::1、::、fc00::/7（掩码落高字节 `seg[0]>>8`）、fe80::/10、::/96 残留段、IPv4-mapped（走 v4 规则）。
+  - **手动重定向**：ureq `redirects(0)` + 手动循环 ≤5 跳，`url.join` 解析相对/绝对 Location 后**每跳重新过内核**（Ok(resp) 与 Err(Status) 两种 3xx 形态都覆盖）。
+  - **抓取闸门**：connect 10s / 总 20s；Content-Length 前置拒绝 + `take()` 读取双保险（>2MB 拒绝）；Content-Type 文本类白名单（空按 html 处理）；提取为空 → `web_no_text`。
+  - **提取**：scraper 启发式——title + `p/h1-h6/li/td/blockquote/pre` 按 DOM 顺序收集，祖先命中 script/style/noscript/nav/footer/aside/header 的剔除，空白折叠 + 相邻去重。
+  - **搜索**：`WebSearchSource` trait + `DuckDuckGoSearch`（`html.duckduckgo.com/html/?q=`，`url::form_urlencoded` 编码）；`parse_ddg` 纯函数 + fixture 单测锁 DDG HTML 结构；uddg 跳转包装解包（非 http(s) scheme / DDG 内部链接丢弃）。
+  - **provider**：`web_search` / `web_fetch` 全 Read 档；tools[] 描述写明「仅在用户明确要求时使用」；`build_fetch_summary` 纯函数（untrusted 首行 + 标题/URL 元数据 + 8000 字截断标记）；空结果诚实「没有搜索到」。
+  - settings `tools.web.enabled`（默认关）+ 命令 `web_status`/`web_set_config`；`builtin_tools()` 注册两 descriptor；`build_agent_kit` 开关门控挂载（关闭时 tools[] 根本看不到）。
+- 前端：`WebCard.tsx`（总开关 + 外发知情文案 + 断网诚实说明，知情文案在关闭态也可见）、commands/types 两封装、ToolsPane 挂载（日历与文件卡之间）、`WebCard.test.tsx` 4 例。
+
+**与方案的偏差（四条，均已记档）**
+
+1. **reqwest blocking → ureq**（§10 原计划 reqwest + blocking feature）：代码库 HTTP 惯例是 ureq 同步客户端（mcp.rs 注释明言），且 `redirects(0)` 手动逐跳校验比重定向回调策略更贴四不变量；reqwest 保持与 rmcp 的版本锁零改动。新增依赖仅 `url` + `scraper`。
+2. **错误码扩容**：`web_http_status`（4xx/5xx 带响应头 120 字）、`web_redirect_loop`、`web_bad_redirect` 为 plan §3.6 列表之外新增（manual redirect 循环与 HTTP 状态分离的自然结果）。
+3. **主机门优先于端口门**：环回/私网是深层违规，不该被表层端口错误码掩盖（`http://127.0.0.1:11434/` 报 `web_private_host` 而非 `web_bad_port`）。
+4. **卡片未做「今日搜索 N 次」计数**（§3.7 草图有）：FileCard 先例同样只走审计行展示，卡片保持极简；审计在工具页「最近工具调用」可见。
+
+**门禁**：cargo test --lib **435 全绿**（webtools 12 例：内核反例/重定向回炉/闸门/提取/parse_ddg/provider 分发/summary 形状）；clippy 对 webtools 零警告；`tsc --noEmit` 干净；vitest **122 过**（WebCard 4 例）；next lint 无警告。
+
+**待真机验收（T3，无法在 CI 做——沙箱无外网，DDG 解析用 fixture 锁行为）**
+
+1. 开关打开 → 问「搜一下 Rust 异步运行时」→ DeepSeek 调 web_search 返回带 URL 结果；点 URL 链接可达真实页面（uddg 解包正确性）。
+2. 让模型总结一个真实长网页 → web_fetch 抓取 + 引用带 URL；>8000 字有截断标记。
+3. DDG 反爬观察：高频使用是否出现 429/验证页（出现即 `web_search_failed` 显式报错，评估切 Tavily）。
+4. 断网 → 明示「网络不可用」不虚构；SPA 页面 → `web_no_text` 提示需浏览器渲染。
+5. 注入页面真机测试：抓取一个含「忽略之前指令」的页面，观察模型不执行且 trace 留痕（P4-3 前置验收项）。
+6. 误触发率：普通闲聊不产生 web_* 调用（超标则启用 might 信号门控备选，plan §7-4）。
