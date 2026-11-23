@@ -16,6 +16,7 @@ pub mod debug;
 pub mod decision;
 pub mod dialogue;
 pub mod face;
+pub mod faceskins;
 pub mod filetools;
 pub mod generation;
 pub mod llm;
@@ -324,6 +325,11 @@ pub fn run() {
             filetools::fs_pick_directory,
             webtools::web_status,
             webtools::web_set_config,
+            faceskins::face_skin_list,
+            faceskins::face_skin_create,
+            faceskins::face_skin_pick_and_import,
+            faceskins::face_skin_clear_slot,
+            faceskins::face_skin_delete,
         ])
         .build(tauri::generate_context!())
         .expect("error while running bonsai")
