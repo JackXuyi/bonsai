@@ -1,33 +1,31 @@
-//! S0 检索基线（2026-11-23）：向量检索决策的量化前置。
+//! S0/S1 检索基线（2026-11-23）：向量检索决策的量化前置。
 //!
 //! 决策背景（对 C3「记忆与个性化」的核查）：`memory_search` 现在只有
 //! 「日期窗口 + 关键词子串」一条腿，`db.rs:358` 的向量 TODO 与 roadmap
 //! G-13 / P5-1 都写着「等触发条件」。要判断 embedding 值不值，先得把
 //! 「现在到底丢在哪一步」量成数字——这份基线就是这个数字。
 //!
-//! 五类问法，两个指标：
+//! 五类问法，三个指标：
 //!
 //! | 类别 | 问题形态 | 用来隔离哪一段 |
 //! | --- | --- | --- |
 //! | 精确片段 | 问题本身就是存过的原文片段 | 链路本身能不能跑通（能力上限） |
 //! | 字面自然句 | 含原文词，但裹在自然句里 | 切词（`keywords_with`）损失 |
 //! | 口语指代句 | 「上次说的X…」 | 切词 + 脚手架词残留 |
-//! | 近义改写 | 与原文无公共子串 | 纯语义缺口（只有 embedding 能救的量） |
-//! | 纯指代 | 「还记得吗」 | 窗口兜底 + 事实行上限 |
+//! | 近义改写 | 与原文无公共二字切片 | 纯语义缺口（只有 embedding 能救的量） |
+//! | 纯指代 | 「还记得吗」 | 无信号时的兜底上限 |
 //!
-//! 指标 A「腿纯净率」= 抽出的关键词腿里至少有一条是库里真实子串的比例。
-//! 指标 B「端到端命中率」= 模型最终能在召回结果里看到该主题的比例
-//! （对话行或事实行任一命中即算——模型看到的是两者）。
+//! 指标 A「腿纯净率」= 抽出的腿里至少有一条是**目标话题原文**子串的比例。
+//! 指标 B「命中率」= 模型在召回结果里看到该话题证据的比例（对话行或事实行）。
+//! 指标 C「走兜底率」= 这次是不是走了「腿全落空 → 整窗兜底」——B 里有多少
+//! 是碰巧撞进窗口，看这一列。
 //!
-//! 指标 A 与 B 的差就是**实现缺陷可回收的收益**；近义改写那行的 B 就是
-//! **只有 embedding 才能回收的收益**。S1（三级降级）/ S2（FTS5 trigram）
-//! 上线后重跑本文件，B 应显著上移而「近义改写」行不动——那才是引入向量
-//! 的正当理由。
+//! ## 基线（固定时钟 2026-12-01）
 //!
-//! 首次基线（2026-11-23，12 事实 / 12 对话 / 固定时钟 2026-12-01）：
+//! S0（2026-11-23，小语料：12 对话 / 12 事实）：
 //!
 //! ```text
-//! 问法          用例  腿纯净  端到端命中
+//! 问法          用例  腿纯净  命中
 //! 精确片段      12    92%     100%
 //! 字面自然句    12    8%      8%
 //! 口语指代句    12    33%     33%
@@ -35,16 +33,32 @@
 //! 纯指代        4     0%      50%
 //! ```
 //!
-//! 三个可直接归因的结论：
-//! 1. **链路本身是好的**（精确片段 100%），丢的全在切词：自然句只在「整段
-//!    残句恰好是原文子串」时才命中（唯一成功的是「花生过敏」，因为前面的
-//!    字全是停用字）。
-//! 2. **停用字会把词切碎**：「所有权」里的「有」是停用字 → 切成「所 / 权」
-//!    两段单字被丢弃 → 一条腿都没有（精确片段 92% 而非 100% 就是它）。
-//! 3. **窗口兜底是有效的，但被垃圾腿挡住**：纯指代 50%——「还记得吗 / 那个呢」
-//!    无腿 → 整窗扫描 → 靠对话行命中；「上次那个事怎么样了」抽出 `["上次"]`、
-//!    「之前提过的那件事」抽出 `["之前","件事"]` → `AND (LIKE)` 归零 →
-//!    报「没有找到记录」。**零命中不降级**是这里唯一的死因。
+//! S1（同日，语料提到真实密度：+60 条噪声对话 / +40 条噪声事实）：
+//!
+//! ```text
+//! 问法          用例  腿纯净  命中  走兜底
+//! 精确片段      12    100%    100%  0%
+//! 字面自然句    12    100%    100%  0%
+//! 口语指代句    12    100%    100%  0%
+//! 近义改写      12    0%      0%    83%
+//! 纯指代        4     0%      0%    0%
+//! ```
+//!
+//! **语料为什么变了**：S1 的整窗兜底一上线，12 条对话的小语料会把整个窗口
+//! 倒回来，近义改写凭空「92% 命中」——那是兜底把答案免费送上门，不是召回
+//! 能力。真实一周是几百条对话、几十条事实，所以 S0 的「精确片段 100% /
+//! 纯指代 50%」也有同样的虚高成分。两张表不可混比，只作演进记录。
+//!
+//! ## 三处归因（S1 修复后仍是问题的）
+//! 1. **近义改写 0%**：与原文无公共二字切片，任何 LIKE 腿都命中不了。
+//!    这是 embedding **唯一**的正当靶子——83% 的用例会先降级到整窗再失败，
+//!    说明问题不在「不敢搜」而在「搜不到」。
+//! 2. **纯指代 0%**：无任何内容词，整窗扫描只能倒出最近 10 条事实/60 条
+//!    对话，真实密度下必然漏。这不是检索腿能解决的，要么把 facts 常驻
+//!    注入 prompt，要么维持「指代靠上下文」的产品取舍。
+//! 3. **已修复**：字面自然句 8% → 100%（二字腿）、口语指代 33% → 100%
+//!    （元指代词进脚手架）、精确片段 92% → 100%（「所有权」这类实字夹
+//!    停用字的词也能出腿）。
 //!
 //! 只在测试构建里编译：这是量尺，不是产品功能。跑法：
 //! `cargo test --lib recall_baseline -- --nocapture`
@@ -67,8 +81,12 @@ struct Topic {
 }
 
 /// 12 个话题（覆盖用户真实生活面：工作流程、家里装修、技术学习、生活习惯）。
-/// 12 条事实 > `MAX_FACT_ROWS = 10`，故意越过事实行上限一档——真实使用下
-/// 每天 5–15 条事实，一周窗口本来就超 10 条。
+///
+/// 语料约束（两条都是量尺可信的前提）：
+/// 1. `synonym` 必须与 `utterance`/`fact` **没有任何公共二字切片**——否则量到的
+///    仍是字面命中，语义缺口会被自己编的题填平。
+/// 2. 12 条事实 + 60 条噪声对话 + 40 条噪声事实：真实一周是几百条对话、几十条
+///    事实，语料量不够时「整窗兜底」会把全部内容倒回来，每个类都虚高。
 const TOPICS: [Topic; 12] = [
     Topic {
         utterance: "我在走报销流程，先找直属主管审批再去财务系统",
@@ -76,7 +94,7 @@ const TOPICS: [Topic; 12] = [
         expect: "报销流程",
         literal: "报销流程怎么走",
         colloquial: "上次说的报销流程到哪一步了",
-        synonym: "那个退钱的手续还没弄完",
+        synonym: "退钱的手续卡在谁那儿了",
     },
     Topic {
         utterance: "我家客厅阳台想封窗，尺寸已经量过了",
@@ -84,7 +102,7 @@ const TOPICS: [Topic; 12] = [
         expect: "封窗",
         literal: "封窗尺寸量了吗",
         colloquial: "之前那个封窗的事有进展吗",
-        synonym: "阳台装窗户的测量结果",
+        synonym: "外推玻璃安装要多少钱",
     },
     Topic {
         utterance: "我喜欢雨天跑步，一般晚上八点出门",
@@ -92,7 +110,7 @@ const TOPICS: [Topic; 12] = [
         expect: "雨天跑步",
         literal: "雨天跑步几点出门",
         colloquial: "上次聊的那个雨天跑步几点来着",
-        synonym: "下雨天夜跑的时间安排",
+        synonym: "下着雨出去慢跑的习惯",
     },
     Topic {
         utterance: "我在杭州余杭看二手房，预算三百万左右",
@@ -132,7 +150,7 @@ const TOPICS: [Topic; 12] = [
         expect: "黑咖啡",
         literal: "黑咖啡加不加糖",
         colloquial: "之前说的黑咖啡怎么喝来着",
-        synonym: "早晨那杯纯咖啡不放糖",
+        synonym: "起床后那杯深色饮品不放蔗糖",
     },
     Topic {
         utterance: "我家猫叫团子，今年三岁",
@@ -140,7 +158,7 @@ const TOPICS: [Topic; 12] = [
         expect: "团子",
         literal: "猫叫团子几岁",
         colloquial: "上次说的猫叫团子多大了",
-        synonym: "家里那只宠物猫的年龄",
+        synonym: "家里养的小动物现在多大了",
     },
     Topic {
         utterance: "我在学 Rust，卡在所有权和借用",
@@ -169,14 +187,13 @@ const TOPICS: [Topic; 12] = [
 ];
 
 /// 纯指代/半指代问法。前两条只含语气词与代词（切词后无腿），后两条带
-/// 「之前/上次 + 那件事」（切词后留下不可用的残片）——两类对照，正好分离
-/// 「窗口兜底没做」与「垃圾腿挡住兜底」两种失败。
-/// (问法, 期望证据词, 该话题在 TOPICS 里的下标)
-const ANAPHORA: [(&str, &str, usize); 4] = [
-    ("还记得吗", "开会", 11),
-    ("那个呢", "扫地机器人", 10),
-    ("上次那个事怎么样了", "所有权", 9),
-    ("之前提过的那件事", "二手房", 3),
+/// 「之前/上次 + 那件事」（S1 之后脚手架词一并剥掉，也变成无腿）——
+/// 四条的期望证据词与对话原文都取自 `TOPICS` 对应下标。
+const ANAPHORA: [(&str, usize); 4] = [
+    ("还记得吗", 11),
+    ("那个呢", 10),
+    ("上次那个事怎么样了", 9),
+    ("之前提过的那件事", 3),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -213,7 +230,8 @@ impl Class {
     }
 }
 
-/// 一个用例跑完的结果。`pure_leg` 是指标 A，`hit_*` 是指标 B 的两个来源。
+/// 一个用例跑完的结果。`pure_leg` 是指标 A，`hit_*` 是指标 B 的两个来源，
+/// `degraded` 记录这次是不是走了「腿全落空 → 整窗兜底」。
 #[derive(Debug)]
 pub struct Outcome {
     pub class: Class,
@@ -222,6 +240,7 @@ pub struct Outcome {
     pub pure_leg: bool,
     pub hit_lines: bool,
     pub hit_facts: bool,
+    pub degraded: bool,
 }
 
 impl Outcome {
@@ -246,6 +265,8 @@ pub struct ClassScore {
     pub total: usize,
     pub pure: usize,
     pub hits: usize,
+    /// 其中走了整窗兜底的条数——「命中」里有多少是碰巧撞进窗口。
+    pub degraded: usize,
 }
 
 impl ClassScore {
@@ -261,6 +282,13 @@ impl ClassScore {
             0.0
         } else {
             self.hits as f64 / self.total as f64
+        }
+    }
+    pub fn degraded_rate(&self) -> f64 {
+        if self.total == 0 {
+            0.0
+        } else {
+            self.degraded as f64 / self.total as f64
         }
     }
 }
@@ -281,21 +309,23 @@ impl Report {
     /// 人读的表格 + 失败明细（`--nocapture` 看）。
     pub fn render(&self) -> String {
         let mut out = String::new();
-        out.push_str("S0 检索基线 · memory_search 端到端（pinned 2026-12-01）\n");
+        out.push_str("S0/S1 检索基线 · memory_search 端到端（pinned 2026-12-01，语料见 seed）\n");
         out.push_str(&format!(
-            "{}{}{}{}\n",
+            "{}{}{}{}{}\n",
             pad("问法", 14),
             pad("用例", 6),
             pad("腿纯净", 8),
-            pad("端到端命中", 10)
+            pad("命中", 6),
+            pad("走兜底", 8)
         ));
         for s in &self.scores {
             out.push_str(&format!(
-                "{}{}{}{}\n",
+                "{}{}{}{}{}\n",
                 pad(s.class.label(), 14),
                 pad(&s.total.to_string(), 6),
                 pad(&format!("{:.0}%", s.pure_rate() * 100.0), 8),
-                pad(&format!("{:.0}%", s.hit_rate() * 100.0), 10)
+                pad(&format!("{:.0}%", s.hit_rate() * 100.0), 6),
+                pad(&format!("{:.0}%", s.degraded_rate() * 100.0), 8)
             ));
         }
         out.push_str("\n未命中用例（腿 → 结果来源）：\n");
@@ -326,12 +356,51 @@ fn pad(s: &str, width: usize) -> String {
     format!("{s}{}", " ".repeat(width.saturating_sub(w)))
 }
 
-/// 建库 + 播种：每个话题一条用户对话（原文）+ 一条事实（consolidate 的产物）。
+/// 语料时间轴（相对 pinned 2026-12-01T02:00:00Z）：话题放三天前，噪声放
+/// 一小时前。噪声必须是**更新**的那批，否则「腿全落空 → 整窗兜底」会
+/// 白捡命中（S1 刚上线时基线就这么虚高过一轮：整窗把 12 条全捞回来，
+/// 近义改写凭空 92%）。
+const TOPIC_EVENT_TS: &str = "2026-11-28T02:00:00+00:00";
+const TOPIC_FACT_TS: &str = "2026-11-28T03:00:00+00:00";
+const NOISE_EVENT_TS: &str = "2026-12-01T01:00:00+00:00";
+/// 噪声对话条数 = `MAX_DIALOGUE_ROWS`（60）。一周的真实语速是几百条，
+/// 60 是「半天的量」——正好把上限顶满，让整窗兜底不再是免费午餐。
+const NOISE_ROWS: usize = 60;
+/// 噪声事实 40 条（≈ 一周 5–8 条/天）。`MAX_FACT_ROWS = 10`，所以整窗兜底
+/// 只能带回最近 10 条噪声——「把整个窗口倒出来」在真实事实密度下并不成立。
+const NOISE_FACTS: usize = 40;
+
+/// 建库 + 播种：每个话题一条用户对话（原文）+ 一条事实（consolidate 的
+/// 产物），再压 60 条更晚的日常噪声。
 pub fn seed(conn: &Connection) -> rusqlite::Result<()> {
     db::init_schema_for_test(conn)?;
     for t in TOPICS.iter() {
-        db::add_event_meta(conn, "dialogue", t.utterance, Some("user"), Some("s0"))?;
-        db::add_fact_confident(conn, t.fact, None, 0.7)?;
+        conn.execute(
+            "INSERT INTO events (ts, kind, content, role, session_id)
+             VALUES (?1, 'dialogue', ?2, 'user', 's0')",
+            rusqlite::params![TOPIC_EVENT_TS, t.utterance],
+        )?;
+        conn.execute(
+            "INSERT INTO facts (ts, content, confidence) VALUES (?1, ?2, 0.7)",
+            rusqlite::params![TOPIC_FACT_TS, t.fact],
+        )?;
+    }
+    for i in 0..NOISE_ROWS {
+        conn.execute(
+            "INSERT INTO events (ts, kind, content, role, session_id)
+             VALUES (?1, 'dialogue', ?2, ?3, 'noise')",
+            rusqlite::params![
+                NOISE_EVENT_TS,
+                format!("日常占位第{i}条"),
+                if i % 2 == 0 { "user" } else { "assistant" }
+            ],
+        )?;
+    }
+    for i in 0..NOISE_FACTS {
+        conn.execute(
+            "INSERT INTO facts (ts, content, confidence) VALUES (?1, ?2, 0.6)",
+            rusqlite::params![NOISE_EVENT_TS, format!("日常占位事实第{i}条")],
+        )?;
     }
     Ok(())
 }
@@ -339,7 +408,7 @@ pub fn seed(conn: &Connection) -> rusqlite::Result<()> {
 /// 跑一遍全部用例。调用方负责先 pin 时钟（`clock::pinned`）。
 pub fn run(conn: &Connection) -> Report {
     let mut outcomes = Vec::new();
-    for t in TOPICS.iter() {
+    for (i, t) in TOPICS.iter().enumerate() {
         let cases = [
             (Class::ExactSlice, t.expect),
             (Class::Literal, t.literal),
@@ -347,11 +416,11 @@ pub fn run(conn: &Connection) -> Report {
             (Class::Synonym, t.synonym),
         ];
         for (class, question) in cases {
-            outcomes.push(measure(conn, class, question, t.expect));
+            outcomes.push(measure(conn, class, question, i));
         }
     }
-    for (question, expect, _topic) in ANAPHORA {
-        outcomes.push(measure(conn, Class::Anaphora, question, expect));
+    for (question, topic) in ANAPHORA {
+        outcomes.push(measure(conn, Class::Anaphora, question, topic));
     }
 
     let scores = Class::ALL
@@ -363,6 +432,7 @@ pub fn run(conn: &Connection) -> Report {
                 total: rows.len(),
                 pure: rows.iter().filter(|o| o.pure_leg).count(),
                 hits: rows.iter().filter(|o| o.hit()).count(),
+                degraded: rows.iter().filter(|o| o.degraded).count(),
             }
         })
         .collect();
@@ -370,23 +440,22 @@ pub fn run(conn: &Connection) -> Report {
 }
 
 /// 单例测量：切词（线上同一份实现）→ 腿纯净判定 → 端到端召回。
-fn measure(conn: &Connection, class: Class, question: &'static str, expect: &str) -> Outcome {
+/// 腿纯净只看**目标话题**的对话原文——拿别的话题算命中会把分数哄高。
+fn measure(conn: &Connection, class: Class, question: &'static str, topic: usize) -> Outcome {
+    let target = &TOPICS[topic];
     let today = super::clock::now_local().date_naive();
     let phrase = memory_search::parse_window(question, today)
         .map(|(_, _, label)| label)
         .unwrap_or_default();
-    let legs = memory_search::keywords(question, &phrase);
-    // 腿纯净 = 至少一条腿是库里真实存在的子串（LIKE 能命中）。
-    let pure_leg = legs
-        .iter()
-        .any(|k| TOPICS.iter().any(|t| t.utterance.contains(k.as_str())));
+    let legs = memory_search::legs(question, &phrase);
+    let pure_leg = legs.iter().any(|k| target.utterance.contains(k.as_str()));
 
     let recall = memory_search::recall(conn, question);
     let hit_lines = recall
         .lines
         .iter()
-        .any(|(_, _, text)| text.contains(expect));
-    let hit_facts = recall.facts.iter().any(|f| f.contains(expect));
+        .any(|(_, _, text)| text.contains(target.expect));
+    let hit_facts = recall.facts.iter().any(|f| f.contains(target.expect));
 
     Outcome {
         class,
@@ -395,6 +464,7 @@ fn measure(conn: &Connection, class: Class, question: &'static str, expect: &str
         pure_leg,
         hit_lines,
         hit_facts,
+        degraded: recall.degraded,
     }
 }
 
@@ -454,16 +524,15 @@ mod tests {
             .iter()
             .map(|c| (*c, report.score(*c).hits))
             .collect();
-        // 2026-11-23 首次测得的命中数（用例数 12/12/12/12/4）。S1/S2 或
-        // embedding 上线后上调，永不为了「让测试过」而下调。
-        // 「近义改写」是 0——这一行刻意留 0，它就是 embedding 的靶子：
-        // 只有它上移，才说明向量腿真的换来了东西。
+        // 2026-11-23 S1 后测得（用例数 12/12/12/12/4）。只许上调，永不为了
+        // 「让测试过」而下调。近义改写刻意留 0——它上移才是 embedding 值得
+        // 做的证据；纯指代留 0——它得靠 facts 常驻注入或上下文，不靠腿。
         let floor: [(Class, usize); 5] = [
             (Class::ExactSlice, 12),
-            (Class::Literal, 1),
-            (Class::Colloquial, 4),
+            (Class::Literal, 12),
+            (Class::Colloquial, 12),
             (Class::Synonym, 0),
-            (Class::Anaphora, 2),
+            (Class::Anaphora, 0),
         ];
         for ((class, got), (_, need)) in hits.iter().zip(floor.iter()) {
             assert!(*got >= *need, "{:?} 命中数从基线 {need} 掉到 {got}", class);

@@ -52,6 +52,10 @@ const RECALL_MARKERS: &[&str] = &[
     // 2026-11-21 turn 13–20 教训：「周四聊天原文」一个词都不沾——用户要的
     // 是回看原文，不是新聊天。「原文/逐字」进了词表，星期词由 has_weekday 兜底。
     "原文", "逐字",
+    // 2026-11-23（S1，S0 基线暴露）：元指代词一个都不在表里 → 「之前说过的
+    // 那个事」根本不上工具，模型凭 6 轮上下文硬答。这类词只指向「过去的
+    // 对话」本身，命中就该给工具（多一轮的成本远低于装不记得）。
+    "之前", "以前", "那次", "当时", "刚才", "刚刚", "那件事", "那个事",
 ];
 
 /// Lowercase + strip whitespace. Shared with perception_search (single
@@ -355,6 +359,11 @@ const SCAFFOLDING: &[&str] = &[
     // 2026-11-21：「周四聊天原文」去掉日期后剩下的「聊天原文」做不出有效
     // LIKE 腿——回看原文类请求要的是整窗扫描，这些词一律剥掉。
     "原文", "逐字", "聊天", "内容",
+    // 2026-11-23（S1）：S0 基线暴露的元指代词——它们指向「对话行为」本身，
+    // 不是可检索的内容。留着只会切出「之前」「上次」这种全库噪声腿，
+    // 反而让真正的整窗兜底跑不起来。
+    "上次", "之前", "以前", "那次", "当时", "刚才", "刚刚",
+    "那件事", "那个事", "这件事", "那个", "这个", "还记得", "记得吗",
 ];
 
 /// Single-char particles and dialogue verbs that never make a keyword.
@@ -372,13 +381,7 @@ const STOP_CHARS: &[char] = &[
 /// longer and must win ("在用什么" must not be chopped to "在用" by the
 /// generic "什么").
 pub fn keywords_with(text: &str, date_phrase: &str, extra_scaffolding: &[&str]) -> Vec<String> {
-    let mut t = normalise(text);
-    if !date_phrase.is_empty() {
-        t = t.replace(&normalise(date_phrase), "");
-    }
-    for s in extra_scaffolding.iter().chain(SCAFFOLDING.iter()) {
-        t = t.replace(s, "");
-    }
+    let t = stripped(text, date_phrase, extra_scaffolding);
     let segments = t
         .chars()
         .map(|c| if STOP_CHARS.contains(&c) || c.is_ascii_punctuation() { ' ' } else { c })
@@ -393,11 +396,91 @@ pub fn keywords_with(text: &str, date_phrase: &str, extra_scaffolding: &[&str]) 
     out
 }
 
+/// 去掉日期短语与脚手架词后的裸文本。切词（`keywords_with`）与腿展开
+/// （`legs`）共用这一份剥离逻辑——两处各写一遍必然漂移。
+fn stripped(text: &str, date_phrase: &str, extra_scaffolding: &[&str]) -> String {
+    let mut t = normalise(text);
+    if !date_phrase.is_empty() {
+        t = t.replace(&normalise(date_phrase), "");
+    }
+    for s in extra_scaffolding.iter().chain(SCAFFOLDING.iter()) {
+        t = t.replace(s, "");
+    }
+    t
+}
+
 /// memory_search 自身的调用点（无额外脚手架词）。`pub(crate)` 只为 S0 检索
 /// 基线（`memory::eval_recall`）复用同一份切词实现——基线若另写一份切词，
 /// 量出来的就不是线上链路（AGENTS.md 硬约束 1）。
 pub(crate) fn keywords(text: &str, date_phrase: &str) -> Vec<String> {
     keywords_with(text, date_phrase, &[])
+}
+
+/// 单条 SQL 里最多挂多少条 LIKE 腿。16 条 × 万级行仍是毫秒量级，
+/// 而再多的 2-gram 只会把噪声腿也带进来。
+const MAX_LIKE_LEGS: usize = 16;
+
+/// 能进腿的字符：停用字、ASCII 标点、空白一律不参与（它们是分词边界）。
+fn is_leg_char(c: char) -> bool {
+    !STOP_CHARS.contains(&c) && !c.is_ascii_punctuation() && !c.is_whitespace()
+}
+
+/// 裸文本里所有含实字的相邻切片。停用字允许出现在窗口里（否则「所有权」
+/// 这种「实字夹停用字」的词一条腿都产不出来——S0 基线里精确片段唯一的
+/// 失手就是它），但不能两个字都是停用字（「的说 / 提过」是纯噪声）。
+fn bigrams_of(t: &str) -> Vec<String> {
+    let chars: Vec<char> = t.chars().collect();
+    let mut out = Vec::new();
+    for pair in chars.windows(2) {
+        let real = pair.iter().filter(|c| is_leg_char(**c)).count();
+        let boundary = pair
+            .iter()
+            .any(|c| c.is_ascii_punctuation() || c.is_whitespace());
+        if real >= 1 && !boundary {
+            push_leg(&mut out, pair.iter().collect());
+        }
+    }
+    out
+}
+
+/// 切词段 → LIKE 腿（S1，2026-11-23）。
+///
+/// S0 基线量出的事故：`keywords` 只按停用字/标点切段，而中文没有空格，
+/// 于是「报销流程怎么走」整段成一条腿，`LIKE '%报销流程怎么走%'` 永远
+/// 匹配不到「我在走报销流程…」——字面自然句的端到端命中率只有 8%。
+///
+/// 补法是段内展开 2-gram：整段仍保留（长腿精确），再加裸文本里所有相邻
+/// 二字切片（短腿兜底）。代价是噪声腿变多（OR 关系，只会多召回不会漏），
+/// 收益是「词被句法裹住」不再等于没命中。
+fn legs_from_segments(segments: &[String], text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for bg in bigrams_of(text) {
+        push_leg(&mut out, bg);
+        if out.len() >= MAX_LIKE_LEGS {
+            break;
+        }
+    }
+    for seg in segments {
+        push_leg(&mut out, seg.clone());
+        if out.len() >= MAX_LIKE_LEGS {
+            break;
+        }
+    }
+    out.truncate(MAX_LIKE_LEGS);
+    out
+}
+
+fn push_leg(out: &mut Vec<String>, leg: String) {
+    if !out.contains(&leg) {
+        out.push(leg);
+    }
+}
+
+/// memory_search 真正下发给 SQL 的腿。基线（eval_recall）也走这一份，
+/// 量的才是线上行为。
+pub(crate) fn legs(text: &str, date_phrase: &str) -> Vec<String> {
+    let bare = stripped(text, date_phrase, &[]);
+    legs_from_segments(&keywords(text, date_phrase), &bare)
 }
 
 // ---------------------------------------------------------------- search core
@@ -407,6 +490,9 @@ pub struct Recall {
     /// `(local time, who, content)` oldest first; who ∈ 用户/盆栽.
     pub lines: Vec<(String, &'static str, String)>,
     pub facts: Vec<String>,
+    /// 关键词腿全落空后退回整窗扫描（S1 三级降级）。模型侧需要知道
+    /// 这份结果「可能不完整」而不是「精确匹配为空」。
+    pub degraded: bool,
 }
 
 fn weekday_cn(w: Weekday) -> &'static str {
@@ -475,8 +561,8 @@ fn clip(s: &str, n: usize) -> String {
 pub fn recall(conn: &Connection, query: &str) -> Recall {
     let today = clock::now_local().date_naive();
     let (start, end, phrase) = parse_window(query, today).unwrap_or_else(|| fallback_window(today));
-    let kws = keywords(query, &phrase);
-    recall_with_keywords(conn, start, end, &kws)
+    let legs = legs(query, &phrase);
+    recall_with_keywords(conn, start, end, &legs)
 }
 
 /// Explicit date-window scan: no keyword legs, the whole window. The caller
@@ -493,6 +579,19 @@ fn recall_with_keywords(
     end: NaiveDate,
     kws: &[String],
 ) -> Recall {
+    let mut out = scan(conn, start, end, kws);
+    // 三级降级（S1，2026-11-23）：腿全部落空时**不能**直接回「没有记录」——
+    // 那是 S0 基线里纯指代 50% 的唯一死因（「之前提过的那件事」抽出两条
+    // 垃圾腿，`AND (LIKE)` 归零，而那个窗口里明明有对话）。退回整窗扫描
+    // 并把 degraded 标出来：召回优先，诚实其次（「可能不完整」比「没有」好）。
+    if !kws.is_empty() && out.lines.is_empty() && out.facts.is_empty() {
+        out = scan(conn, start, end, &[]);
+        out.degraded = true;
+    }
+    out
+}
+
+fn scan(conn: &Connection, start: NaiveDate, end: NaiveDate, kws: &[String]) -> Recall {
     let (iso_start, iso_end) = iso_pair(start, end);
 
     // Dialogue rows. Keyword legs OR-combined (recall beats precision);
@@ -540,29 +639,34 @@ fn recall_with_keywords(
     lines.reverse();
 
     // Facts learned in the window (report §4.2: what was *learned* that day).
+    // 取最新而不是最早（S1）：`facts_in_window` 按 id ASC 返回，直接 take(10)
+    // 会在「一周 12 条事实」时把最新的两条丢掉——正好和「回忆重点是最近」
+    // 相反。倒序取满再反排回时间正序，与对话行同一策略。
     let mut facts = Vec::new();
     if let Ok(rows) = crate::memory::db::facts_in_window(conn, &iso_start, &iso_end) {
-        for f in rows {
+        for f in rows.iter().rev() {
             if !kws.is_empty() && !kws.iter().any(|k| f.content.contains(k.as_str())) {
                 continue;
             }
-            facts.push(f.content);
+            facts.push(f.content.clone());
             if facts.len() >= MAX_FACT_ROWS {
                 break;
             }
         }
+        facts.reverse();
     }
 
-    Recall { window_label: window_label(start, end), lines, facts }
+    Recall { window_label: window_label(start, end), lines, facts, degraded: false }
 }
 
 impl Recall {
     fn render(&self, line_chars: usize) -> String {
         let mut out = format!(
-            "【{}】对话 {} 条、记忆 {} 条\n",
+            "【{}】对话 {} 条、记忆 {} 条{}\n",
             self.window_label,
             self.lines.len(),
-            self.facts.len()
+            self.facts.len(),
+            if self.degraded { "（关键词未命中，已退回整窗）" } else { "" }
         );
         for (stamp, who, content) in &self.lines {
             out.push_str(&format!("[{} {}] {}\n", stamp, who, clip(content, line_chars)));
@@ -590,6 +694,7 @@ impl Recall {
             "window": self.window_label,
             "dialogue_count": self.lines.len(),
             "fact_count": self.facts.len(),
+            "degraded": self.degraded,
             "lines": self.lines.iter().map(|(ts, who, text)| serde_json::json!({
                 "ts": ts,
                 "who": who,
@@ -961,5 +1066,94 @@ mod tests {
         // 第 99 条（最新）必须在、第 0 条（最旧）必须被挤出。
         assert!(r.lines.iter().any(|(_, _, c)| c.contains("第99条")), "keep the newest: {:?}", r.lines.first());
         assert!(!r.lines.iter().any(|(_, _, c)| c.contains("第0条")), "drop the oldest");
+    }
+
+    // ------------------------------------------------ S1：腿展开 / 降级 / 事实取新
+
+    /// 段内 2-gram 展开：整段与二字切片同时进 LIKE。（S0 基线：字面自然句
+    /// 端到端只有 8%，因为「报销流程怎么走」整段成一条腿。）
+    #[test]
+    fn legs_expand_segments_into_bigrams() {
+        let got = legs("报销流程怎么走", "");
+        assert!(got.contains(&"报销流程怎么走".to_string()), "长腿保留: {got:?}");
+        assert!(got.contains(&"报销".to_string()), "二字切片必须进腿: {got:?}");
+        assert!(got.contains(&"流程".to_string()));
+        // 去重 + 上限
+        assert!(got.len() <= MAX_LIKE_LEGS);
+        let mut uniq = got.clone();
+        uniq.sort();
+        uniq.dedup();
+        assert_eq!(uniq.len(), got.len(), "腿不得重复: {got:?}");
+        // 元指代词不产腿（否则整窗兜底永远跑不到）
+        assert!(legs("之前提过的那件事", "").is_empty(), "纯指代不该有腿");
+    }
+
+    /// S0 基线的头号事故：自然句整段匹配不上 → 现在靠二字腿命中。
+    #[test]
+    fn natural_sentence_hits_via_bigram_legs() {
+        let _g = crate::memory::clock::pinned("2026-11-20T07:00:00Z");
+        let conn = mem();
+        insert_dialogue(&conn, "2026-11-19T01:00:00+00:00", "user", "我在走报销流程，先找主管审批");
+        let r = recall(&conn, "报销流程怎么走");
+        assert_eq!(r.lines.len(), 1, "二字腿应命中: {:?}", r.lines);
+        assert!(!r.degraded, "命中就不该标降级");
+        assert!(r.summary().contains("报销流程"));
+    }
+
+    /// 三级降级：腿全落空 → 退回整窗，不谎报「没有记录」。
+    #[test]
+    fn zero_hit_falls_back_to_the_whole_window() {
+        let _g = crate::memory::clock::pinned("2026-11-20T07:00:00Z");
+        let conn = mem();
+        insert_dialogue(&conn, "2026-11-19T01:00:00+00:00", "user", "今天换了水培的营养液");
+        conn.execute(
+            "INSERT INTO facts (ts, content, confidence) VALUES ('2026-11-19T03:00:00+00:00', '用户在养水培', 0.7)",
+            [],
+        )
+        .unwrap();
+        // 腿（报销/销流/流程…）一条都不在库里 → 必须降级而不是空结果
+        let r = recall(&conn, "报销流程怎么走");
+        assert!(r.degraded, "腿全落空必须标 degraded");
+        assert_eq!(r.lines.len(), 1, "整窗兜底应把窗口里的对话带回来: {:?}", r.lines);
+        assert_eq!(r.facts.len(), 1, "整窗兜底的事实也要带回来");
+        assert!(r.summary().contains("退回整窗"), "模型侧要看见降级说明: {}", r.summary());
+        let full: serde_json::Value = serde_json::from_str(&r.full()).unwrap();
+        assert_eq!(full["degraded"], true, "/trace 侧要有结构化标记");
+
+        // 真·空窗口仍然是诚实的「没有记录」，且不标降级（无可降之物）
+        let empty = recall(&conn, "18号说了啥");
+        assert!(!empty.degraded);
+        assert!(empty.summary().contains("没有找到对话记录"));
+    }
+
+    /// 事实行满额时保住最新的：`facts_in_window` 是 id ASC，直接截断会把
+    /// 「最近说的」先丢掉（S0 基线里 12 条事实窗口的纯指代就栽在这）。
+    #[test]
+    fn fact_cap_keeps_the_newest_ones() {
+        let _g = crate::memory::clock::pinned("2026-11-20T07:00:00Z");
+        let conn = mem();
+        for i in 0..(MAX_FACT_ROWS + 2) {
+            conn.execute(
+                "INSERT INTO facts (ts, content, confidence, importance) VALUES ('2026-11-19T03:00:00+00:00', ?1, 0.7, 3)",
+                rusqlite::params![format!("事实{i}")],
+            )
+            .unwrap();
+        }
+        // 无腿 → 整窗；事实取满 MAX_FACT_ROWS 条
+        let r = recall(&conn, "还记得吗");
+        assert_eq!(r.facts.len(), MAX_FACT_ROWS);
+        let newest = format!("事实{}", MAX_FACT_ROWS + 1);
+        assert!(r.facts.iter().any(|f| f == &newest), "最新的一条必须在: {:?}", r.facts);
+        assert!(!r.facts.iter().any(|f| f == "事实0"), "最旧的一条应被挤出");
+        // 反排回时间正序：最后一条是最新
+        assert_eq!(r.facts.last(), Some(&newest));
+    }
+
+    /// 元指代词进闸门：这类问法必须上工具（多一轮 << 装不记得）。
+    #[test]
+    fn gate_opens_on_meta_references() {
+        for t in ["之前说过的那个事", "以前聊的那个", "那次说的方案", "当时你怎么说的"] {
+            assert!(might_recall(t), "gate must fire on: {t}");
+        }
     }
 }
