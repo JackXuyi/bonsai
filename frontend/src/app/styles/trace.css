@@ -262,7 +262,8 @@
   line-height: 1.7;
   word-break: break-word;
   user-select: text;
-  overflow-wrap: anywhere;}
+  overflow-wrap: anywhere;
+}
 
 .trace-prompt-body h1,
 .trace-prompt-body h2 {
