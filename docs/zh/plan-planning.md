@@ -357,7 +357,12 @@ ALTER TABLE tasks ADD COLUMN confirm_mode  TEXT NOT NULL DEFAULT 'auto'; -- D1: 
 
 ## 13. 实施记录
 
-（待实施后回填：每期 commit、验证、真机项）
+| T | commit | 验证 | 备注 |
+|---|---|---|---|
+| T1 | `1a7a52f` | `cargo test --lib` 454 passed | schema v14 + 4 列读写；基线 452→454 |
+| T2 | 待提交 | `cargo test --lib` 462 passed；`plan_intent` 20 正/15 负全过 | 规划入口 + 计划轮 + D1 确认门 |
+
+**T2 实现与设计的小偏差（不影响约束）**：计划轮在 `chat_with_tools` 的 msgs 尾部追加一条系统指令 user 消息（「只调用 submit_plan」），使模型明确协议；计划 msgs 用 `msgs.clone()`，不污染主循环消息序列。计划轮 HTTP 计入 `CLOUD_REQUEST_CAP`（不放大预算）。任务卡改为「计划成功即开卡」（原惰性开卡太晚，plan_json 需先有归属行），后续真实工具循环见 `task_open=true` 不再重复开卡。`submit_plan` 不落审计行（`execute_audited` 不认识它），只有真实工具审计关联 task。
 
 ---
 

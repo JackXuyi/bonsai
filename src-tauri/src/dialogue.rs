@@ -148,6 +148,22 @@ impl TraceRecorder {
         });
     }
 
+    /// 规划轮（plan-planning T2）：一次独立的计划提交请求。step_kind 固定
+    /// `plan_submit`，T5 的 trace 计划卡据此识别；失败也留 step（A8）。
+    fn plan_round(&mut self, prompt: &str, output: &str, outcome: &str, dur: Duration) {
+        self.steps.push(db::TraceStepDraft {
+            step_kind: "plan_submit".into(),
+            title: "规划轮".into(),
+            prompt: Some(prompt.into()),
+            output: Some(output.into()),
+            args_json: None,
+            summary: None,
+            outcome: Some(outcome.into()),
+            duration_ms: Some(dur.as_millis() as i64),
+            user_text: self.user_text.clone(),
+        });
+    }
+
     /// A non-model step (rule checks, retries, filter).
     fn simple(&mut self, step_kind: &str, title: &str, outcome: &str, output: Option<&str>) {
         self.steps.push(db::TraceStepDraft {
@@ -312,6 +328,139 @@ const CLOUD_TOOL_CALL_CAP: usize = 8;
 /// 单轮对话 HTTP 请求次数上限（含最终作答轮）。网络往返比本地推理贵。
 const CLOUD_REQUEST_CAP: usize = 6;
 
+/// 规划意图判定（plan-planning v0.2 §5.1）：纯规则、零模型、零成本。
+///
+/// **只在云端分支调用**——本地路径永不规划（本地零工具调用硬约束，A9）。
+/// 保守判定：宁可漏规划，不可误规划——误规划会多花一次云端请求且打断
+/// 单步任务。三级信号：
+///   1. 显式规划 cue（「规划一下/列步骤/分几步」）或成对序列词（先…再）→ 命中；
+///   2. ≥2 个不同动作动词 且 kit 有 ≥2 工具 → 命中；
+///   3. ≥2 个工具域关键词 且 kit 有 ≥2 工具 → 命中。
+fn plan_intent(user_text: &str, kit: &crate::mcp_admin::AgentKit) -> bool {
+    // 强 cue：明确要求规划/分步/多件事一起做，单个即命中（不依赖 kit）。
+    const STRONG: &[&str] = &[
+        "规划一下", "帮我规划", "列个步骤", "列出步骤", "列步骤",
+        "分几步", "分步骤", "一步步", "一起做", "按顺序",
+    ];
+    if STRONG.iter().any(|c| user_text.contains(c)) {
+        return true;
+    }
+    // 序列 cue 必须成对（「先…再」「先…然后」）——单字「先/再」太易误伤
+    // （「再说」「先这样」）。
+    const SEQ: &[&str] = &["先", "再", "然后", "接着", "随后", "之后"];
+    if SEQ.iter().filter(|c| user_text.contains(**c)).count() >= 2 {
+        return true;
+    }
+    // 多动作 / 多域都要求 kit 有 ≥2 工具：单工具场景一步就做完，无需规划。
+    if kit.catalog_all().len() < 2 {
+        return false;
+    }
+    // 用「不同动作」去重：'查一下' 与 '查' 只算一个动作。
+    // 单字动词避免与域名子串冲突（「记」会命中「记忆」）——改用双字「记到/记录」。
+    const ACTIONS: &[&str] = &[
+        "查", "找", "读", "写", "搜", "发", "存", "记到", "记录",
+        "整理", "总结", "合并", "生成", "汇总", "对比", "列出",
+        "下载", "打开", "删除", "导出", "导入", "复制", "移动",
+    ];
+    let actions: std::collections::HashSet<&str> = ACTIONS
+        .iter()
+        .copied()
+        .filter(|a| user_text.contains(a))
+        .collect();
+    if actions.len() >= 2 {
+        return true;
+    }
+    const DOMAINS: &[&str] = &[
+        "文件", "文档", "网页", "网址", "链接", "日程", "会议", "日历",
+        "邮件", "记忆", "笔记", "备忘录", "剪贴板", "目录", "文件夹",
+    ];
+    let domains: std::collections::HashSet<&str> = DOMAINS
+        .iter()
+        .copied()
+        .filter(|d| user_text.contains(d))
+        .collect();
+    domains.len() >= 2
+}
+
+/// 计划步数上限（plan-planning §7）：低于 CLOUD_TOOL_CALL_CAP=8，留 2 步
+/// 给「计划外步骤」与收尾。
+const MAX_PLAN_STEPS: usize = 6;
+
+/// `submit_plan` 协议工具 spec——只在计划轮传给模型，**不进 provider catalog**
+/// （D5 裁决：它是协议工具，不是能力）。
+fn submit_plan_spec() -> crate::llm::ToolSpec {
+    crate::llm::ToolSpec {
+        name: "submit_plan".into(),
+        description: "提交本轮多步执行计划。仅在规划轮调用一次；steps 不超过 6 步。".into(),
+        parameters: Some(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "goal": { "type": "string", "description": "一句话目标" },
+                "steps": {
+                    "type": "array",
+                    "description": "扁平步骤列表，最多 6 步",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "intent": { "type": "string", "description": "这一步要做什么" },
+                            "tool_hint": { "type": "string", "description": "预期工具名，仅作提示" }
+                        },
+                        "required": ["intent"]
+                    }
+                }
+            },
+            "required": ["goal", "steps"]
+        })),
+    }
+}
+
+/// 把模型提交的 `submit_plan` 参数解析为 PlanJson。
+/// 校验：goal 非空、steps 1..=6、每步 intent 非空；tool_hint 缺省填 "*"
+/// （表示「计划外/未指定」）。任一不满足 → None（降级为无计划循环）。
+fn parse_submitted_plan(args: &serde_json::Value) -> Option<db::PlanJson> {
+    let goal = args.get("goal")?.as_str()?.trim().to_string();
+    if goal.is_empty() {
+        return None;
+    }
+    let raw_steps = args.get("steps")?.as_array()?;
+    if raw_steps.is_empty() || raw_steps.len() > MAX_PLAN_STEPS {
+        return None;
+    }
+    let mut steps = Vec::with_capacity(raw_steps.len());
+    for (seq, s) in raw_steps.iter().enumerate() {
+        let intent = s.get("intent")?.as_str()?.trim().to_string();
+        if intent.is_empty() {
+            return None;
+        }
+        let tool_hint = s
+            .get("tool_hint")
+            .and_then(|v| v.as_str())
+            .unwrap_or("*")
+            .to_string();
+        steps.push(db::PlanStep {
+            seq: seq as i32,
+            intent,
+            tool_hint,
+            status: "pending".into(),
+            attempts: 0,
+            tool_call_id: None,
+        });
+    }
+    Some(db::PlanJson { version: 1, goal, steps, replans: 0 })
+}
+
+/// D1 确认门（plan-planning §5.2）：本版恒放行。
+///
+/// - `auto`（默认）：计划提交后直接执行，零等待；
+/// - `manual`（扩展位）：本版**同样放行**，只把模式写进 tasks 留痕，**不弹卡、
+///   不阻塞**——避免「设了 manual 却卡住用户」（A12）。后续启用时在此接
+///   `AskFirstGate` + 复用 `ApprovalBroker` 的 `tool:approval_required` 事件通道，
+///   不触碰执行循环、不再动 schema。
+fn plan_confirm_gate(mode: &str) -> bool {
+    let _ = mode; // 本版两档都放行；manual 的留痕在调用点完成
+    true
+}
+
 /// `AgentKit` → DeepSeek `tools[]`。skill 不进列表（提示注入、不可执行）；
 /// parameters 取 descriptor.detail 解析（MCP 的 detail 就是 inputSchema JSON；
 /// 解析失败 → None = 空参数表，执行期校验兜底）。
@@ -434,6 +583,96 @@ fn cloud_tool_loop(
     let mut summaries: Vec<String> = Vec::new();
     let mut forced_note_sent = false;
     let mut reply;
+
+    // ---- L1 规划入口（plan-planning v0.2 §5.2）：云端专属 ----
+    // plan_intent 只在云端循环内调用——本地路径永不走到这里（A9 零工具硬约束）。
+    // 未命中 → 零额外请求；命中 → 一次「计划轮」（submit_plan 协议工具），
+    // 计划成功后接回现有循环执行，失败/解析失败 → 降级为无计划循环（用户无感）。
+    if plan_intent(user_text, kit) {
+        let t_plan = std::time::Instant::now();
+        let mut plan_msgs = msgs.clone();
+        plan_msgs.push(crate::llm::ToolMsg::user(
+            "（系统指令：这是一个多步骤目标。请只调用 submit_plan 提交执行计划，不要调用其它工具；计划提交后系统会开始执行。）",
+        ));
+        let plan_specs = vec![submit_plan_spec()];
+        let plan_out = client.chat_with_tools(
+            &plan_msgs, &plan_specs, CHAT_TEMPERATURE, crate::llm::CHAT_TIMEOUT_SECS,
+        );
+        // 计划轮也计入 HTTP 预算（§7：计划不放大预算）。
+        requests += 1;
+        let plan_log = serde_json::to_string(&plan_msgs).unwrap_or_default();
+        match plan_out {
+            Ok(pr) => {
+                let call = pr.tool_calls.iter().find(|c| c.name == "submit_plan");
+                match call.and_then(|c| parse_submitted_plan(&c.arguments)) {
+                    Some(plan) => {
+                        // D1 确认门：读 settings（默认 auto）；本版两档都放行，
+                        // 只把模式留痕到 tasks.confirm_mode，不弹卡不阻塞（A11/A12）。
+                        let confirm_mode = {
+                            let conn = lock_conn(store)?;
+                            db::get_setting(&conn, "plan_confirm")
+                                .ok()
+                                .flatten()
+                                .unwrap_or_else(|| "auto".into())
+                        };
+                        if plan_confirm_gate(&confirm_mode) {
+                            // 提前开卡：计划成功即建 tasks 行（现有惰性开卡太晚，
+                            // plan_json 需要先有归属行）。后续工具循环见 task_open=true
+                            // 不再重复开卡。
+                            let conn = lock_conn(store)?;
+                            match db::task_start(&conn, user_text) {
+                                Ok(id) => {
+                                    task.borrow_mut().id = id.clone();
+                                    if let Ok(mut g) = kit.task_id.lock() {
+                                        *g = Some(id.clone());
+                                    }
+                                    task_open.set(true);
+                                    let _ = db::plan_put(&conn, &id, &plan);
+                                    let _ = db::task_set_confirm_mode(&conn, &id, &confirm_mode);
+                                    if let Some(cb) = on_task.as_deref_mut() {
+                                        cb(serde_json::json!({
+                                            "event": "task_start", "id": id,
+                                            "goal": plan.goal, "planned": true,
+                                            "steps": plan.steps.len(),
+                                        }));
+                                    }
+                                    // 接回主循环：assistant(tool_calls) + tool_result，
+                                    // 构成合法的工具轮尾部，让模型开始按计划执行。
+                                    if let Some(c) = call {
+                                        msgs.push(crate::llm::ToolMsg::assistant_tool_calls(
+                                            vec![crate::llm::ToolCallOut {
+                                                id: c.id.clone(),
+                                                name: c.name.clone(),
+                                                arguments: c.arguments.to_string(),
+                                            }],
+                                        ));
+                                        msgs.push(crate::llm::ToolMsg::tool_result(
+                                            &c.id, "计划已记录，开始执行。",
+                                        ));
+                                    }
+                                    rec.plan_round(
+                                        &plan_log,
+                                        &serde_json::to_string(&plan).unwrap_or_default(),
+                                        "submitted",
+                                        t_plan.elapsed(),
+                                    );
+                                }
+                                Err(e) => {
+                                    log::warn!("plan: task_start failed (degrade): {e}");
+                                    rec.plan_round(&plan_log, "", "error", t_plan.elapsed());
+                                }
+                            }
+                        } else {
+                            rec.plan_round(&plan_log, "", "blocked", t_plan.elapsed());
+                        }
+                    }
+                    None => rec.plan_round(&plan_log, "", "degraded", t_plan.elapsed()),
+                }
+            }
+            Err(_) => rec.plan_round(&plan_log, "", "error", t_plan.elapsed()),
+        }
+        kit.trace("plan:round-done".into());
+    }
 
     loop {
         // 护栏触发 → 强制收尾：去掉 tools（协议默认 tool_choice=none），
@@ -2062,6 +2301,251 @@ mod tests {
             task_id: std::sync::Mutex::new(None),            prompt_trace: std::sync::Mutex::new(Vec::new()),
             ..crate::mcp_admin::AgentKit::empty()
         }
+    }
+
+    /// Two-provider kit: 多动作/多域信号要求 kit 有 ≥2 工具才命中（A1 正样本）。
+    fn dual_kit() -> crate::mcp_admin::AgentKit {
+        let a = crate::mcp::MockMcpProvider::with_tool("weather", "查天气", r#"{"type":"object"}"#);
+        let b = crate::mcp::MockMcpProvider::with_tool("notes", "记笔记", r#"{"type":"object"}"#);
+        crate::mcp_admin::AgentKit {
+            providers: vec![Box::new(a), Box::new(b)],
+            gate: Box::new(crate::agent_tools::AutoAllowGate),
+            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
+            task_id: std::sync::Mutex::new(None),
+            prompt_trace: std::sync::Mutex::new(Vec::new()),
+            ..crate::mcp_admin::AgentKit::empty()
+        }
+    }
+
+    // ---- 规划入口 CI 样本（plan-planning §5.1：20 正 / 15 负） ----
+
+    #[test]
+    fn plan_intent_routes_twenty_positive_multistep_phrasings() {
+        // 显式规划 cue / 成对序列词：单工具 kit 也命中（信号 1 与工具数无关）。
+        let strong = [
+            "帮我规划一下周末去哪",
+            "列个步骤告诉我怎么装环境",
+            "列出步骤整理下载目录",
+            "分几步把这个文件弄完",
+            "一步步教我配置这个东西",
+            "一起做这几件事吧",
+            "规划一下这周要做的事",
+            "帮我分步骤处理这些文件",
+        ];
+        let sequenced = [
+            "先查下周三日程，再整理下载目录",
+            "先读第一个文件然后写摘要",
+            "先查完邮件接着记到笔记里",
+            "先找网页随后存成文件",
+            "先打开文件，之后写个总结",
+            "先写完报告再发给老板",
+            "先搜资料接着整理成文",
+        ];
+        // 多动作 / 多域：需 kit ≥2 工具（双工具 kit）。
+        let multi_signal = [
+            "查一下邮件并记到备忘录",
+            "把文件内容写到笔记",
+            "搜索网页并保存成文档",
+            "整理一下日程和会议记录",
+            "打开网页然后下载文件",
+        ];
+        let kit = dual_kit();
+        let weak = weather_kit(); // 单工具：只验证强 cue/序列词不依赖工具数
+        for text in strong {
+            assert!(plan_intent(text, &weak), "strong cue 应命中: {text}");
+        }
+        for text in sequenced {
+            assert!(plan_intent(text, &weak), "序列词应命中: {text}");
+        }
+        for text in multi_signal {
+            assert!(plan_intent(text, &kit), "多动作/多域应命中: {text}");
+            assert!(!plan_intent(text, &weak), "单工具不触发多信号: {text}");
+        }
+        assert_eq!(strong.len() + sequenced.len() + multi_signal.len(), 20);
+    }
+
+    #[test]
+    fn plan_intent_never_hijacks_fifteen_single_step_phrasings() {
+        let kit = dual_kit();
+        let negatives = [
+            "在吗",
+            "今天杭州天气怎么样",
+            "天气",
+            "连查五次",          // 单动作重复 ≠ 多动作
+            "用最后一个工具",
+            "我今天在用什么应用",
+            "昨天说了什么",
+            "问个问题",
+            "洁净区压差多少",
+            "讲个笑话",
+            "随便聊聊",
+            "你还记得我吗",      // 回忆类，非多步执行
+            "帮我看一眼就好",    // 单动作
+            "现在几点",
+            "讲讲你的想法",
+        ];
+        for text in negatives {
+            assert!(!plan_intent(text, &kit), "单步不应触发规划: {text}");
+        }
+        assert_eq!(negatives.len(), 15);
+    }
+
+    /// submit_plan 解析：正常 2 步 / 空 steps / 超 6 步 / 空 intent 全部有界。
+    #[test]
+    fn parse_submitted_plan_validates_shape_and_cap() {
+        let ok = serde_json::json!({
+            "goal": "整理两个文件",
+            "steps": [
+                {"intent": "读第一个文件", "tool_hint": "fs_read"},
+                {"intent": "写摘要"}
+            ]
+        });
+        let plan = parse_submitted_plan(&ok).unwrap();
+        assert_eq!(plan.goal, "整理两个文件");
+        assert_eq!(plan.steps.len(), 2);
+        assert_eq!(plan.steps[0].status, "pending");
+        assert_eq!(plan.steps[1].tool_hint, "*", "缺省 tool_hint 填 *");
+        assert_eq!(plan.replans, 0);
+
+        let empty = serde_json::json!({"goal": "x", "steps": []});
+        assert!(parse_submitted_plan(&empty).is_none());
+        let mut too_many = Vec::new();
+        for i in 0..7 {
+            too_many.push(serde_json::json!({"intent": format!("步{i}")}));
+        }
+        assert!(parse_submitted_plan(&serde_json::json!({"goal":"x","steps":too_many})).is_none());
+        let blank = serde_json::json!({"goal": "x", "steps": [{"intent": "  "}]});
+        assert!(parse_submitted_plan(&blank).is_none());
+        assert!(parse_submitted_plan(&serde_json::json!({"goal":"" ,"steps":[{"intent":"a"}]})).is_none());
+        assert!(parse_submitted_plan(&serde_json::json!({"steps":[{"intent":"a"}]})).is_none());
+    }
+
+    /// D1 确认门：本版 auto / manual 两档都恒放行（A11/A12）——
+    /// 门函数本身不阻塞，留痕在调用点完成。
+    #[test]
+    fn plan_confirm_gate_allows_both_modes() {
+        assert!(plan_confirm_gate("auto"));
+        assert!(plan_confirm_gate("manual"));
+    }
+
+    /// A1/A11：多步目标命中计划轮 → tasks.plan_json 落库 + confirm_mode=auto
+    /// + 计划步骤数与脚本一致；第 2 轮模型开始执行真实工具，审计报告关联 task。
+    #[test]
+    fn plan_round_submits_plan_then_reuses_existing_loop() {
+        let s = mem();
+        let c = card();
+        let submit = tool_calls_reply(&[(
+            "submit_plan",
+            serde_json::json!({
+                "goal": "先查日程再整理目录",
+                "steps": [
+                    {"intent": "查下周三日程", "tool_hint": "calendar"},
+                    {"intent": "整理下载目录", "tool_hint": "fs_list"}
+                ]
+            }),
+        )]);
+        let mut backend = cloud_backend(vec![
+            submit,
+            tool_calls_reply(&[("weather", serde_json::json!({"city": "杭州"}))]),
+            content_reply("日程查好了，目录也整理了。"),
+        ]);
+        let mut kit = dual_kit();
+        let out = chat_turn_with_kit(
+            &s, &mut backend, &c, "s-plan", "先查下周三日程，再整理下载目录", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit,
+        )
+        .unwrap();
+
+        let tasks = with_conn(&s, |conn| db::task_list(conn, 5).unwrap());
+        assert_eq!(tasks.len(), 1, "计划轮提前开卡，只有一行 task");
+        let row = &tasks[0];
+        assert_eq!(row.plan_mode, "planned");
+        assert_eq!(row.confirm_mode, "auto", "D1 默认确认");
+        let plan = row.plan.as_ref().expect("plan_json 落库");
+        assert_eq!(plan.goal, "先查日程再整理目录");
+        assert_eq!(plan.steps.len(), 2);
+        assert!(row.cancel_reason.is_none());
+        assert_eq!(out.reply, "日程查好了，目录也整理了。");
+        // 真实工具审计行关联 task（复用 execute_audited，无第二执行引擎）。
+        let linked = with_conn(&s, |conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM tool_calls WHERE task_id = ?1",
+                [&row.id],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+        });
+        assert_eq!(linked, 1, "submit_plan 不落审计，只统计真实工具");
+    }
+
+    /// A12（扩展位）：settings 设 plan_confirm=manual 仍不阻塞、直接执行，
+    /// 只在 tasks.confirm_mode 留痕。
+    #[test]
+    fn plan_manual_mode_only_records_without_blocking() {
+        let s = mem();
+        let c = card();
+        with_conn(&s, |conn| db::set_setting(conn, "plan_confirm", "manual").unwrap());
+        let mut backend = cloud_backend(vec![
+            tool_calls_reply(&[(
+                "submit_plan",
+                serde_json::json!({"goal": "g", "steps": [{"intent": "读文件"}]}),
+            )]),
+            content_reply("做完了。"),
+        ]);
+        let mut kit = dual_kit();
+        chat_turn_with_kit(
+            &s, &mut backend, &c, "s-plan-manual", "先读文件然后写摘要", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit,
+        )
+        .unwrap();
+        let tasks = with_conn(&s, |conn| db::task_list(conn, 5).unwrap());
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].confirm_mode, "manual", "留痕");
+        assert_eq!(tasks[0].status, "done", "不阻塞，正常收尾");
+    }
+
+    /// A8：计划轮返回非 submit_plan（模型没提交）→ 降级为无计划循环，
+    /// 用户无感（最终回复照常），tasks 行仍惰性开卡（本例模型直答 → 无 task）。
+    #[test]
+    fn plan_round_degrades_when_model_does_not_submit() {
+        let s = mem();
+        let c = card();
+        // 第 1 次请求（计划轮）模型直接给了正文而非 submit_plan；
+        // 降级后主循环第 2 次请求再作答。
+        let mut backend = cloud_backend(vec![
+            content_reply("我直接说吧。"),
+            content_reply("这是最终答复。"),
+        ]);
+        let mut kit = dual_kit();
+        let out = chat_turn_with_kit(
+            &s, &mut backend, &c, "s-degrade", "先读文件然后写摘要", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit,
+        )
+        .unwrap();
+        assert_eq!(out.reply, "这是最终答复。");
+        let tasks = with_conn(&s, |conn| db::task_list(conn, 5).unwrap());
+        assert!(tasks.is_empty(), "降级路径不产生 plan 任务行");
+    }
+
+    /// A2 协议层：单步任务零计划轮——第一次请求 tools[] 不含 submit_plan，
+    /// 且请求数恰为 1（无额外 HTTP）。
+    #[test]
+    fn single_step_never_calls_plan_round() {
+        let s = mem();
+        let c = card();
+        let (client, seen) = tool_client(vec![content_reply("直接答。")]);
+        let mut backend = crate::persona::eval::LocalBackend::with_client(
+            client, crate::llm::ClientKind::Cloud,
+        );
+        let mut kit = weather_kit();
+        chat_turn_with_kit(
+            &s, &mut backend, &c, "s-single", "在吗", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit,
+        )
+        .unwrap();
+        let calls = seen.lock().unwrap();
+        assert_eq!(calls.len(), 1, "单步任务零额外请求");
+        assert!(!calls[0].1.iter().any(|n| n == "submit_plan"));
     }
 
     /// Captures the system prompt handed to the model (injection regressions).

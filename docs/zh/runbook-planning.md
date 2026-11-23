@@ -147,7 +147,7 @@ git commit -m "<中文 subject>"
 | T | commit / subject | 门禁结果 | 真机项 | 备注 |
 |---|---|---|---|---|
 | T1 | `feat(planning): schema v14 计划字段与读写` | `cargo check` 通过（1 个既有 dead_code warning）；`cargo test --lib` 454 passed | — | 基线 452 → 454（新增 2 个迁移/往返单测） |
-| T2 | | | | |
+| T2 | `feat(planning): 规划入口与计划轮（D1 确认门）` | `cargo check` 通过；`cargo test --lib` 462 passed（20 正/15 负样本 + 6 个计划轮单测） | — | 基线 454→462；计划轮云端专属，`submit_plan` 不进 catalog |
 | T3 | | | | |
 | T4 | | | | |
 | T5 | | | | |
