@@ -224,10 +224,34 @@ pub fn delete_inner(base: &Path, skin_id: &str) -> Result<(), String> {
 
 fn skins_base(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     use tauri::Manager;
-    app.path()
+    // base = app_data_dir 本身；face_skins 一层由 skins_dir 统一 join。
+    // 此前这里错误地多 join 了一层 face_skins，数据落在
+    // <app_data>/face_skins/face_skins/<id>/，而前端 asset URL 与
+    // assetProtocol scope 都按一层构造 → 图片全部 404（2026-11-23）。
+    let dir = app
+        .path()
         .app_data_dir()
-        .map_err(|e| e.to_string())
-        .map(|p| p.join("face_skins"))
+        .map_err(|e| e.to_string())?;
+    migrate_legacy_nesting(&dir);
+    Ok(dir)
+}
+
+/// 一次性迁移（幂等）：旧实现的 face_skins/face_skins/<id>/ 双层目录
+/// 整体上提一层。legacy 不存在即 no-op；仅当目标位无同名目录才 rename
+/// （冲突文件留在 legacy 不吞数据，最后 remove_dir 只能删空壳）。
+fn migrate_legacy_nesting(app_data: &Path) {
+    let root = app_data.join("face_skins");
+    let legacy = root.join("face_skins");
+    let Ok(entries) = fs::read_dir(&legacy) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let target = root.join(entry.file_name());
+        if !target.exists() {
+            let _ = fs::rename(entry.path(), target);
+        }
+    }
+    let _ = fs::remove_dir(&legacy);
 }
 
 #[tauri::command]
@@ -460,5 +484,36 @@ mod tests {
         let all = list_inner(&base).unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].id, m.id);
+    }
+
+    #[test]
+    fn migrate_lifts_legacy_double_nesting() {
+        let base = temp_base("migrate");
+        let root = base.join("face_skins");
+        // 造 legacy 双层：face_skins/face_skins/c-aaaaaaaa/manifest.json
+        let legacy = root.join("face_skins").join("c-aaaaaaaa");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(
+            legacy.join("manifest.json"),
+            r#"{"id":"c-aaaaaaaa","name":"旧数据","created_at":1,"slots":{}}"#,
+        )
+        .unwrap();
+        // 幂等调用（skins_base 同款入口）
+        migrate_legacy_nesting(&base);
+        migrate_legacy_nesting(&base);
+        // 上提到一层，legacy 空壳被删除
+        assert!(root.join("c-aaaaaaaa").join("manifest.json").exists());
+        assert!(!root.join("face_skins").exists());
+        // 迁移后 inner 函数能在正确路径读到它
+        let all = list_inner(&base).unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].id, "c-aaaaaaaa");
+        // 目标位已有同名目录 → 冲突残留保留，legacy 不删
+        let legacy2 = root.join("face_skins").join("c-bbbbbbbb");
+        fs::create_dir_all(&root.join("c-bbbbbbbb")).unwrap();
+        fs::create_dir_all(&legacy2).unwrap();
+        fs::write(legacy2.join("manifest.json"), "{}").unwrap();
+        migrate_legacy_nesting(&base);
+        assert!(legacy2.exists(), "冲突时 legacy 残留不吞数据");
     }
 }
