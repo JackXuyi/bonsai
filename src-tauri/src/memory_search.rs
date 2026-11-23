@@ -672,15 +672,16 @@ mod tests {
     #[test]
     fn builtin_registry_matches_provider() {
         let reg = crate::agent_tools::builtin_tools();
-        // P3-2 起 registry = memory_search(1) + perception_search(1) + filetools(4)。
-        // fs 工具在设置页常显，但 provider 只在 roots 非空时挂载（filetools 单测
-        // 覆盖）；perception_search 由 might_perceive 信号门控挂载。
+        // P3-3 起 registry = memory_search(1) + perception_search(1) + filetools(4)
+        // + webtools(2)。fs/web 工具在设置页常显，但 provider 按开关/roots 门控
+        // 挂载（各自模块单测覆盖）；perception_search 由 might_perceive 门控。
         assert_eq!(
             reg,
             [
                 vec![builtin_descriptor()],
                 vec![crate::perception_search::builtin_descriptor()],
-                crate::filetools::builtin_descriptors()
+                crate::filetools::builtin_descriptors(),
+                crate::webtools::builtin_descriptors()
             ]
             .concat()
         );

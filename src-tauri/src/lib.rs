@@ -321,6 +321,8 @@ pub fn run() {
             filetools::fs_root_add,
             filetools::fs_root_remove,
             filetools::fs_pick_directory,
+            webtools::web_status,
+            webtools::web_set_config,
         ])
         .build(tauri::generate_context!())
         .expect("error while running bonsai")

@@ -703,6 +703,12 @@ pub fn build_agent_kit(conn: &Connection, state: &AgentState, user_text: &str) -
         }
     }
 
+    // P3-3 Web 检索（plan-web.md §3.6）：开关在挂载层生效，关闭时 tools[]
+    // 里根本看不到 web 工具。默认关（搜索词/网页内容会外发，知情开启）。
+    if crate::webtools::web_enabled(conn) {
+        providers.push(Box::new(crate::webtools::WebToolsProvider::new()));
+    }
+
     // Skills first (prompt-only), then MCP tools — catalog order is stable
     // either way (sorted by name in AgentKit::catalog).
     // Engine packs are loaded separately and handed to summary.rs: they must

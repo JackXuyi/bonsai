@@ -32,7 +32,7 @@ use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
 use std::time::Duration;
 
 use rusqlite::Connection;
-use url::Url;
+use url::{form_urlencoded, Url};
 
 use crate::agent_tools::{ToolAccess, ToolCall, ToolDescriptor, ToolKind, ToolOutput, ToolProvider};
 
@@ -416,6 +416,221 @@ pub fn web_set_config(
     Ok(WebStatus { enabled: web_enabled(&conn) })
 }
 
+// ---------------------------------------------------------------- search (plan §3.5)
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SearchHit {
+    pub title: String,
+    pub url: String,
+    pub snippet: String,
+}
+
+/// 搜索后端 trait（plan §3.5 可插拔）：v1 = DuckDuckGo HTML（无 key），
+/// 反爬/结构变化一律显式报错，绝不降级到编造。
+pub trait WebSearchSource: Send + Sync {
+    fn search(&self, query: &str, count: usize) -> Result<Vec<SearchHit>, WebError>;
+}
+
+pub struct DuckDuckGoSearch;
+
+impl WebSearchSource for DuckDuckGoSearch {
+    fn search(&self, query: &str, count: usize) -> Result<Vec<SearchHit>, WebError> {
+        let target = format!(
+            "https://html.duckduckgo.com/html/?q={}",
+            form_urlencoded::Serializer::new(String::new())
+                .append_pair("q", query)
+                .finish()
+        );
+        let url = validate_url(&target)?;
+        let resp = http_agent().get(url.as_str()).call().map_err(|e| match e {
+            // DDG 反爬（429/403）是「搜索失败」而非「网络离线」，错误码分离。
+            ureq::Error::Status(code, resp) => WebError::search_failed(format!("HTTP {code}"))
+                .with_body_note(resp),
+            other => WebError::search_failed(map_ureq_error(other).to_string()),
+        })?;
+        let html = read_capped(resp)?;
+        Ok(parse_ddg(&html, count))
+    }
+}
+
+/// DDG HTML 解析（纯函数，fixture 单测锁行为）。结果条目形如
+/// `div.result > a.result__a`（标题+链接）+ `a.result__snippet`（摘要）。
+fn parse_ddg(html: &str, count: usize) -> Vec<SearchHit> {
+    use scraper::{Html, Selector};
+
+    let doc = Html::parse_document(html);
+    let result_sel = Selector::parse("div.result, div.web-result").unwrap();
+    let link_sel = Selector::parse("a.result__a").unwrap();
+    let snip_sel = Selector::parse("a.result__snippet, div.result__snippet").unwrap();
+
+    let mut hits = Vec::new();
+    for el in doc.select(&result_sel).take(count) {
+        let Some(a) = el.select(&link_sel).next() else { continue };
+        let title = collapse_ws(&a.text().collect::<String>());
+        let href = a.value().attr("href").unwrap_or_default();
+        let url = resolve_result_href(href);
+        let snippet = el
+            .select(&snip_sel)
+            .next()
+            .map(|s| collapse_ws(&s.text().collect::<String>()))
+            .unwrap_or_default();
+        if !title.is_empty() && !url.is_empty() {
+            hits.push(SearchHit { title, url, snippet });
+        }
+    }
+    hits
+}
+
+/// DDG 的结果链接是 `//duckduckgo.com/l/?uddg=<encoded>&rut=...` 跳转包装：
+/// 解出 uddg 真实目标；直接外链原样返回；DDG 内部链接与奇怪 scheme 丢弃。
+fn resolve_result_href(href: &str) -> String {
+    let href = href.trim();
+    let absolute = match href.strip_prefix("//") {
+        Some(rest) => format!("https://{rest}"),
+        None => href.to_string(),
+    };
+    let Ok(u) = Url::parse(&absolute) else { return String::new() };
+    if u.domain().map(|d| d.ends_with("duckduckgo.com")).unwrap_or(false) {
+        let target = u
+            .query_pairs()
+            .find(|(k, _)| k == "uddg")
+            .map(|(_, v)| v.into_owned());
+        match target {
+            Some(t) => match Url::parse(&t) {
+                Ok(parsed) if matches!(parsed.scheme(), "http" | "https") => t,
+                _ => String::new(),
+            },
+            None => String::new(), // ddg 内部页（非结果），丢弃
+        }
+    } else if matches!(u.scheme(), "http" | "https") {
+        absolute
+    } else {
+        String::new()
+    }
+}
+
+// ---------------------------------------------------------------- provider (plan §3.6)
+
+fn web_schema() -> String {
+    r#"{"type":"object","properties":{"query":{"type":"string","description":"搜索关键词"},"count":{"type":"integer","description":"可选，返回条数（1-5，默认 3）"}},"required":["query"]}"#.into()
+}
+
+/// 设置页「内置工具」清单与模型视图共用的单源（与 memory_search/filetools
+/// 同一模式）。tools[] 描述写明「仅在用户明确要求时使用」，压闲聊误触发。
+pub fn builtin_descriptors() -> Vec<ToolDescriptor> {
+    vec![
+        ToolDescriptor {
+            name: "web_search".into(),
+            summary: "搜索网页并返回标题/链接/摘要（仅在用户明确要求搜索或查资料时使用）".into(),
+            detail: web_schema(),
+            kind: ToolKind::Builtin,
+            remote: false,
+            access: ToolAccess::Read,
+        },
+        ToolDescriptor {
+            name: "web_fetch".into(),
+            summary: "读取一个网页的正文供本次总结（仅在用户明确给出或搜索得到网址时使用）".into(),
+            detail: r#"{"type":"object","properties":{"url":{"type":"string","description":"要读取的网页 URL（http/https）"}},"required":["url"]}"#.into(),
+            kind: ToolKind::Builtin,
+            remote: false,
+            access: ToolAccess::Read,
+        },
+    ]
+}
+
+/// 挂载条件（build_agent_kit）：`tools.web.enabled`。开关在挂载层生效，
+/// 关闭时 tools[] 里根本看不到 web 工具（与 filetools 同语义）。
+pub struct WebToolsProvider {
+    search: Box<dyn WebSearchSource>,
+}
+
+impl WebToolsProvider {
+    pub fn new() -> Self {
+        Self { search: Box::new(DuckDuckGoSearch) }
+    }
+}
+
+impl Default for WebToolsProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn web_search_tool(search: &dyn WebSearchSource, args: &serde_json::Value) -> Result<ToolOutput, WebError> {
+    let query = args
+        .get("query")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|q| !q.is_empty())
+        .ok_or_else(WebError::bad_query)?;
+    let count = args
+        .get("count")
+        .and_then(|v| v.as_u64())
+        .map(|c| (c as usize).clamp(1, MAX_SEARCH_RESULTS))
+        .unwrap_or(3);
+    let hits = search.search(query, count)?;
+    if hits.is_empty() {
+        return Ok(ToolOutput {
+            summary: format!("「{query}」没有搜索到结果"),
+            full: String::new(),
+        });
+    }
+    let mut summary = format!("{} 条结果：", hits.len());
+    for h in hits.iter().take(3) {
+        summary.push_str(&format!(" 「{}」", h.title));
+    }
+    let full = format!(
+        "{UNTRUSTED_SEARCH}\n{}",
+        serde_json::to_string_pretty(&hits).unwrap_or_default()
+    );
+    Ok(ToolOutput {
+        summary: crate::agent_tools::clip_chars(&summary, SEARCH_SUMMARY_CHARS),
+        full,
+    })
+}
+
+fn web_fetch_tool(args: &serde_json::Value) -> Result<ToolOutput, WebError> {
+    let url = args
+        .get("url")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .ok_or_else(|| WebError::bad_url("缺少 url 参数"))?;
+    let page = fetch_page(url)?;
+    let summary = build_fetch_summary(&page);
+    Ok(ToolOutput { summary, full: page.text })
+}
+
+/// 纯函数（单测直调）：untrusted 首行 + 标题/URL 元数据 + 截断标记 + 正文。
+fn build_fetch_summary(page: &FetchedPage) -> String {
+    let truncated = page.text.chars().count() > FETCH_SUMMARY_CHARS;
+    let title_note = if page.title.is_empty() {
+        String::new()
+    } else {
+        format!("「{}」", page.title)
+    };
+    let mut summary = format!("{UNTRUSTED_FETCH}\n网页：{title_note}\n来源 URL：{}\n", page.url);
+    if truncated {
+        summary.push_str("…[截断]\n");
+    }
+    summary.push_str(&page.text.chars().take(FETCH_SUMMARY_CHARS).collect::<String>());
+    summary
+}
+
+impl ToolProvider for WebToolsProvider {
+    fn descriptors(&self) -> Vec<ToolDescriptor> {
+        builtin_descriptors()
+    }
+
+    fn execute(&self, call: &ToolCall) -> Result<ToolOutput, String> {
+        match call.name.as_str() {
+            "web_search" => web_search_tool(self.search.as_ref(), &call.args).map_err(|e| e.to_string()),
+            "web_fetch" => web_fetch_tool(&call.args).map_err(|e| e.to_string()),
+            _ => Err("unsupported".into()),
+        }
+    }
+}
+
 // ---------------------------------------------------------------- tests
 
 #[cfg(test)]
@@ -536,5 +751,130 @@ mod tests {
     fn extraction_empty_body_is_detectable() {
         let (_, text) = extract_page_text("<html><body></body></html>");
         assert!(text.is_empty());
+    }
+
+    /// DDG 结果链接解包：uddg 跳转包装 → 真实目标；直接外链原样；内部
+    /// 链接与奇怪 scheme 丢弃。
+    #[test]
+    fn ddg_href_resolution() {
+        assert_eq!(
+            resolve_result_href("//duckduckgo.com/l/?uddg=https%3A%2F%2Ftokio.rs%2F&rut=abc"),
+            "https://tokio.rs/"
+        );
+        assert_eq!(
+            resolve_result_href("https://example.com/page?a=1"),
+            "https://example.com/page?a=1"
+        );
+        // uddg 指向非 http(s) scheme → 丢弃
+        assert_eq!(
+            resolve_result_href("//duckduckgo.com/l/?uddg=javascript%3Aalert(1)"),
+            ""
+        );
+        // DDG 内部页（无 uddg）→ 丢弃
+        assert_eq!(resolve_result_href("//duckduckgo.com/y.js?ad=1"), "");
+        assert_eq!(resolve_result_href(""), "");
+    }
+
+    /// parse_ddg fixture：按 DDG HTML 多年稳定的结构写，锁解析行为。
+    #[test]
+    fn parse_ddg_fixture() {
+        let html = r##"
+        <html><body>
+        <div class="result results_links results_links_default web-result">
+          <h2 class="result__title"><a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Ftokio.rs%2F&amp;rut=abc">Tokio - 官方站</a></h2>
+          <a class="result__snippet" href="#">Rust 的异步运行时，包含 多行  摘要文本</a>
+        </div>
+        <div class="result">
+          <h2><a class="result__a" href="https://example.com/guide">直接外链结果</a></h2>
+          <a class="result__snippet">这是一段摘要</a>
+        </div>
+        <div class="result">
+          <h2><a class="result__a" href="//duckduckgo.com/y.js">内部链接无标题目标</a></h2>
+          <a class="result__snippet">应被丢弃</a>
+        </div>
+        </body></html>"##;
+        let hits = parse_ddg(html, 5);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].title, "Tokio - 官方站");
+        assert_eq!(hits[0].url, "https://tokio.rs/");
+        assert_eq!(hits[0].snippet, "Rust 的异步运行时，包含 多行 摘要文本");
+        assert_eq!(hits[1].url, "https://example.com/guide");
+        // count 生效
+        assert_eq!(parse_ddg(html, 1).len(), 1);
+    }
+
+    /// mock 搜索源：provider 分发 + count clamp + summary 截断 + untrusted。
+    struct MockSearch(Vec<SearchHit>);
+    impl WebSearchSource for MockSearch {
+        fn search(&self, _q: &str, count: usize) -> Result<Vec<SearchHit>, WebError> {
+            Ok(self.0.iter().take(count).cloned().collect())
+        }
+    }
+
+    fn hit(i: usize) -> SearchHit {
+        SearchHit { title: format!("结果{i}"), url: format!("https://example.com/{i}"), snippet: format!("摘要{i}") }
+    }
+
+    #[test]
+    fn provider_search_dispatch_and_gates() {
+        let p = WebToolsProvider {
+            search: Box::new(MockSearch((0..10).map(hit).collect())),
+        };
+        let call = |name: &str, args: serde_json::Value| ToolCall { name: name.into(), args };
+
+        // 缺 query → 结构化报错
+        assert_eq!(
+            p.execute(&call("web_search", serde_json::json!({}))).unwrap_err(),
+            "web_bad_query: 缺少搜索关键词 query"
+        );
+        // 正常路径：count clamp 到 5，full 带 untrusted 首行
+        let out = p.execute(&call("web_search", serde_json::json!({"query": "rust", "count": 99}))).unwrap();
+        assert!(out.full.starts_with(UNTRUSTED_SEARCH));
+        assert!(out.full.contains("\"url\""));
+        assert!(out.summary.contains("5 条结果"));
+        // 空结果 → 诚实「没有搜索到」，不是编造
+        let p0 = WebToolsProvider { search: Box::new(MockSearch(vec![])) };
+        let out = p0.execute(&call("web_search", serde_json::json!({"query": "x"}))).unwrap();
+        assert!(out.summary.contains("没有搜索到"));
+        // 未知工具名 → unsupported（沿用 skill 语义）
+        assert_eq!(p.execute(&call("web_delete", serde_json::json!({}))).unwrap_err(), "unsupported");
+    }
+
+    #[test]
+    fn provider_fetch_arg_validation() {
+        let p = WebToolsProvider::default();
+        let call = |args: serde_json::Value| ToolCall { name: "web_fetch".into(), args };
+        // 缺 url
+        assert!(p.execute(&call(serde_json::json!({}))).unwrap_err().starts_with("web_bad_url"));
+        // 内网 URL 在执行前被内核拦截（不触网）
+        let err = p.execute(&call(serde_json::json!({"url": "http://127.0.0.1:1/x"}))).unwrap_err();
+        assert!(err.starts_with("web_private_host"));
+        // file scheme
+        let err = p.execute(&call(serde_json::json!({"url": "file:///etc/passwd"}))).unwrap_err();
+        assert!(err.starts_with("web_bad_scheme"));
+    }
+
+    /// fetch summary：untrusted 首行 + 标题/URL 元数据 + 8000 字截断标记。
+    #[test]
+    fn fetch_summary_shape() {
+        let mut page = FetchedPage {
+            url: "https://example.com/a".into(),
+            title: "示例页".into(),
+            text: "正文".repeat(FETCH_SUMMARY_CHARS + 100),
+            bytes: 0,
+        };
+        let summary = build_fetch_summary(&page);
+        assert!(summary.starts_with(UNTRUSTED_FETCH));
+        assert!(summary.contains("「示例页」"));
+        assert!(summary.contains("来源 URL：https://example.com/a"));
+        assert!(summary.contains("…[截断]"));
+        let head_len = summary.lines().last().unwrap().chars().count();
+        assert_eq!(head_len, FETCH_SUMMARY_CHARS);
+        // 无标题 + 未截断
+        page.title = String::new();
+        page.text = "短正文".into();
+        let summary = build_fetch_summary(&page);
+        assert!(!summary.contains("…[截断]"));
+        assert!(summary.ends_with("短正文"));
     }
 }

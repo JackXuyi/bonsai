@@ -50,6 +50,11 @@ pub fn builtin_tools() -> Vec<ToolDescriptor> {
     // 注意：设置页常显这四个条目（让用户知道能力存在），但 provider 只在
     // 总开关开且 roots 非空时才挂载（见 mcp_admin::build_agent_kit）。
     tools.extend(crate::filetools::builtin_descriptors());
+    // P3-3 Web 工具（plan-web.md）：descriptor 单源在 webtools 模块。设置页
+    // 常显这两个条目；provider 只在 tools.web.enabled 时才挂载（见
+    // mcp_admin::build_agent_kit）。默认关——搜索词与网页内容会外发，
+    // 开启是知情选择。
+    tools.extend(crate::webtools::builtin_descriptors());
     tools
 }
 
