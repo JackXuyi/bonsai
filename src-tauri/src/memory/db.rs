@@ -17,6 +17,10 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use super::clock;
 
+/// SCHEMA_VERSION = 13（2026-11-23）：用户画像（docs/zh/plan-user-profile.md §4）——
+/// `user_profile`（身份 KV，key 白名单在 memory/profile.rs）+
+/// `user_profile_history`（被覆盖/删除的旧值归档）。画像 ≠ 事实：facts 是
+/// 事件性留痕，画像是可覆盖的身份快照，每轮固定注入 system prompt。
 /// SCHEMA_VERSION = 12（2026-11-22）：任务卡外壳（plan-task-card v0.2 §8）——
 /// `tasks` 表（一次云端工具循环一行）+ `tool_calls.task_id` 关联列。
 /// 审计行不进 ACTIVITY_KINDS（自己陪自己防线的延伸）。
@@ -28,7 +32,7 @@ use super::clock;
 /// EXISTS 不会给已有表加列；v9→v9 不触发 migrate，INSERT 带 user_text 直接
 /// 报 "table turn_trace has no column named user_text"。教训：改 SCHEMA 必
 /// 须同时 bump 此版本号。
-pub(crate) const SCHEMA_VERSION: i64 = 12;
+pub(crate) const SCHEMA_VERSION: i64 = 13;
 
 /// Test-only: materialise the full schema on a bare in-memory connection.
 /// Other modules' tests build their own `Connection::open_in_memory()` and
@@ -205,6 +209,26 @@ CREATE TABLE IF NOT EXISTS relationship_log (
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_events_unconsumed ON events(consumed, ts);
 CREATE INDEX IF NOT EXISTS idx_facts_active ON facts(ts) WHERE invalid_at IS NULL;
+
+-- 用户画像（plan-user-profile.md §4，v13）。身份 KV，key 白名单在
+-- memory/profile.rs；覆盖/删除的旧值进 user_profile_history，不静默消失。
+-- 与 facts 并存不重复：facts 留事件痕，本表是每轮固定注入的身份快照。
+CREATE TABLE IF NOT EXISTS user_profile (
+    key             TEXT PRIMARY KEY,           -- 白名单枚举：name/occupation/tools/city/projects/schedule
+    value           TEXT NOT NULL,
+    source          TEXT NOT NULL,              -- 'rule' | 'model' | 'manual'（manual 不被自动抽取覆盖）
+    source_event_id INTEGER REFERENCES events(id),
+    confidence      REAL NOT NULL DEFAULT 0.7,
+    updated_at      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS user_profile_history (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    key         TEXT NOT NULL,
+    value       TEXT NOT NULL,
+    source      TEXT NOT NULL,
+    valid_until TEXT NOT NULL                   -- 被替换/删除的时间
+);
 
 -- Calendar read cache (plan-calendar.md §3.2). PURE CACHE: whole table is
 -- disposable — TTL 5 min, cleared on switch-off / permission loss / forget.
@@ -578,7 +602,7 @@ pub fn forget_session(conn: &Connection, session_id: &str) -> rusqlite::Result<u
 /// the honest interpretation of "forget everything").
 pub fn forget_all(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
-        "DELETE FROM tool_calls; DELETE FROM calendar_cache; DELETE FROM relationship_log; DELETE FROM relationship_progress; DELETE FROM relationship; DELETE FROM onboarding_answers; DELETE FROM settings; DELETE FROM growth_log; DELETE FROM growth; DELETE FROM predictions; DELETE FROM boundaries; DELETE FROM preferences; DELETE FROM facts; DELETE FROM events;",
+        "DELETE FROM tool_calls; DELETE FROM calendar_cache; DELETE FROM user_profile_history; DELETE FROM user_profile; DELETE FROM relationship_log; DELETE FROM relationship_progress; DELETE FROM relationship; DELETE FROM onboarding_answers; DELETE FROM settings; DELETE FROM growth_log; DELETE FROM growth; DELETE FROM predictions; DELETE FROM boundaries; DELETE FROM preferences; DELETE FROM facts; DELETE FROM events;",
     )?;
     Ok(())
 }

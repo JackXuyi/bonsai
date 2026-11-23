@@ -12,6 +12,7 @@ pub mod db;
 pub mod eval;
 pub mod extract;
 pub mod overview;
+pub mod profile;
 pub mod scheduler;
 
 use std::sync::Mutex;
