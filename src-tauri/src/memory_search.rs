@@ -393,8 +393,10 @@ pub fn keywords_with(text: &str, date_phrase: &str, extra_scaffolding: &[&str]) 
     out
 }
 
-/// memory_search 自身的调用点（无额外脚手架词）。
-fn keywords(text: &str, date_phrase: &str) -> Vec<String> {
+/// memory_search 自身的调用点（无额外脚手架词）。`pub(crate)` 只为 S0 检索
+/// 基线（`memory::eval_recall`）复用同一份切词实现——基线若另写一份切词，
+/// 量出来的就不是线上链路（AGENTS.md 硬约束 1）。
+pub(crate) fn keywords(text: &str, date_phrase: &str) -> Vec<String> {
     keywords_with(text, date_phrase, &[])
 }
 

@@ -9,6 +9,10 @@
 pub mod clock;
 pub mod consolidate;
 pub mod db;
+/// S0 检索基线（2026-11-23）：只读量尺，进 release 包没有任何意义，
+/// 因此只在测试构建里编译。
+#[cfg(test)]
+pub mod eval_recall;
 pub mod eval;
 pub mod extract;
 pub mod overview;
