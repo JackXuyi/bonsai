@@ -149,9 +149,8 @@ git commit -m "<中文 subject>"
 | T1 | `feat(planning): schema v14 计划字段与读写` | `cargo check` 通过（1 个既有 dead_code warning）；`cargo test --lib` 454 passed | — | 基线 452 → 454（新增 2 个迁移/往返单测） |
 | T2 | `feat(planning): 规划入口与计划轮（D1 确认门）` | `cargo check` 通过；`cargo test --lib` 462 passed（20 正/15 负样本 + 6 个计划轮单测） | — | 基线 454→462；计划轮云端专属，`submit_plan` 不进 catalog |
 | T3 | `cdf1ea8` `feat(planning): 计划步骤状态桥` | `cargo check` 通过；`cargo test --lib` 464 passed | — | 基线 462→464；按执行序号对齐，审计 id 前后水位关联，计划外追加 |
-| T4 | `feat(planning): 失败恢复与取消`（待提交） | `cargo check` 通过；`cargo test --lib` 469 passed | — | 基线 464→469；AgentKit.canceled + 全局注册表 + dialogue_cancel 命令 |
-| T4 | | | | |
-| T5 | | | | |
+| T4 | `010dfba` `feat(planning): 失败恢复与取消` | `cargo check` 通过；`cargo test --lib` 469 passed | — | 基线 464→469；AgentKit.canceled + 全局注册表 + dialogue_cancel 命令 |
+| T5 | `feat(planning): trace 计划卡可读化`（待提交） | `cargo test --lib` 469 passed；`npx tsc --noEmit` 0 错；`vitest run` 148 passed | — | 后端补 `step_state` 记录点（`bridge_plan_step` 返回审计 id）；前端类型补三枚举 + 计划卡（`PlanSubmitBlock`/`PlanStateBlock`）+ 7 个解析/渲染单测 |
 | T6 | | | | |
 | T7 | | | | |
 

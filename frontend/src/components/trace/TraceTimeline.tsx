@@ -19,6 +19,9 @@ const STEP_TONE: Record<TraceStep["stepKind"], string> = {
   filter: "tone-ok",
   json_retry: "tone-warn",
   prose_retry: "tone-warn",
+  plan_submit: "tone-plan",
+  step_state: "tone-plan",
+  retry: "tone-warn",
 };
 
 /** 失败/重试类 outcome 覆盖默认节点色（denied/error → 红）。 */
@@ -58,7 +61,14 @@ function TraceNode({ step }: { step: TraceStep }) {
     step.stepKind === "llm_round" ||
     step.stepKind === "tool_call" ||
     step.stepKind === "user_input" ||
-    Boolean((step.stepKind === "json_retry" || step.stepKind === "prose_retry") && step.output);
+    step.stepKind === "plan_submit" ||
+    step.stepKind === "step_state" ||
+    Boolean(
+      (step.stepKind === "json_retry" ||
+        step.stepKind === "prose_retry" ||
+        step.stepKind === "retry") &&
+        step.output
+    );
 
   return (
     <div className="trace-node">
@@ -78,8 +88,9 @@ function TraceNode({ step }: { step: TraceStep }) {
 }
 
 /** 展开区：user_input 看输入全文；llm_round 看 prompt/output 全文；
- * tool_call 看参数与返回摘要。 */
+ * tool_call 看参数与返回摘要；plan_submit / step_state 看计划卡。 */
 function TraceStepDetail({ step }: { step: TraceStep }) {
+  const isPlan = step.stepKind === "plan_submit" || step.stepKind === "step_state";
   return (
     <div className="trace-detail">
       {step.userText && step.stepKind !== "user_input" && (
@@ -89,7 +100,13 @@ function TraceStepDetail({ step }: { step: TraceStep }) {
         <PreBlock label="对话输入全文" text={step.output} />
       )}
       {step.prompt && <PromptBlock label="本轮 prompt（全文）" text={step.prompt} />}
-      {step.output && step.stepKind !== "user_input" && (
+      {step.stepKind === "plan_submit" && step.output && (
+        <PlanSubmitBlock text={step.output} />
+      )}
+      {step.stepKind === "step_state" && step.output && (
+        <PlanStateBlock text={step.output} />
+      )}
+      {step.output && !isPlan && step.stepKind !== "user_input" && (
         <PreBlock label="模型原始输出" text={step.output} />
       )}
       {step.argsJson && <PreBlock label="工具请求参数" text={step.argsJson} />}
@@ -308,4 +325,114 @@ function prettyArgs(args?: string): string {
   } catch {
     return args;
   }
+}
+
+// ---------------------------------------------------------------- 计划卡（T5）
+
+/** 后端 PlanJson 的宽松镜像（serde snake_case 落库契约）。字段一律可选，
+ * 坏 JSON / 老版本缺字段都不炸——解析失败返回 null 由调用方回落原文。 */
+export interface PlanStepView {
+  seq?: number;
+  intent?: string;
+  tool_hint?: string;
+  status?: string;
+  attempts?: number;
+  tool_call_id?: number | null;
+}
+
+export interface PlanSubmitView {
+  goal?: string;
+  plan_mode?: string;
+  steps?: PlanStepView[];
+}
+
+export interface PlanStateView {
+  seq?: number;
+  status?: string;
+  attempts?: number;
+  tool_call_id?: number | null;
+}
+
+/** 解析计划轮 output（完整 PlanJson）。只认 object + steps 数组，否则 null。 */
+export function parseSubmittedPlan(text: string): PlanSubmitView | null {
+  try {
+    const j = JSON.parse(text) as unknown;
+    if (!j || typeof j !== "object") return null;
+    const o = j as Record<string, unknown>;
+    if (typeof o.goal !== "string" || !Array.isArray(o.steps)) return null;
+    return o as unknown as PlanSubmitView;
+  } catch {
+    return null;
+  }
+}
+
+/** 解析步骤状态 output（{seq,status,attempts,tool_call_id}）。 */
+export function parsePlanState(text: string): PlanStateView | null {
+  try {
+    const j = JSON.parse(text) as unknown;
+    if (!j || typeof j !== "object") return null;
+    const o = j as Record<string, unknown>;
+    if (typeof o.status !== "string") return null;
+    return o as unknown as PlanStateView;
+  } catch {
+    return null;
+  }
+}
+
+const PLAN_STATUS_LABEL: Record<string, string> = {
+  pending: "待执行",
+  running: "执行中",
+  done: "完成",
+  failed: "失败",
+  skipped: "跳过",
+};
+
+function planStatusText(status?: string): string {
+  return status ? (PLAN_STATUS_LABEL[status] ?? status) : "—";
+}
+
+/** 计划提交卡：目标 + 步骤列表（意图 / 工具 / 状态 / 关联审计 id）。 */
+export function PlanSubmitBlock({ text }: { text: string }) {
+  const plan = parseSubmittedPlan(text);
+  if (!plan) return <PreBlock label="计划（原文）" text={text} />;
+  return (
+    <div className="trace-plan">
+      <div className="trace-plan-head">
+        <span className="trace-plan-badge">计划</span>
+        <span className="trace-plan-goal">{plan.goal}</span>
+        {plan.plan_mode && <span className="trace-plan-mode">模式 {plan.plan_mode}</span>}
+      </div>
+      <ol className="trace-plan-steps">
+        {(plan.steps ?? []).map((st, i) => (
+          <li key={st.seq ?? i} className={`trace-plan-step status-${st.status ?? "pending"}`}>
+            <span className="trace-plan-seq">{st.seq != null ? st.seq + 1 : i + 1}</span>
+            <span className="trace-plan-intent">{st.intent ?? "—"}</span>
+            {st.tool_hint && st.tool_hint !== "*" && (
+              <span className="trace-plan-tool">{st.tool_hint}</span>
+            )}
+            <span className="trace-plan-status">{planStatusText(st.status)}</span>
+            {st.tool_call_id != null && (
+              <span className="trace-plan-audit">审计 #{st.tool_call_id}</span>
+            )}
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
+/** 步骤状态卡：单步执行结果（状态 / 尝试次数 / 关联审计 id）。 */
+export function PlanStateBlock({ text }: { text: string }) {
+  const st = parsePlanState(text);
+  if (!st) return <PreBlock label="步骤状态（原文）" text={text} />;
+  return (
+    <div className={`trace-plan-state status-${st.status ?? "pending"}`}>
+      <span className="trace-plan-badge">步骤 {st.seq != null ? st.seq + 1 : "?"}</span>
+      <span className="trace-plan-status">{planStatusText(st.status)}</span>
+      {st.attempts != null && st.attempts > 1 && (
+        <span className="trace-plan-attempts">尝试 {st.attempts} 次</span>
+      )}
+      {st.tool_call_id != null && <span className="trace-plan-audit">审计 #{st.tool_call_id}</span>}
+    </div>
+  );
 }

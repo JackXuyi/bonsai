@@ -168,6 +168,36 @@ impl TraceRecorder {
         });
     }
 
+    /// T5 计划步骤状态：状态桥每次回写 plan_json 后记一条，output 是结构化
+    /// JSON（seq/status/attempts/tool_call_id），前端 /trace 计划卡据此展示
+    /// 步骤状态并关联真实 tool_calls 审计行（A10：无凭空步骤）。
+    fn step_state(
+        &mut self,
+        seq: usize,
+        status: &str,
+        attempts: usize,
+        tool_call_id: Option<i64>,
+        outcome: &str,
+    ) {
+        let payload = serde_json::json!({
+            "seq": seq,
+            "status": status,
+            "attempts": attempts,
+            "tool_call_id": tool_call_id,
+        });
+        self.steps.push(db::TraceStepDraft {
+            step_kind: "step_state".into(),
+            title: format!("计划步骤 {} · {}", seq + 1, status),
+            prompt: None,
+            output: Some(payload.to_string()),
+            args_json: None,
+            summary: None,
+            outcome: Some(outcome.into()),
+            duration_ms: None,
+            user_text: self.user_text.clone(),
+        });
+    }
+
     /// A non-model step (rule checks, retries, filter).
     fn simple(&mut self, step_kind: &str, title: &str, outcome: &str, output: Option<&str>) {
         self.steps.push(db::TraceStepDraft {
@@ -491,6 +521,8 @@ fn audit_max_id(conn: &rusqlite::Connection, task_id: &str) -> Option<i64> {
 /// 是常态，强绑定会让计划步骤永远卡 pending。真实工具名通过 `tool_call_id`
 /// 关联审计行可查，不在这里双写。只有执行序号超出计划步数才算计划外，追加
 /// 一条 `tool_hint="*"` 的步骤，保证计划行数与真实审计一致——**不凭空造步骤**。
+/// 返回写入的 `(步骤序号, 状态, 真实审计行 id)`，供 T5 trace 记 step_state；
+/// 无计划 / 读失败返回 None（单步任务零开销，不记状态步骤）。
 fn bridge_plan_step(
     store: &MemoryStore,
     task_id: &str,
@@ -499,9 +531,9 @@ fn bridge_plan_step(
     outcome: &str,
     audit_before: Option<i64>,
     attempts: usize,
-) -> bool {
-    let Ok(conn) = lock_conn(store) else { return false; };
-    let Ok(Some(mut plan)) = db::plan_get(&conn, task_id) else { return false; };
+) -> Option<(usize, String, Option<i64>)> {
+    let conn = lock_conn(store).ok()?;
+    let mut plan = db::plan_get(&conn, task_id).ok()??;
     let status = match outcome {
         "ok" => "done",
         "denied" => "skipped",
@@ -529,7 +561,8 @@ fn bridge_plan_step(
             tool_call_id,
         });
     }
-    db::plan_put(&conn, task_id, &plan).is_ok()
+    db::plan_put(&conn, task_id, &plan).ok()?;
+    Some((idx, status.to_string(), tool_call_id))
 }
 
 /// T4：某工具能否重试（plan-planning §5.4）。只有 read 档的暂时性失败
@@ -968,9 +1001,19 @@ fn cloud_tool_loop(
                 }
             };
             // T3 状态桥：把最终结果 + 真实 attempts 回写 plan_json（无计划零开销）。
+            // T5：状态桥返回真实步骤状态与审计 id → 记一条 step_state 供 /trace 计划卡渲染。
             if task_open.get() {
                 let tid = task.borrow().id.clone();
-                bridge_plan_step(store, &tid, executed, &call.name, step_outcome, first_audit_before, attempts);
+                if let Some((idx, plan_status, tcid)) = bridge_plan_step(
+                    store, &tid, executed, &call.name, step_outcome, first_audit_before, attempts,
+                ) {
+                    let trace_outcome = match plan_status.as_str() {
+                        "done" => "ok",
+                        "skipped" => "denied",
+                        _ => "error",
+                    };
+                    rec.step_state(idx, &plan_status, attempts, tcid, trace_outcome);
+                }
             }
             label = tool_label(kit, &call.name).or_else(|| label.clone());
             {
@@ -2824,7 +2867,7 @@ mod tests {
             content_reply("都办好了。"),
         ]);
         let mut kit = replied_dual_kit();
-        chat_turn_with_kit(
+        let out = chat_turn_with_kit(
             &s, &mut backend, &c, "s-bridge", "先查下周三日程，再整理下载目录", 10, false,
             crate::calendar::CalendarAccess::Denied, &mut kit,
         )
@@ -2857,6 +2900,29 @@ mod tests {
             .unwrap()
         });
         assert_eq!(audit_count, 3, "计划/审计一一对应，无凭空步骤");
+
+        // A8/A10（T5 trace 可读化）：turn trace 含 plan_submit + 每条 step_state，
+        // step_state.output 是结构化 JSON，tool_call_id 指向真实审计行。
+        let turn = with_conn(&s, |conn| {
+            db::turn_trace_get(conn, out.turn_id.expect("turn id")).unwrap()
+        })
+        .expect("trace exists");
+        assert!(
+            turn.steps.iter().any(|st| st.step_kind == "plan_submit"),
+            "规划轮留 trace step（A8）"
+        );
+        let state_steps: Vec<_> = turn
+            .steps
+            .iter()
+            .filter(|st| st.step_kind == "step_state")
+            .collect();
+        assert_eq!(state_steps.len(), 3, "每步执行各记一条 step_state");
+        for st in &state_steps {
+            let j: serde_json::Value =
+                serde_json::from_str(st.output.as_deref().expect("step_state 有 output")).unwrap();
+            let tid = j["tool_call_id"].as_i64().expect("tool_call_id 字段");
+            assert!(tid > 0, "step_state 关联真实审计行 id");
+        }
     }
 
     /// A3（T3 状态桥）：denied 步骤标 skipped，且没有审计行误关联。

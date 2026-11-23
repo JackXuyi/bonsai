@@ -342,7 +342,7 @@ CREATE TABLE IF NOT EXISTS trace_steps (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     turn_id     INTEGER NOT NULL REFERENCES turn_trace(id) ON DELETE CASCADE,
     seq         INTEGER NOT NULL,
-    step_kind   TEXT NOT NULL,   -- crisis_check|tool_intent|llm_round|tool_call|json_retry|prose_retry|filter
+    step_kind   TEXT NOT NULL,   -- crisis_check|tool_intent|summary_intent|llm_round|tool_call|json_retry|prose_retry|filter|user_input|plan_submit|step_state|retry (plan-* 三枚举见 docs/zh/plan-planning.md T5)
     title       TEXT NOT NULL,   -- display heading (Chinese, user-facing)
     prompt      TEXT,            -- llm_round: full system prompt of THIS round (D1: unclipped)
     output      TEXT,            -- llm_round: raw model output; tool_call: reply text / error

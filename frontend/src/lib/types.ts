@@ -190,7 +190,10 @@ export interface TraceStep {
     | "tool_call"
     | "json_retry"
     | "prose_retry"
-    | "filter";
+    | "filter"
+    | "plan_submit"
+    | "step_state"
+    | "retry";
   title: string;
   prompt?: string | null;
   output?: string | null;
