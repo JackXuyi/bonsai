@@ -223,6 +223,26 @@ ORDER BY (invalid_at IS NULL) DESC,
 - 向量腿不在 P0：`db.rs` 中保留 `TODO(vector)`，schema 预留 `facts.embedding BLOB`
   **不加列**，等选型（sqlite-vec vs 存 JSON）定了再迁移，避免双倍迁移。
 
+### 7.1 索引层（S2，2026-11-23 落地）
+
+关键词腿的候选集改由 `memory/index.rs` 提供，不再对四张表各做一次
+`LIKE '%q%'` 全扫。打分公式（上面那条）一个字没改——换的是「谁能进候选」，
+不是「候选怎么排」，因此 §8 的三项指标保持可比。
+
+- **不是 trigram**：`trigram` 分词器对少于 3 个字符的查询返回 0 行，而中文
+  的检索单位就是 2 字词（`报销`/`咖啡`/`窗户` 全部零命中）。实测结论固化
+  在 `index::tests::bundled_sqlite_has_fts5_and_trigram_cannot_do_two_chars`。
+- **做法**：正文 → 空格分隔的 2-gram（ASCII 段整词）→ `search_docs`
+  （普通表，`UNIQUE(kind, ref_id)`）→ `search_fts`（FTS5 `unicode61`，
+  外部内容指向 `search_docs`）。索引侧与查询侧共用 `tokens()`，对称即正确。
+- **维护**：新增走水位线增量同步（`search_sync.last_id`，包在 SAVEPOINT 里
+  避免逐条 fsync）；删除由源表 AFTER DELETE 触发器级联（用户「忘掉」必须
+  连索引一起忘，不依赖应用层记得调）。
+- **跨时间召回**：默认窗口是最近 7 天，三个月前的事实原先没有通路。
+  `memory_search::recall` 在**用户没指定日期**时追加 `beyond` 腿：有内容词走
+  索引按相关度取窗口前的事实/偏好/边界；无内容词（「还记得吗」）取
+  importance × confidence × decay 最高的几条。基线里「久远事实」0% → 100%。
+
 ---
 
 ## 8. 评估（P0 交付物之一，不是 P1）
