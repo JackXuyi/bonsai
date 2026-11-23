@@ -9,6 +9,14 @@ use serde::{Deserialize, Serialize};
 
 use super::{ChatClient, LlmError, Msg, DEFAULT_BASE_URL, DEFAULT_MODEL, PROBE_TIMEOUT_SECS};
 
+/// 本地上下文窗口（plan-context D5，2026-11-23 裁决 8192）。
+///
+/// 以前这里填 0 = 交给 Ollama 默认值（通常 2048/4096）：超窗时 Ollama 丢的是
+/// **开头**，也就是最该保住的人格宪法——静默截断比报错更危险。显式设定后
+/// `context::window_for` 才能算出真实可用额度（usable = 8192 − 4096 预留）。
+/// 2B 首字延迟若明显变差，可回落到 4096（只改这一个常量，全链路跟着变）。
+pub const NUM_CTX: usize = 8192;
+
 #[derive(Debug, Clone)]
 pub struct OllamaClient {
     base_url: String,
@@ -107,7 +115,7 @@ impl OllamaClient {
             messages,
             stream,
             think: false,
-            options: Options { temperature, num_ctx: 0 },
+            options: Options { temperature, num_ctx: NUM_CTX },
         }
     }
 
@@ -222,6 +230,16 @@ mod tests {
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["think"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn request_sends_the_explicit_context_window() {
+        // D5：不再留 0（= Ollama 默认 2k/4k，超窗丢开头=丢人格宪法）。
+        let client = OllamaClient::from_env();
+        let msgs = vec![Msg::user("hi")];
+        let json = serde_json::to_value(client.request(&msgs, 0.7, false)).unwrap();
+        assert_eq!(json["options"]["num_ctx"], serde_json::json!(NUM_CTX));
+        assert!(NUM_CTX >= 8192, "低于 8192 装不下宪法 + 最近几轮");
     }
 
     #[test]

@@ -14,6 +14,7 @@ const STEP_TONE: Record<TraceStep["stepKind"], string> = {
   crisis_check: "tone-neutral",
   tool_intent: "tone-neutral",
   summary_intent: "tone-neutral",
+  context_budget: "tone-neutral",
   llm_round: "tone-llm",
   tool_call: "tone-tool",
   filter: "tone-ok",
@@ -63,6 +64,7 @@ function TraceNode({ step }: { step: TraceStep }) {
     step.stepKind === "user_input" ||
     step.stepKind === "plan_submit" ||
     step.stepKind === "step_state" ||
+    step.stepKind === "context_budget" ||
     Boolean(
       (step.stepKind === "json_retry" ||
         step.stepKind === "prose_retry" ||
@@ -106,7 +108,10 @@ function TraceStepDetail({ step }: { step: TraceStep }) {
       {step.stepKind === "step_state" && step.output && (
         <PlanStateBlock text={step.output} />
       )}
-      {step.output && !isPlan && step.stepKind !== "user_input" && (
+      {step.stepKind === "context_budget" && step.output && (
+        <PreBlock label="本轮预算（估算 / 可用 / 窗口 / 丢弃轮数）" text={step.output} />
+      )}
+      {step.output && !isPlan && step.stepKind !== "user_input" && step.stepKind !== "context_budget" && (
         <PreBlock label="模型原始输出" text={step.output} />
       )}
       {step.argsJson && <PreBlock label="工具请求参数" text={step.argsJson} />}

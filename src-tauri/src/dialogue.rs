@@ -37,8 +37,6 @@ use crate::relationship;
 use crate::report;
 use crate::AppState;
 
-/// Conversation window fed back to the model (plan §4.2).
-const MAX_HISTORY_TURNS: usize = 6;
 /// Dialogue temperature: personality wants some variance (eval harness
 /// scores across 0.3/0.7/1.0; runtime sits on the middle grade).
 const CHAT_TEMPERATURE: f64 = 0.7;
@@ -342,6 +340,31 @@ fn env_prefix(conn: &Connection) -> String {
         .flatten()
         .unwrap_or_else(|| "简体中文".to_string());
     crate::persona::prompt::env_segment(crate::memory::clock::now_local(), &language)
+}
+
+/// 本轮上下文预算（plan-context §6.2 / D5）：云端按模型名取窗口（软预算
+/// 32k 仍封顶——窗口大不等于该烧），本地按我们显式设定的 `NUM_CTX` 取。
+/// 第二个返回值是「是否云端」，装配层据此决定要不要给工具结果留额度。
+fn turn_budget(conn: &Connection) -> (crate::context::Budget, bool) {
+    use crate::llm_admin::Provider;
+    let cfg = crate::llm_admin::effective(conn);
+    match cfg.provider {
+        Provider::Cloud => {
+            let id = cfg
+                .active_id
+                .strip_prefix(crate::llm_cloud::CLOUD_PREFIX)
+                .unwrap_or(cfg.active_id.as_str());
+            let model = crate::llm_cloud::find(id).map(|e| e.model).unwrap_or_default();
+            (crate::context::Budget::from_model(&model, None), true)
+        }
+        Provider::Ollama => (
+            crate::context::Budget::new(
+                crate::llm::ollama::NUM_CTX,
+                crate::context::SOFT_BUDGET_DEFAULT,
+            ),
+            false,
+        ),
+    }
 }
 
 // ---------------------------------------------------------------- tool calling
@@ -1526,14 +1549,41 @@ fn chat_turn_inner(
     }
 
     // ---- phase: context read (one short lock) → then inference runs FREE
-    // 环境段已并入 system prompt（env_prefix 在 system_prompt 之前拼接）；
-    // 单独的 env 变量随三级管线退役（v0.2 §5）。
+    // 装配统一走 `context::build`（plan-context §6.3，T2）：预算充足时与旧
+    // 行为逐条等价（system = env + body，历史原样），装不下时从最旧开始丢，
+    // 最近 2 轮必留。这里仍是**唯一**装配点——云端循环 / 本地规则路由 /
+    // 直答 / 总结全部消费这一份 system + history。
+    let will_use_tools = kit.as_deref().map(|k| k.has_capabilities()).unwrap_or(false);
     let (system, history) = {
         let conn = lock_conn(store)?;
-        let e = env_prefix(&conn);
-        let s = format!("{e}{}", system_prompt(&conn, card, hour, raining)?);
-        let h = db::dialogue_history(&conn, session_id, MAX_HISTORY_TURNS)?;
-        (s, h)
+        let env = env_prefix(&conn);
+        let body = system_prompt(&conn, card, hour, raining)?;
+        let raw = db::dialogue_history(&conn, session_id, crate::context::HISTORY_MAX_TURNS)?;
+        let (budget, cloud) = turn_budget(&conn);
+        // 云端工具循环会往消息序列里插 `tool` 消息 → 必须预留；本地零工具
+        // 调用，预留只会白占 2B 的 8192 窗口。
+        let built = crate::context::build(
+            crate::context::BuildInput {
+                env: &env,
+                body: &body,
+                digest: None,
+                history: raw,
+                user_text,
+                reserve_tool_room: cloud && will_use_tools,
+            },
+            budget,
+        );
+        // 观测（A10 的数据来源）：估算值 / 丢弃轮数 / 两个预算数字。
+        rec.simple(
+            "context_budget",
+            "上下文预算",
+            if built.dropped > 0 { "trimmed" } else { "ok" },
+            Some(&format!(
+                "est={} usable={} window={} dropped={}",
+                built.est_tokens, budget.usable, budget.window, built.dropped
+            )),
+        );
+        (built.system, built.turns)
     };
 
     // 总结意图（plan-summary-skill）：规则命中就接管这一轮——素材由 Rust
@@ -2434,6 +2484,55 @@ mod tests {
             .unwrap()
         });
         assert_eq!(total, 2);
+    }
+
+    /// 记录「模型实际看到几条历史」的探针（T2 接线用：MockBackend 不看历史）。
+    struct HistoryProbe {
+        seen: std::sync::Arc<std::sync::Mutex<Vec<(usize, String)>>>,
+    }
+
+    impl DialogueBackend for HistoryProbe {
+        fn reply(
+            &mut self,
+            _system: &str,
+            history: &[crate::persona::eval::Turn],
+            _user: &str,
+            _temperature: f64,
+        ) -> String {
+            let first = history.first().map(|t| t.user.clone()).unwrap_or_default();
+            self.seen.lock().unwrap().push((history.len(), first));
+            "好".to_string()
+        }
+    }
+
+    #[test]
+    fn twelve_turns_of_short_history_all_reach_the_model() {
+        // T2 接线：上限从 6 放宽到 12，短历史不该再被旧常量截断。
+        let s = mem();
+        let c = card();
+        with_conn(&s, |conn| {
+            for i in 0..10 {
+                db::add_event_meta(conn, "dialogue", &format!("问题{i}"), Some("user"), Some("s1")).unwrap();
+                db::add_event_meta(conn, "dialogue", &format!("回答{i}"), Some("assistant"), Some("s1")).unwrap();
+            }
+        });
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut backend = HistoryProbe { seen: seen.clone() };
+        let out = chat_turn(&s, &mut backend, &c, "s1", "继续说", 10, false, crate::calendar::CalendarAccess::Denied).unwrap();
+
+        let calls = seen.lock().unwrap();
+        assert_eq!(calls.len(), 1, "一轮只问一次模型");
+        assert_eq!(calls[0].0, 10, "10 轮短历史（旧上限只有 6）");
+        assert_eq!(calls[0].1, "问题0", "oldest first");
+
+        // 预算充足 → trace 里 dropped=0（A10 的数据来源）。
+        let tid = out.turn_id.expect("turn carries a trace id");
+        let steps = steps_of(&s, tid);
+        let budget = steps
+            .iter()
+            .find(|(k, _)| k == "context_budget")
+            .expect("装配阶段必须留一条预算记录");
+        assert_eq!(budget.1, "ok");
     }
 
     #[test]
@@ -4183,17 +4282,17 @@ mod tests {
         let kinds: Vec<&str> = steps.iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(
             kinds,
-            ["user_input", "crisis_check", "tool_intent", "llm_round", "filter"]
+            ["user_input", "crisis_check", "tool_intent", "context_budget", "llm_round", "filter"]
         );
         assert_eq!(steps[1].1, "miss");
         assert_eq!(steps[2].1, "miss");
-        assert_eq!(steps[3].1, "answered");
+        assert_eq!(steps[4].1, "answered");
         // Full prompt stored (D1): the llm_round carries the whole system prompt.
         with_conn(&s, |conn| {
             let t = db::turn_trace_get(conn, tid).unwrap().unwrap();
-            let prompt = t.steps[3].prompt.as_deref().expect("prompt stored");
+            let prompt = t.steps[4].prompt.as_deref().expect("prompt stored");
             assert!(prompt.contains("# 环境（系统注入，不可变）"));
-            assert!(t.steps[3].output.as_deref().unwrap().contains("我知道了"));
+            assert!(t.steps[4].output.as_deref().unwrap().contains("我知道了"));
         });
     }
 
@@ -4211,10 +4310,10 @@ mod tests {
         assert_eq!(trace.kind, "model");
         assert!(!trace.model_used);
         let steps = steps_of(&s, tid);
-        assert_eq!(steps[3].1, "answered"); // round ran, output empty
+        assert_eq!(steps[4].1, "answered"); // round ran, output empty
         with_conn(&s, |conn| {
             let t = db::turn_trace_get(conn, tid).unwrap().unwrap();
-            assert_eq!(t.steps[3].output.as_deref(), Some(""));
+            assert_eq!(t.steps[4].output.as_deref(), Some(""));
         });
     }
 
@@ -4261,12 +4360,12 @@ mod tests {
         // 云端循环 trace：输入 → 请求 1（tool_calls）→ 执行 → 请求 2（最终作答）。
         assert_eq!(
             kinds,
-            ["user_input", "crisis_check", "tool_intent", "llm_round", "tool_call", "llm_round", "filter"]
+            ["user_input", "crisis_check", "tool_intent", "context_budget", "llm_round", "tool_call", "llm_round", "filter"]
         );
         assert_eq!(steps[2].1, "miss");
-        assert_eq!(steps[3].1, "tool_calls");
-        assert_eq!(steps[4].1, "ok");
-        assert_eq!(steps[5].1, "answered");
+        assert_eq!(steps[4].1, "tool_calls");
+        assert_eq!(steps[5].1, "ok");
+        assert_eq!(steps[6].1, "answered");
         // 每轮请求的完整消息序列都存（spec-s8 D1），user_text 随步携带。
         with_conn(&s, |conn| {
             let t = db::turn_trace_get(conn, tid).unwrap().unwrap();

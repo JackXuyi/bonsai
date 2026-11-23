@@ -186,6 +186,7 @@ export interface TraceStep {
     | "crisis_check"
     | "tool_intent"
     | "summary_intent"
+    | "context_budget"
     | "llm_round"
     | "tool_call"
     | "json_retry"

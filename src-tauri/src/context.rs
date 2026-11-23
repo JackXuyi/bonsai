@@ -11,8 +11,10 @@
 //! 高估的代价只是少放一轮历史——所以估算系数一律保守取高，偏差再用
 //! provider 的 `usage.prompt_tokens` 回流校准（T7）。
 //!
-//! T1 的边界：本文件**不被任何调用方引用**。装配（`build`）、裁剪（L0）、
-//! 摘要（L1）与轮内压缩都在 T2/T3 接线，避免一次提交同时改行为与改预算。
+//! T1 只做纯函数（估算器 / 窗口表 / 预算 / 分段上限），T2 接上装配
+//! [`build`]（含 L0 按预算丢最旧轮）。轮内压缩（T3）与摘要（T6）仍待接线。
+
+use crate::persona::eval::Turn;
 
 /// 一条消息的结构开销：角色包装 + 分隔符。各家协议略有差异，统一 4。
 pub const MSG_OVERHEAD: usize = 4;
@@ -62,7 +64,7 @@ pub const CAP_USER_TEXT: usize = 4000;
 pub const CAP_TOOL_RESULT: usize = 1500;
 /// 本轮工具结果合计占可用额度的比例。
 pub const TOOL_ROOM_RATIO: f64 = 0.40;
-/// 历史轮上限（`MAX_HISTORY_TURNS=6` 的放宽版，靠预算而非轮数兜底）。
+/// 历史轮上限：从 6 放宽到 12，真正的闸门是预算（装不下就丢，T2）。
 pub const HISTORY_MAX_TURNS: usize = 12;
 
 /// 一个有固定上限的上下文分段。
@@ -228,6 +230,97 @@ pub fn window_for(model: &str, local_ctx: Option<usize>) -> usize {
         OPENAI_WINDOW
     } else {
         FALLBACK_WINDOW
+    }
+}
+
+// ---------------------------------------------------------------- 装配（L0）
+
+/// 最近 2 轮即使装不下也留（plan §6.3 第 3 步的例外）：陪伴场景里
+/// 「上一句说了什么」比预算本身重要，硬压到 0 轮会让对话立刻失忆。
+pub const MIN_KEEP_TURNS: usize = 2;
+
+/// 摘要段的标题。措辞刻意写明「系统压缩，非用户原话」——避免模型把
+/// 摘要当成用户说过的话去引用，也避免用户以为自己的话被改写了。
+pub const DIGEST_HEADER: &str = "# 较早对话摘要（系统压缩，非用户原话）\n";
+
+/// 装配输入。系统段拆成 `env` 与 `body` 两截只是为了与现状拼接顺序一致
+/// （`format!("{env}{body}")`，环境段在最前）。
+pub struct BuildInput<'a> {
+    pub env: &'a str,
+    pub body: &'a str,
+    /// L1/L2 摘要正文（T6 才写库，暂无时传 `None`）；进 system 末尾。
+    pub digest: Option<&'a str>,
+    /// 已按 [`HISTORY_MAX_TURNS`] 上限读出的历史，oldest first。
+    pub history: Vec<Turn>,
+    /// 本轮用户消息：**不截**，只计入估算。
+    pub user_text: &'a str,
+    /// 是否给工具结果留额度。云端工具循环会往消息序列里插 `tool` 消息，
+    /// 必须留；本地模式零工具调用，留了就是白占 2B 的 8192 窗口。
+    pub reserve_tool_room: bool,
+}
+
+/// 装配结果（plan §6.3）。
+#[derive(Debug, Clone)]
+pub struct Built {
+    /// env + body（+ 摘要段）。
+    pub system: String,
+    /// 已按预算裁剪，oldest first；内容与顺序未改动。
+    pub turns: Vec<Turn>,
+    /// 被 L0 丢掉的轮数（0 = 没压），给 trace 与 T7 观测用。
+    pub dropped: usize,
+    /// 本轮请求的输入估算（system + 历史 + 用户话，不含答复预留）。
+    pub est_tokens: usize,
+}
+
+/// 按预算装配一轮上下文（plan §6.3）。
+///
+/// 预算充足时**逐条等价**于现状：system 仍是 `env + body`，历史原样返回，
+/// `dropped = 0`——这一条由单测锁定，避免「加预算」顺手改变对话手感。
+/// 装不下时从最旧开始丢（不跳着塞，保持连续），最近 [`MIN_KEEP_TURNS`]
+/// 轮无条件保留。
+pub fn build(input: BuildInput<'_>, budget: Budget) -> Built {
+    let mut system = String::with_capacity(input.env.len() + input.body.len() + CAP_DIGEST * 3);
+    system.push_str(input.env);
+    system.push_str(input.body);
+    if let Some(digest) = input.digest.filter(|d| !d.trim().is_empty()) {
+        system.push_str(DIGEST_HEADER);
+        system.push_str(digest.trim_end());
+        system.push('\n');
+    }
+
+    // 不可压段全部算进 fixed：宪法/边界/环境/画像/skill/摘要都不参与 L0。
+    let fixed = estimate_msg(&system);
+    let room = if input.reserve_tool_room {
+        budget.history_room(fixed)
+    } else {
+        budget.usable.saturating_sub(fixed)
+    };
+
+    let total = input.history.len();
+    let mut kept: Vec<Turn> = Vec::with_capacity(total.min(HISTORY_MAX_TURNS));
+    let mut used = 0usize;
+    for (i, turn) in input
+        .history
+        .into_iter()
+        .rev()
+        .take(HISTORY_MAX_TURNS)
+        .enumerate()
+    {
+        let cost = estimate_turn(&turn.user, &turn.assistant);
+        if i >= MIN_KEEP_TURNS && used + cost > room {
+            break;
+        }
+        used += cost;
+        kept.push(turn);
+    }
+    let dropped = total - kept.len();
+    kept.reverse();
+
+    Built {
+        system,
+        turns: kept,
+        dropped,
+        est_tokens: fixed + used + estimate_msg(input.user_text),
     }
 }
 
@@ -407,6 +500,197 @@ mod tests {
             b.history_room(fixed) > 0,
             "默认预算下历史额度为正（fixed={fixed}, usable={}, floor={floor}）",
             b.usable
+        );
+    }
+
+    // ------------------------------------------------------------ 装配（L0）
+
+    fn turn(user: &str, assistant: &str) -> Turn {
+        Turn {
+            user: user.into(),
+            assistant: assistant.into(),
+        }
+    }
+
+    fn pairs(turns: &[Turn]) -> Vec<(String, String)> {
+        turns
+            .iter()
+            .map(|t| (t.user.clone(), t.assistant.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn build_with_ample_budget_matches_the_old_assembly() {
+        // A2：预算充足时不许改变行为——system 仍是 env + body，历史原样。
+        let env = "现在是周一 21:00，杭州。\n";
+        let body = "你是盆栽。\n规则：不许谄媚。\n";
+        let history = vec![
+            turn("在吗", "在。"),
+            turn("今天有点累", "那就早点睡。"),
+            turn("帮我看看日程", "明天上午有个会。"),
+        ];
+        let budget = Budget::from_model("deepseek-chat", None);
+        let built = build(
+            BuildInput {
+                env,
+                body,
+                digest: None,
+                history: history.clone(),
+                user_text: "明天几点开会",
+                reserve_tool_room: true,
+            },
+            budget,
+        );
+
+        assert_eq!(built.system, format!("{env}{body}"));
+        assert_eq!(pairs(&built.turns), pairs(&history), "顺序与内容都不许动");
+        assert_eq!(built.dropped, 0);
+        let expect = estimate_msg(&built.system)
+            + history
+                .iter()
+                .map(|t| estimate_turn(&t.user, &t.assistant))
+                .sum::<usize>()
+            + estimate_msg("明天几点开会");
+        assert_eq!(built.est_tokens, expect);
+    }
+
+    #[test]
+    fn build_drops_the_oldest_turns_first_and_keeps_the_newest_two() {
+        // A3：历史远超预算 → 从最旧开始丢，最近 2 轮必在，dropped 被计数。
+        let long = "很长的内容".repeat(40);
+        let history: Vec<Turn> = (0..30)
+            .map(|i| turn(&format!("{i}{long}"), &format!("答{i}{long}")))
+            .collect();
+        let budget = Budget::new(8192, SOFT_BUDGET_DEFAULT); // usable 4096
+        let built = build(
+            BuildInput {
+                env: "",
+                body: "你是盆栽。",
+                digest: None,
+                history: history.clone(),
+                user_text: "继续",
+                reserve_tool_room: false,
+            },
+            budget,
+        );
+
+        assert!(built.dropped > 0, "这么长的历史必须触发压缩");
+        assert!(built.turns.len() >= MIN_KEEP_TURNS);
+        assert!(built.turns.len() < history.len());
+        // 留下的一定是**最新**那一截，且顺序仍是 oldest first。
+        let tail = &history[history.len() - built.turns.len()..];
+        assert_eq!(
+            pairs(&built.turns),
+            pairs(tail),
+            "留下的必须是最新的连续一段"
+        );
+        assert_eq!(built.dropped, history.len() - built.turns.len());
+        assert!(built.est_tokens <= budget.usable.max(1) || built.turns.len() == MIN_KEEP_TURNS);
+    }
+
+    #[test]
+    fn build_keeps_two_turns_even_when_the_budget_is_zero() {
+        let history = vec![turn("一", "1"), turn("二", "2"), turn("三", "3")];
+        let built = build(
+            BuildInput {
+                env: "",
+                body: "",
+                digest: None,
+                history,
+                user_text: "",
+                reserve_tool_room: true,
+            },
+            Budget::new(1000, 1000), // usable = 0
+        );
+        assert_eq!(built.turns.len(), MIN_KEEP_TURNS);
+        assert_eq!(built.dropped, 1);
+        assert_eq!(built.turns.last().map(|t| t.user.as_str()), Some("三"));
+    }
+
+    #[test]
+    fn build_caps_history_at_twelve_turns() {
+        let history: Vec<Turn> = (0..20).map(|i| turn(&format!("u{i}"), "a")).collect();
+        let built = build(
+            BuildInput {
+                env: "",
+                body: "你是盆栽。",
+                digest: None,
+                history,
+                user_text: "hi",
+                reserve_tool_room: true,
+            },
+            Budget::from_model("deepseek-chat", None),
+        );
+        assert_eq!(built.turns.len(), HISTORY_MAX_TURNS);
+        assert_eq!(built.dropped, 20 - HISTORY_MAX_TURNS);
+        assert_eq!(built.turns[0].user, "u8", "留下的是最新 12 轮");
+    }
+
+    #[test]
+    fn build_puts_the_digest_at_the_end_of_the_system_prompt() {
+        let built = build(
+            BuildInput {
+                env: "环境。\n",
+                body: "宪法。",
+                digest: Some("- [11-20] 用户问了天气 → 答了明天有雨"),
+                history: vec![],
+                user_text: "再问一次",
+                reserve_tool_room: true,
+            },
+            Budget::from_model("deepseek-chat", None),
+        );
+        assert!(built.system.starts_with("环境。\n宪法。"));
+        assert!(built.system.contains(DIGEST_HEADER.trim()));
+        assert!(built.system.trim_end().ends_with("答了明天有雨"));
+    }
+
+    #[test]
+    fn empty_digest_is_not_rendered() {
+        let built = build(
+            BuildInput {
+                env: "",
+                body: "宪法。",
+                digest: Some("   \n"),
+                history: vec![],
+                user_text: "hi",
+                reserve_tool_room: true,
+            },
+            Budget::from_model("deepseek-chat", None),
+        );
+        assert_eq!(built.system, "宪法。");
+        assert!(!built.system.contains("较早对话摘要"));
+    }
+
+    #[test]
+    fn local_mode_does_not_reserve_tool_room() {
+        // 本地零工具调用：同样的预算下，不预留工具额度能多装几轮。
+        let history: Vec<Turn> = (0..12)
+            .map(|i| turn(&format!("第{i}轮问题").repeat(20), &"答".repeat(200)))
+            .collect();
+        let budget = Budget::new(8192, SOFT_BUDGET_DEFAULT); // usable 4096
+        let mut with_tools = 0;
+        let mut without_tools = 0;
+        for reserve in [true, false] {
+            let built = build(
+                BuildInput {
+                    env: "",
+                    body: &"宪法".repeat(800),
+                    digest: None,
+                    history: history.clone(),
+                    user_text: "继续",
+                    reserve_tool_room: reserve,
+                },
+                budget,
+            );
+            if reserve {
+                with_tools = built.turns.len();
+            } else {
+                without_tools = built.turns.len();
+            }
+        }
+        assert!(
+            without_tools > with_tools,
+            "不留工具额度应能多装历史（with={with_tools}, without={without_tools}）"
         );
     }
 }

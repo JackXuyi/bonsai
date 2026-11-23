@@ -1,7 +1,8 @@
 //! Built-in memory recall tool (plan-agent P3: 内置工具第一枚).
 //!
-//! The chat window only feeds the model the last 6 turns of the *current*
-//! session (dialogue.rs `MAX_HISTORY_TURNS`), so "总结一下我 18 号说了啥"
+//! The chat window only feeds the model the last few turns of the *current*
+//! session (`context::HISTORY_MAX_TURNS`, trimmed oldest-first by budget),
+//! so "总结一下我 18 号说了啥"
 //! used to be answered from thin air. This module gives the agent pipeline
 //! one deterministic, local-only capability: `memory_search`.
 //!
