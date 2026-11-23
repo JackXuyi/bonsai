@@ -265,4 +265,38 @@ describe("PromptBlock（prompt 数组结构化渲染，2026-11-22）", () => {
     expect(screen.getByText("SYS PROMPT 全文")).toBeTruthy();
     expect(document.querySelector(".trace-prompt")).toBeNull();
   });
+
+  it("assistant 工具调用声明消息无 content 字段仍解析（2026-11-23 渲染 bug 回归）", () => {
+    // Rust skip_serializing_if：assistant_tool_calls 的 content: None 直接
+    // 序列化掉——旧版解析器要求每条都有 string content，一旦模型调过
+    // 工具整条 prompt 就回落原始 JSON。
+    const prompt = JSON.stringify([
+      { role: "system", content: "# 环境" },
+      { role: "user", content: "读取 plan 文档" },
+      {
+        role: "assistant",
+        tool_calls: [
+          {
+            id: "call_01",
+            type: "function",
+            function: { name: "fs_read", arguments: '{"path":"/tmp/a.md"}' },
+          },
+        ],
+      },
+      { role: "tool", tool_call_id: "call_01", content: '{"text":"文档内容"}' },
+    ]);
+    const parsed = parsePromptMessages(prompt);
+    expect(parsed).toHaveLength(4);
+    render(<PromptBlock label="本轮 prompt（全文）" text={prompt} />);
+    // 角色徽标齐 + 工具调用声明渲染成 chips + arguments pretty 打印
+    expect(screen.getByText("助手")).toBeTruthy();
+    expect(screen.getByText("工具返回")).toBeTruthy();
+    expect(screen.getByText("fs_read")).toBeTruthy();
+    expect(screen.getByText(/"path": "\/tmp\/a\.md"/)).toBeTruthy();
+    expect(screen.getByText(/id: call_01/)).toBeTruthy();
+    // 无 content + 无 tool_calls 的消息显示占位
+    const empty = JSON.stringify([{ role: "assistant", content: null }]);
+    render(<PromptBlock label="x" text={empty} />);
+    expect(screen.getByText("（无正文）")).toBeTruthy();
+  });
 });

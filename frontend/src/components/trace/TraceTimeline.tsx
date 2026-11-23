@@ -196,10 +196,21 @@ function PreBlock({ label, text }: { label: string; text: string }) {
 
 // ---------------------------------------------------------------- prompt 数组结构化渲染
 
-/** prompt 消息条目（cloud_tool_loop 的 llm_round：`serde_json::to_string(&ToolMsg[])`）。 */
+/** prompt 消息条目（cloud_tool_loop 的 llm_round：`serde_json::to_string(&ToolMsg[])`）。
+ * Rust 侧 skip_serializing_if：assistant 工具调用声明消息**没有 content 字段**
+ * （content: None），tool 消息带 tool_call_id——这些字段都必须当可选处理，
+ * 否则只要模型调过一次工具，整条 prompt 就解析失败回落原始 JSON
+ * （2026-11-23 渲染 bug 的根因）。 */
+interface PromptCall {
+  id?: string;
+  function?: { name?: string; arguments?: string };
+}
+
 interface PromptMsg {
   role: string;
-  content: string;
+  content?: string | null;
+  tool_calls?: PromptCall[];
+  tool_call_id?: string;
 }
 
 const ROLE_LABEL: Record<string, string> = {
@@ -209,18 +220,20 @@ const ROLE_LABEL: Record<string, string> = {
   tool: "工具返回",
 };
 
-/** 宽松解析 ToolMsg[]：合法的 {role,content} 字符串数组才走结构化；其余 null。 */
+/** 宽松解析 ToolMsg[]：合法的 {role, content?, tool_calls?} 对象数组才走
+ * 结构化；其余 null。content 可缺失/null（assistant_tool_calls 形态）。 */
 export function parsePromptMessages(text: string): PromptMsg[] | null {
   try {
     const j = JSON.parse(text) as unknown;
     if (!Array.isArray(j) || j.length === 0) return null;
-    const ok = j.every(
-      (m) =>
-        m &&
-        typeof m === "object" &&
-        typeof (m as { role?: unknown }).role === "string" &&
-        typeof (m as { content?: unknown }).content === "string"
-    );
+    const ok = j.every((m) => {
+      if (!m || typeof m !== "object") return false;
+      const msg = m as Record<string, unknown>;
+      if (typeof msg.role !== "string") return false;
+      if (msg.content !== undefined && msg.content !== null && typeof msg.content !== "string") return false;
+      if (msg.tool_calls !== undefined && !Array.isArray(msg.tool_calls)) return false;
+      return true;
+    });
     return ok ? (j as PromptMsg[]) : null;
   } catch {
     return null;
@@ -256,17 +269,43 @@ export function PromptBlock({ label, text }: { label: string; text: string }) {
               <span className={`trace-prompt-badge role-${m.role}`}>
                 {ROLE_LABEL[m.role] ?? m.role}
               </span>
+              {m.tool_call_id && <span className="trace-prompt-index">id: {m.tool_call_id}</span>}
               <span className="trace-prompt-index">
                 {i + 1}/{msgs.length}
               </span>
             </div>
-            <div
-              className="trace-prompt-body"
-              dangerouslySetInnerHTML={{ __html: renderMarkdown(m.content) }}
-            />
+            {m.content && (
+              <div
+                className="trace-prompt-body"
+                dangerouslySetInnerHTML={{ __html: renderMarkdown(m.content) }}
+              />
+            )}
+            {m.tool_calls && m.tool_calls.length > 0 && (
+              <ul className="trace-prompt-calls">
+                {m.tool_calls.map((c, ci) => (
+                  <li key={c.id ?? ci} className="trace-prompt-call">
+                    <span className="trace-prompt-call-name">{c.function?.name ?? "未知工具"}</span>
+                    <pre className="trace-prompt-call-args">{prettyArgs(c.function?.arguments)}</pre>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {!m.content && (!m.tool_calls || m.tool_calls.length === 0) && (
+              <div className="trace-prompt-body trace-prompt-empty">（无正文）</div>
+            )}
           </li>
         ))}
       </ol>
     </div>
   );
+}
+
+/** 协议里 arguments 是 JSON 字符串——pretty 打印；解析失败原样。 */
+function prettyArgs(args?: string): string {
+  if (!args) return "{}";
+  try {
+    return JSON.stringify(JSON.parse(args), null, 2);
+  } catch {
+    return args;
+  }
 }
