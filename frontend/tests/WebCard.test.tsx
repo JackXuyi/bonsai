@@ -52,7 +52,9 @@ describe("WebCard", () => {
     render(<WebCard active />);
     await waitFor(() => expect(statusMock).toHaveBeenCalled());
     const card = screen.getByTestId("web-card");
-    expect(card.textContent).toContain("Web 检索未开启（默认关闭）");
+    await waitFor(() =>
+      expect(card.textContent).toContain("Web 检索未开启（默认关闭）")
+    );
     // 知情同意的落点：外发说明在关闭态也可见（决定开不开之前就该知道）
     expect(card.textContent).toContain("发送给已配置的云端模型");
     expect(card.textContent).toContain("不会编造搜索结果");

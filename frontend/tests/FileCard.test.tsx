@@ -64,7 +64,9 @@ describe("FileCard", () => {
     render(<FileCard active />);
     await waitFor(() => expect(statusMock).toHaveBeenCalled());
     const card = screen.getByTestId("file-card");
-    expect(card.textContent).toContain("文件工具未开启（默认关闭）");
+    await waitFor(() =>
+      expect(card.textContent).toContain("文件工具未开启（默认关闭）")
+    );
     expect(screen.queryByTestId("add-root")).toBeNull();
   });
 
