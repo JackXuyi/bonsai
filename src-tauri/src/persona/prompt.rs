@@ -25,6 +25,9 @@ pub struct PromptContext<'a> {
     /// "familiar" | "direct" | "rusty". Kept as a plain string so the persona
     /// renderer stays independent of the relationship module.
     pub relationship_mode: &'a str,
+    /// 用户画像（plan-user-profile.md §5）：(中文标签, 值) 已成对的切片——
+    /// 传对儿而不传 key，本模块对 memory 层保持零依赖。空 = 整段不渲染。
+    pub user_profile: &'a [(&'a str, &'a str)],
 }
 
 /// The long-term tone block. `direct` is where the relationship becomes
@@ -91,8 +94,31 @@ pub fn env_segment(now: chrono::DateTime<chrono::Local>, language: &str) -> Stri
     )
 }
 
+/// 画像段预算（plan-user-profile.md §5）：整段 ≤200 字符，超了就截断到
+/// 放得下的最后一行——画像压缩成短行，不占人格卡预算。
+const PROFILE_BUDGET_CHARS: usize = 200;
+
 pub fn render(card: &Persona, ctx: &PromptContext) -> String {
     let mut s = String::new();
+
+    // ---- 用户画像：身份快照，每轮固定注入，不走红召回门控 ----
+    // 位于环境段（dialogue 侧前置拼接）之后、L1 宪法之前：先知道你是谁，
+    // 再谈人格怎么表达。全空则整段不渲染（不产生提示泄漏）。
+    if !ctx.user_profile.is_empty() {
+        let mut section = String::from("# 用户画像\n");
+        let mut used = section.chars().count();
+        for (label, value) in ctx.user_profile {
+            let line = format!("{label}：{value}\n");
+            let n = line.chars().count();
+            if used + n > PROFILE_BUDGET_CHARS {
+                break;
+            }
+            section.push_str(&line);
+            used += n;
+        }
+        s.push_str(&section);
+        s.push('\n');
+    }
 
     // ---- L1 constitution: immutable, always first ----
     s.push_str("# 人格宪法（不可变）\n");
@@ -173,6 +199,7 @@ mod tests {
             raining,
             user_boundaries,
             relationship_mode: "reserved",
+            user_profile: &[],
         }
     }
 
@@ -183,6 +210,7 @@ mod tests {
             raining: false,
             user_boundaries: &[],
             relationship_mode: mode,
+            user_profile: &[],
         }
     }
 
@@ -232,6 +260,58 @@ mod tests {
         let c = card();
         let out = render(&c, &ctx("平静", 10, false, &[]));
         assert!(!out.contains("用户边界（必须遵守"));
+    }
+
+    // ---- 用户画像段（plan-user-profile.md §5）----
+
+    #[test]
+    fn profile_section_renders_between_env_and_l1() {
+        let c = card();
+        let profile = [("称呼", "许一"), ("职业", "QA / 质量管理")];
+        let pc = PromptContext {
+            mood: "平静",
+            hour: 10,
+            raining: false,
+            user_boundaries: &[],
+            relationship_mode: "reserved",
+            user_profile: &profile,
+        };
+        let out = render(&c, &pc);
+        assert!(out.contains("# 用户画像\n称呼：许一\n职业：QA / 质量管理\n"));
+        // 画像在宪法之前（先知道你是谁，再谈人格）。
+        assert!(out.find("# 用户画像").unwrap() < out.find("# 人格宪法").unwrap());
+    }
+
+    #[test]
+    fn empty_profile_skips_the_whole_section() {
+        let c = card();
+        let out = render(&c, &ctx("平静", 10, false, &[]));
+        assert!(!out.contains("用户画像"), "全空不渲染——不产生提示泄漏");
+    }
+
+    #[test]
+    fn profile_section_respects_the_200_char_budget() {
+        let c = card();
+        let long: Vec<(&str, &str)> = (0..20)
+            .map(|i| (Box::leak(format!("字段{i}").into_boxed_str()) as &str, Box::leak("值".repeat(30).into_boxed_str()) as &str))
+            .collect();
+        let pc = PromptContext {
+            mood: "平静",
+            hour: 10,
+            raining: false,
+            user_boundaries: &[],
+            relationship_mode: "reserved",
+            user_profile: &long,
+        };
+        let out = render(&c, &pc);
+        let start = out.find("# 用户画像").unwrap();
+        let end = out.find("# 人格宪法").unwrap();
+        let section: String = out[start..end].trim_end().to_string();
+        assert!(
+            section.chars().count() <= 201, // 200 预算 + 段首换行余量
+            "画像段超预算：{} chars",
+            section.chars().count()
+        );
     }
 
     /// R2 会顶嘴 is a BEHAVIOR change, not a badge: the hedged openers the

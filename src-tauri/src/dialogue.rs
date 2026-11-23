@@ -261,6 +261,15 @@ fn system_prompt(
     let mood = mood_str(face::derive_base_state(hour8, is_weekend_today()));
     // Long-term tone (plan-relationship.md §3.5): 拘谨 / 熟络 / 会顶嘴 / 生疏.
     let relationship_mode = relationship::current_mode(conn);
+    // 用户画像（plan-user-profile.md §5）：身份快照每轮固定注入，不走
+    // might_recall 门控。传 (中文标签, 值) 对儿——key→label 映射只在
+    // profile::label 一处，渲染层零依赖 memory。
+    let profile: Vec<(String, String)> = crate::memory::profile::get_all(conn)?
+        .into_iter()
+        .map(|row| (crate::memory::profile::label(&row.key).to_string(), row.value))
+        .collect();
+    let profile_pairs: Vec<(&str, &str)> =
+        profile.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     Ok(render(
         card,
         &PromptContext {
@@ -269,6 +278,7 @@ fn system_prompt(
             raining,
             user_boundaries: &boundaries,
             relationship_mode: relationship_mode.as_str(),
+            user_profile: &profile_pairs,
         },
     ))
 }
@@ -1705,6 +1715,30 @@ mod tests {
         assert_eq!(history[0].assistant, "太棒了，就这么办！");
         // Other sessions see nothing.
         assert!(with_conn(&s, |conn| db::dialogue_history(conn, "s2", 6).unwrap()).is_empty());
+    }
+
+    // ---- 用户画像注入（plan-user-profile.md §5）-----------------------
+
+    #[test]
+    fn system_prompt_carries_the_profile_section_and_skips_when_empty() {
+        let c = card();
+
+        let s = mem();
+        with_conn(&s, |conn| {
+            crate::memory::profile::apply(conn, "name", "许一", "manual", None, 1.0).unwrap();
+            crate::memory::profile::apply(conn, "occupation", "QA", "rule", None, 0.7).unwrap();
+            let text = system_prompt(conn, &c, 10, false).unwrap();
+            assert!(text.contains("# 用户画像\n称呼：许一\n职业：QA\n"));
+            // 画像在宪法之前（先知道你是谁，再谈人格）。
+            assert!(text.find("# 用户画像").unwrap() < text.find("# 人格宪法").unwrap());
+        });
+
+        // 全空 → 整段不渲染。
+        let s2 = mem();
+        with_conn(&s2, |conn| {
+            let text = system_prompt(conn, &c, 10, false).unwrap();
+            assert!(!text.contains("用户画像"), "空画像不产生提示泄漏");
+        });
     }
 
     // ---- 总结意图（plan-summary-skill）-------------------------------

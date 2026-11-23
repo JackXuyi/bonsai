@@ -427,6 +427,7 @@ mod tests {
                 raining: false,
                 user_boundaries: &[],
                 relationship_mode: "reserved",
+                user_profile: &[],
             },
         )
     }
