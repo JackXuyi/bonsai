@@ -358,6 +358,16 @@
   color: var(--muted);
 }
 
+/* S1 三级降级标记：关键词腿全落空、结果来自整窗兜底——让人知道
+   「这份列表可能不完整」，而不是以为精确匹配为空。 */
+.trace-tool-degraded {
+  padding: 1px 6px;
+  border: 0.5px solid var(--line);
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--warn);
+}
+
 .trace-tool-empty {
   margin: 0;
   padding: 10px;

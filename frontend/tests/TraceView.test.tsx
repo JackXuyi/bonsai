@@ -147,6 +147,67 @@ describe("TraceView（spec-s8 追踪页）", () => {
     expect(screen.queryByText(/"dialogue_count"/)).toBeNull();
   });
 
+  it("memory_search 带 degraded → 卡片标出「已退回整窗」", async () => {
+    const memorySummary = JSON.stringify({
+      window: "最近一周",
+      dialogue_count: 1,
+      fact_count: 0,
+      degraded: true,
+      lines: [{ ts: "11-30 21:00", who: "用户", text: "日常占位第 3 条" }],
+      facts: [],
+    });
+    getMock.mockResolvedValue(
+      trace({
+        toolLabel: "builtin:memory_search",
+        steps: [
+          {
+            seq: 1,
+            stepKind: "tool_call",
+            title: "工具调用 · memory_search",
+            argsJson: '{"query":"报销流程怎么走"}',
+            summary: memorySummary,
+            outcome: "ok",
+            durationMs: 4,
+            ts: "2026-12-01T22:00:00+08:00",
+          },
+        ],
+      })
+    );
+    render(<TraceView turnId={418} />);
+    fireEvent.click(await screen.findByText(/工具调用 · memory_search/));
+    expect(screen.getByText("关键词未命中 · 已退回整窗")).toBeTruthy();
+  });
+
+  it("memory_search 无 degraded 字段 → 不出现降级标记（向后兼容）", async () => {
+    const memorySummary = JSON.stringify({
+      window: "11月20日（周五）",
+      dialogue_count: 1,
+      fact_count: 0,
+      lines: [{ ts: "11-20 09:00", who: "用户", text: "水培该换水了吗" }],
+      facts: [],
+    });
+    getMock.mockResolvedValue(
+      trace({
+        toolLabel: "builtin:memory_search",
+        steps: [
+          {
+            seq: 1,
+            stepKind: "tool_call",
+            title: "工具调用 · memory_search",
+            argsJson: '{"query":"水培"}',
+            summary: memorySummary,
+            outcome: "ok",
+            durationMs: 4,
+            ts: "2026-11-20T14:32:03+08:00",
+          },
+        ],
+      })
+    );
+    render(<TraceView turnId={419} />);
+    fireEvent.click(await screen.findByText(/工具调用 · memory_search/));
+    expect(screen.queryByText("关键词未命中 · 已退回整窗")).toBeNull();
+  });
+
   it("工具返回是未知 JSON → pretty 打印兜底；非 JSON → 原样", async () => {
     getMock.mockResolvedValue(
       trace({

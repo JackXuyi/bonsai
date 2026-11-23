@@ -131,6 +131,8 @@ interface MemoryResultData {
   window: string;
   dialogue_count?: number;
   fact_count?: number;
+  /** S1 三级降级：关键词腿全落空 → 退回整窗（结果可能不完整）。 */
+  degraded?: boolean;
   lines?: { ts?: string; who?: string; text?: string }[];
   facts?: string[];
 }
@@ -167,6 +169,7 @@ function MemoryResultCard({ data }: { data: MemoryResultData }) {
         <span className="trace-tool-count">
           对话 {data.dialogue_count ?? lines.length} 条 · 记忆 {data.fact_count ?? facts.length} 条
         </span>
+        {data.degraded && <span className="trace-tool-degraded">关键词未命中 · 已退回整窗</span>}
       </div>
       {lines.length === 0 && facts.length === 0 && (
         <p className="trace-tool-empty">没有找到对话记录。</p>
