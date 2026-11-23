@@ -423,3 +423,17 @@
   background: #ddd6c3;
   cursor: default;
 }
+
+/* 回合进行中：发送键变「停」（叫停后端，不是撤气泡） */
+.send.stop {
+  background: var(--muted);
+}
+
+.send.stop:hover:not(:disabled) {
+  background: var(--danger);
+}
+
+.send.stop svg rect {
+  fill: #fff;
+  stroke: none;
+}

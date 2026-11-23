@@ -62,6 +62,8 @@ interface TaskEvent {
   tool?: string;
   status?: string;
   reason?: string;
+  /** 只有计划分支的 task_start 带 true；单步任务（无计划）不进本面板 */
+  planned?: boolean;
 }
 
 function asEvent(raw: unknown, fallbackId: string | null): TaskEvent | null {
@@ -80,6 +82,7 @@ function asEvent(raw: unknown, fallbackId: string | null): TaskEvent | null {
     tool: typeof o.tool === "string" ? o.tool : undefined,
     status: typeof o.status === "string" ? o.status : undefined,
     reason: typeof o.reason === "string" ? o.reason : undefined,
+    planned: typeof o.planned === "boolean" ? o.planned : undefined,
   };
 }
 
@@ -171,6 +174,9 @@ export const usePlanStore = create<PlanState>((set, get) => ({
       let next: PlanProgress;
       switch (e.event) {
         case "task_start":
+          // 单步任务（无计划的 task_start）不属于「计划进度」：不建条目，
+          // 否则面板会被一堆 0 步的条目填满。
+          if (!existing && e.planned !== true) return st;
           next = {
             ...base,
             goal: e.goal?.trim() ? e.goal.trim() : base.goal,
@@ -178,6 +184,8 @@ export const usePlanStore = create<PlanState>((set, get) => ({
           };
           break;
         case "task_step": {
+          // 没有计划条目（含单步任务）就没有进度可画，不凭事件凭空造条目。
+          if (!existing) return st;
           if (typeof e.seq !== "number" || e.seq < 0) return st;
           // task_step 只有 tool/status：seq 对齐到回放态已有步骤，缺则先占位
           // （intent 由随后的 plan_list 补齐，不在此编造）。

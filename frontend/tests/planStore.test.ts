@@ -83,7 +83,7 @@ describe("applyTaskEvent", () => {
 
   it("同一事件重复到达不去重成两行（幂等）", () => {
     const s = usePlanStore.getState();
-    s.applyTaskEvent({ event: "task_start", id: "t1", goal: "g" });
+    s.applyTaskEvent({ event: "task_start", id: "t1", goal: "g", planned: true });
     for (let i = 0; i < 3; i += 1) {
       s.applyTaskEvent({ event: "task_step", id: "t1", seq: 0, tool: "calendar_list", status: "ok" });
     }
@@ -116,13 +116,21 @@ describe("applyTaskEvent", () => {
 
   it("取消：终止态 + 未跑步骤标 skipped + 留原因", () => {
     const s = usePlanStore.getState();
-    s.applyTaskEvent({ event: "task_start", id: "t1", goal: "g" });
+    s.applyTaskEvent({ event: "task_start", id: "t1", goal: "g", planned: true });
     s.applyTaskEvent({ event: "task_step", id: "t1", seq: 0, tool: "fs_read", status: "ok" });
     s.applyTaskEvent({ event: "task_canceled", reason: "user" });
     const cur = usePlanStore.getState().current!;
     expect(cur.status).toBe("canceled");
     expect(cur.cancelReason).toBe("user");
     expect(cur.steps[0].status).toBe("done");
+  });
+
+  it("单步任务（task_start 不带 planned）不进计划面板", () => {
+    const s = usePlanStore.getState();
+    s.applyTaskEvent({ event: "task_start", id: "s1", goal: "在忙什么" });
+    s.applyTaskEvent({ event: "task_step", id: "s1", seq: 0, tool: "calendar_list", status: "ok" });
+    expect(usePlanStore.getState().current).toBeNull();
+    expect(usePlanStore.getState().history).toEqual([]);
   });
 
   it("脏事件/未知事件一律忽略（面板不猜）", () => {
@@ -140,7 +148,7 @@ describe("applyTaskEvent", () => {
 describe("setHistory", () => {
   it("回放态补语义、实时态保住进度（intent 来自库，status 只升阶）", () => {
     const s = usePlanStore.getState();
-    s.applyTaskEvent({ event: "task_start", id: "t1", goal: "查日程再写摘要" });
+    s.applyTaskEvent({ event: "task_start", id: "t1", goal: "查日程再写摘要", planned: true });
     s.applyTaskEvent({ event: "task_step", id: "t1", seq: 1, tool: "fs_read", status: "ok" });
     s.setHistory([row()]);
     const cur = usePlanStore.getState().current!;

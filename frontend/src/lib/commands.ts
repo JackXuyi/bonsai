@@ -62,16 +62,24 @@ export const relationshipAck = (id: number) =>
 export const relationshipReset = () => call<void>("relationship_reset");
 
 // ---------- dialogue ----------
+/** 一轮对话是最长的 IPC：计划轮 + ≤6 次云端请求（单次上限 120s）+ 工具执行
+ *  + 有界重试。默认 15s 的 invoke 兜底会在一轮真的跑着时先判失败
+ *  （2026-11-23 实录：一条查天气的消息后端跑了 28s+，前端 15s 就放弃，
+ *  气泡被撤、后端继续跑）。这里给到 10 分钟——只防 IPC 真挂死，不判业务慢。 */
+const DIALOGUE_IPC_TIMEOUT_MS = 600000;
 export const dialogueChatStream = (
   userText: string,
   sessionId: string,
   onDelta: unknown
 ) =>
-  call<DialogueOutcome>("dialogue_chat_stream", {
-    userText,
-    sessionId,
-    onDelta,
-  });
+  invokeWithTimeout<DialogueOutcome>(
+    "dialogue_chat_stream",
+    { userText, sessionId, onDelta },
+    DIALOGUE_IPC_TIMEOUT_MS
+  );
+/** 中止当前回合（后端 T4 的取消标志）：超时/用户点「停」时前后端对齐。 */
+export const dialogueCancel = (taskId: string) =>
+  call<void>("dialogue_cancel", { taskId });
 
 /** 对话页启动回放 + 向上分页：最近消息流平铺气泡（旧→新）；
  *  beforeId 为滚动加载游标（只取更早的行）。 */

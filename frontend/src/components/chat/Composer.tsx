@@ -6,10 +6,13 @@ import { shouldBlockSubmit } from "@/lib/ime";
 
 export function Composer({
   onSend,
+  onCancel,
   chatBusy,
   inputRef,
 }: {
   onSend: (text: string) => void;
+  /** 回合进行中显示「停」：叫停后端，不是撤气泡 */
+  onCancel?: () => void;
   chatBusy: boolean;
   inputRef?: React.RefObject<HTMLTextAreaElement>;
 }) {
@@ -58,12 +61,26 @@ export function Composer({
           submit();
         }}
       />
-      <button type="submit" className="send" aria-label="发送" disabled={!canSend}>
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <line x1="12" y1="19" x2="12" y2="6" />
-          <polyline points="6 12 12 6 18 12" />
-        </svg>
-      </button>
+      {chatBusy && onCancel ? (
+        <button
+          type="button"
+          className="send stop"
+          aria-label="停止"
+          title="叫停这一轮"
+          onClick={onCancel}
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="7" y="7" width="10" height="10" rx="2" />
+          </svg>
+        </button>
+      ) : (
+        <button type="submit" className="send" aria-label="发送" disabled={!canSend}>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <line x1="12" y1="19" x2="12" y2="6" />
+            <polyline points="6 12 12 6 18 12" />
+          </svg>
+        </button>
+      )}
     </form>
   );
 }

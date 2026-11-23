@@ -38,7 +38,7 @@ function bubblesFromHistory(
 
 export function ChatPane() {
   const messages = useChatStore((s) => s.messages);
-  const { send, chatting } = useChat();
+  const { send, chatting, cancel } = useChat();
   const scrollRef = useRef<HTMLDivElement>(null);
   const [showToBottom, setShowToBottom] = useState(false);
 
@@ -215,7 +215,7 @@ export function ChatPane() {
         )}
       </div>
 
-      <Composer onSend={send} chatBusy={chatting} />
+      <Composer onSend={send} onCancel={cancel} chatBusy={chatting} />
     </>
   );
 }
