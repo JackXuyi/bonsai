@@ -224,12 +224,20 @@ tokens(s) = 4                                   # 每条消息结构开销
 ### 6.3 装配（`context::build`）
 
 ```rust
+// T2 实际落地形状（`truncated_tools` 随 T3 轮内压缩一起加，先不占位）
+pub struct BuildInput<'a> {
+    pub env: &'a str,              // 环境段（拼接在最前，与旧行为一致）
+    pub body: &'a str,             // 画像 + 宪法 + 边界 + skill 段
+    pub digest: Option<&'a str>,   // T6 才写库，现一律 None
+    pub history: Vec<Turn>,        // 已按 12 轮上限读出，oldest first
+    pub user_text: &'a str,        // 不截，只计估算
+    pub reserve_tool_room: bool,   // 云端工具循环 true；本地模式 false
+}
 pub struct Built {
-    pub system: String,          // env + profile + 宪法 + 边界 + skill 段 + digest 段
-    pub turns: Vec<Turn>,        // 已按预算裁剪，oldest first
-    pub dropped: usize,          // 丢了几轮（给 trace）
+    pub system: String,            // env + body（+ digest 段）
+    pub turns: Vec<Turn>,          // 已按预算裁剪，oldest first
+    pub dropped: usize,            // 丢了几轮（给 trace）
     pub est_tokens: usize,
-    pub truncated_tools: bool,
 }
 ```
 
@@ -241,6 +249,8 @@ pub struct Built {
 4. 丢掉的轮交给 L1 抽成短行，合并进 digest（写库，见 §6.4）；
 5. 本轮用户消息无条件保留；
 6. 返回 `system + turns + user`，并回报 `est_tokens`。
+
+> **`reserve_tool_room` 的由来（T2 实测修正）**：原方案一律按「可用 − 固定 − 工具额度」算历史空间。但本地模式**零工具调用**（2B 不挂 `tools[]`），预留 40% 等于白扔 1.6k——8192 窗口下历史会从 6 轮掉到 2 轮。因此装配层只在「云端 + 本轮确有工具能力」时预留；本地模式 `room = usable − fixed`。
 
 > `digest` 进 system 段末尾（标 `# 较早对话摘要（系统压缩，非用户原话）`），不进历史数组——避免它被当成「用户说过的话」参与配对。
 
@@ -402,7 +412,7 @@ pub struct Built {
 
 > D1–D3 是主干，定了才能开工；D4–D8 可以边做边定，但 D5 建议在做 T2 前定（它决定本地预算数字）。
 >
-> **实施状态（2026-11-23）**：T1 按 D1 建议值 `32000` 落地（`SOFT_BUDGET_DEFAULT`），软预算可由 `Budget::new` 覆盖，不锁死。D2 / D5 及 D6–D8 仍在对应期开工前确认。
+> **实施状态（2026-11-23）**：D1 按建议值 `32000` 落地（`SOFT_BUDGET_DEFAULT`，可被 `Budget::new` 覆盖）；**D5 裁决 8192（T2 已落地，`llm/ollama.rs::NUM_CTX`），历史轮上限同步 6 → 12（仍由预算兜底）**。D2 及 D6–D8 仍在对应期开工前确认。
 
 ---
 
@@ -411,7 +421,7 @@ pub struct Built {
 | 期 | 提交 | 门禁 | 备注 |
 |---|---|---|---|
 | T1 | `b2737c3` | `cargo test --lib` 486 passed（+16：估算器 6 / 窗口表 3 / 预算 5 / 分段表 2）；`cargo check` 仅既有 `dialogue.rs:101` dead_code | `context.rs` 落地：估算器（汉字 1.0 / 拉丁 1/4 / 符号 0.75，整体向上取整）+ 窗口表（deepseek 128k / claude 200k / openai 128k / 本地取 `num_ctx` / 未知 32k）+ `Budget`（`usable = min(window,soft) − 4096`、`tool_room` 40%、`history_room` 饱和减法）+ 7 个固定段上限。**零接线**：`dialogue.rs` 一行未改 |
-| T2 | | | |
+| T2 | `bb4c8da` | `cargo test --lib` 495 passed（+9：装配 7 / 接线 1 / num_ctx 1）；`tsc --noEmit` 0 错；`vitest run` 170 passed；`cargo check` 仅既有 `TraceRecorder::new` dead_code | `context::build`（`BuildInput`/`Built`/L0/摘要位）+ 唯一装配点接线（原 `1531-1536` 的 `format!(env+body)` 改为 build）；**D5 = 8192** 落地（`ollama::NUM_CTX`，请求带显式 `num_ctx`）；历史上限 6 → `HISTORY_MAX_TURNS=12`；本地不预留给工具额度（云端才留）；trace 增 `context_budget` 步（est/usable/window/dropped） |
 | T3 | | | |
 | T4 | | | |
 | T5 | | | |
@@ -426,3 +436,4 @@ pub struct Built {
 |---|---|---|
 | v0.1 | 2026-11-23 | 初稿：现状锚点、三段预算、三级压缩、schema v15、T1–T7、A1–A17、D1–D8 |
 | v0.1.1 | 2026-11-23 | T1 落地：`context.rs` 估算器 / 窗口表 / `Budget` / 分段上限；方案本身无变更 |
+| v0.2 | 2026-11-23 | T2 落地：§6.3 换成实际签名（`BuildInput` / `reserve_tool_room`，`truncated_tools` 延到 T3）；D5 裁决 8192、历史 6 → 12；trace 增 `context_budget` 步 |
