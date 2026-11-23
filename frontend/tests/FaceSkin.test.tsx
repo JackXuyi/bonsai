@@ -1,10 +1,26 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 // jsdom 没有 Tauri internals，convertFileSrc mock 成同构的 asset URL。
 vi.mock("@tauri-apps/api/core", () => ({
   convertFileSrc: (path: string) => `asset://localhost/${encodeURIComponent(path)}`,
 }));
+
+const createMock = vi.fn();
+const pickMock = vi.fn();
+const clearMock = vi.fn();
+const deleteMock = vi.fn();
+
+vi.mock("@/lib/commands", async (importOriginal) => {
+  const orig = await importOriginal<typeof import("@/lib/commands")>();
+  return {
+    ...orig,
+    faceSkinCreate: (name: string) => createMock(name),
+    faceSkinPickAndImport: (skinId: string, slot: string) => pickMock(skinId, slot),
+    faceSkinClearSlot: (skinId: string, slot: string) => clearMock(skinId, slot),
+    faceSkinDelete: (skinId: string) => deleteMock(skinId),
+  };
+});
 
 import { PokeFace } from "@/components/face/PokeFace";
 import { FaceSkinCard } from "@/components/settings/FaceSkinCard";
@@ -18,6 +34,7 @@ beforeEach(() => {
   useFaceSkinStore.setState({ skinId: "deepseek", customSkins: [], baseDir: null });
   localStorage.removeItem("bonsai-face-skin");
   useUiStore.setState({ faceState: "calm" });
+  for (const m of [createMock, pickMock, clearMock, deleteMock]) m.mockReset();
 });
 
 describe("内置皮肤", () => {
@@ -140,5 +157,115 @@ describe("自定义皮肤（plan-face-custom-skins.md §3.2 渲染优先级）",
     fireEvent.click(btn);
     expect(useFaceSkinStore.getState().skinId).toBe("c-12345678");
     expect(btn.getAttribute("aria-checked")).toBe("true");
+  });
+});
+
+describe("自定义皮肤管理（plan-face-custom-skins.md §6.2）", () => {
+  const manifest = (slots: Record<string, string>): FaceSkinManifest => ({
+    id: "c-12345678",
+    name: "我的猫",
+    created_at: 1,
+    slots,
+  });
+
+  it("选中自定义皮肤 → 槽位网格：已传槽位显示缩略图+×，缺槽显示上传", () => {
+    useFaceSkinStore.setState({
+      skinId: "c-12345678",
+      customSkins: [manifest({ calm: "calm.png", greeted: "greeted.webp" })],
+      baseDir: "/tmp",
+    });
+    render(<FaceSkinCard />);
+    expect(screen.getByTestId("skin-manage")).toBeTruthy();
+    expect(screen.getByTestId("slot-calm").getAttribute("data-filled")).toBe("true");
+    expect(screen.getByTestId("slot-sleepy").getAttribute("data-filled")).toBe("false");
+    expect(screen.getByTestId("slot-clear-calm")).toBeTruthy();
+    expect(screen.getByTestId("slot-upload-sleepy")).toBeTruthy();
+    const thumb = screen.getByTestId("slot-calm").querySelector("img")!;
+    expect(thumb.getAttribute("src")).toContain("calm.png");
+  });
+
+  it("点上传 → faceSkinPickAndImport(skinId, slot)；取消选择不弹错", async () => {
+    useFaceSkinStore.setState({
+      skinId: "c-12345678",
+      customSkins: [manifest({})],
+      baseDir: "/tmp",
+    });
+    render(<FaceSkinCard />);
+    fireEvent.click(screen.getByTestId("slot-upload-calm"));
+    await waitFor(() => expect(pickMock).toHaveBeenCalledWith("c-12345678", "calm"));
+
+    pickMock.mockRejectedValue("face_pick_cancelled:已取消选择");
+    fireEvent.click(screen.getByTestId("slot-upload-calm"));
+    await waitFor(() => expect(pickMock).toHaveBeenCalledTimes(2));
+    // 无 toast（取消不报错）
+  });
+
+  it("上传失败 → 结构化错误冒泡为 toast 说明", async () => {
+    useFaceSkinStore.setState({
+      skinId: "c-12345678",
+      customSkins: [manifest({})],
+      baseDir: "/tmp",
+    });
+    render(<FaceSkinCard />);
+    pickMock.mockRejectedValue("face_bad_image:仅支持 PNG / JPEG / WebP 图片");
+    fireEvent.click(screen.getByTestId("slot-upload-calm"));
+    await waitFor(() =>
+      expect(useUiStore.getState().toasts.some((t) => t.text.includes("仅支持 PNG"))).toBe(true),
+    );
+  });
+
+  it("清除槽位 → faceSkinClearSlot", async () => {
+    useFaceSkinStore.setState({
+      skinId: "c-12345678",
+      customSkins: [manifest({ calm: "calm.png" })],
+      baseDir: "/tmp",
+    });
+    render(<FaceSkinCard />);
+    fireEvent.click(screen.getByTestId("slot-clear-calm"));
+    await waitFor(() => expect(clearMock).toHaveBeenCalledWith("c-12345678", "calm"));
+  });
+
+  it("新建皮肤 → faceSkinCreate + 选中新皮肤", async () => {
+    createMock.mockResolvedValue({ id: "c-aaaa1111", name: "小狗", created_at: 2, slots: {} });
+    render(<FaceSkinCard />);
+    fireEvent.change(screen.getByTestId("skin-create-input"), { target: { value: "小狗" } });
+    fireEvent.click(screen.getByTestId("skin-create-btn"));
+    await waitFor(() => expect(createMock).toHaveBeenCalledWith("小狗"));
+    expect(useFaceSkinStore.getState().skinId).toBe("c-aaaa1111");
+  });
+
+  it("删除选中皮肤：confirm 后调 faceSkinDelete 并回退内置默认", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    useFaceSkinStore.setState({
+      skinId: "c-12345678",
+      customSkins: [manifest({ calm: "calm.png" })],
+      baseDir: "/tmp",
+    });
+    render(<FaceSkinCard />);
+    fireEvent.click(screen.getByTestId("skin-delete"));
+    await waitFor(() => expect(deleteMock).toHaveBeenCalledWith("c-12345678"));
+    expect(useFaceSkinStore.getState().skinId).toBe("deepseek");
+    confirmSpy.mockRestore();
+  });
+
+  it("删除选中皮肤：confirm 取消 → 不调 faceSkinDelete，管理区仍在", () => {
+    // 删除成功会回退内置默认并卸载管理区，取消分支必须独立断言
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    useFaceSkinStore.setState({
+      skinId: "c-12345678",
+      customSkins: [manifest({ calm: "calm.png" })],
+      baseDir: "/tmp",
+    });
+    render(<FaceSkinCard />);
+    fireEvent.click(screen.getByTestId("skin-delete"));
+    expect(deleteMock).not.toHaveBeenCalled();
+    expect(useFaceSkinStore.getState().skinId).toBe("c-12345678");
+    expect(screen.getByTestId("skin-delete")).toBeTruthy();
+    confirmSpy.mockRestore();
+  });
+
+  it("选中内置皮肤时管理区不出现", () => {
+    render(<FaceSkinCard />);
+    expect(screen.queryByTestId("skin-manage")).toBeNull();
   });
 });

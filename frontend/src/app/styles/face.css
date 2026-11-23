@@ -237,3 +237,108 @@ svg[data-dormant="true"] .flower {
   font-size: 12px;
   opacity: 0.6;
 }
+
+/* ── 自定义皮肤管理（SkinSlotGrid + FaceSkinCard 管理区） ────────── */
+.skin-manage {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--line, #e3e6ee);
+}
+.skin-manage-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.skin-manage-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+.skin-danger {
+  border: 0;
+  background: transparent;
+  color: #b3552e;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 6px;
+}
+.skin-danger:hover {
+  text-decoration: underline;
+}
+.skin-slot-grid {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.skin-slot {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  width: 72px;
+}
+.skin-slot-img {
+  width: 56px;
+  height: 56px;
+  object-fit: contain;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.03);
+}
+.skin-slot-empty {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 56px;
+  height: 56px;
+  border: 1px dashed var(--line, #c9cfdd);
+  border-radius: 8px;
+  font-size: 11px;
+  opacity: 0.55;
+}
+.skin-slot-btn {
+  border: 0;
+  background: transparent;
+  font-size: 11px;
+  cursor: pointer;
+  color: #4c8c2b;
+  padding: 0 2px;
+}
+.skin-slot-btn:hover {
+  text-decoration: underline;
+}
+.skin-slot[data-filled="false"] .skin-slot-btn {
+  color: #6a8fb3;
+}
+.skin-slot-hint {
+  margin: 8px 0 0;
+  font-size: 12px;
+  opacity: 0.6;
+}
+.skin-create-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+}
+.skin-create-input {
+  flex: 1;
+  max-width: 240px;
+  padding: 6px 10px;
+  border: 1px solid var(--line, #dfe3ec);
+  border-radius: 8px;
+  font-size: 13px;
+  background: transparent;
+}
+.skin-create-btn {
+  border: 1px solid var(--leaf, #4c8c2b);
+  background: transparent;
+  color: var(--leaf, #4c8c2b);
+  border-radius: 8px;
+  font-size: 13px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+.skin-create-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
