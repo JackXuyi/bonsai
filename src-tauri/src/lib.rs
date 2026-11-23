@@ -40,6 +40,7 @@ pub mod skill;
 pub mod skill_remote;
 pub mod webtools;
 pub mod summary;
+pub mod tool_cache;
 pub mod tools;
 pub mod tray;
 
