@@ -20,20 +20,89 @@ fn sidecar_name() -> String {
         "x86_64" => "x86_64",
         other => other,
     };
-    format!("ollama-{arch}-apple-darwin")
+    let triple = match std::env::consts::OS {
+        "macos" => "apple-darwin",
+        "windows" => "pc-windows-msvc",
+        other => other,
+    };
+    let name = format!("ollama-{arch}-{triple}");
+    if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name
+    }
 }
 
 /// Candidate paths for the bundled binary, in lookup order.
 ///
 /// tauri-build strips the target-triple suffix when it copies `externalBin`
 /// next to the app executable: dev = `target/debug/ollama`, packaged macOS =
-/// `Contents/MacOS/ollama`. The suffixed name is only present if someone
-/// dropped the raw build asset there by hand, so it is just a fallback.
+/// `Contents/MacOS/ollama`, packaged Windows = `ollama.exe`. The suffixed name
+/// is only present if someone dropped the raw build asset there by hand, so it
+/// is just a fallback.
 fn sidecar_candidates() -> Vec<PathBuf> {
     let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) else {
         return Vec::new();
     };
-    vec![dir.join("ollama"), dir.join(sidecar_name())]
+    vec![
+        dir.join("ollama"),
+        dir.join("ollama.exe"),
+        dir.join(sidecar_name()),
+    ]
+}
+
+/// Runner file name Ollama v0.40+ looks for next to its CLI.
+fn runner_name() -> &'static str {
+    if cfg!(windows) { "llama-server.exe" } else { "llama-server" }
+}
+
+/// Packaged bundles keep the inference runtime under `$RESOURCE`, while the
+/// Ollama CLI looks for `llama-server` (and its dylibs/DLLs) next to itself.
+/// Stage a copy beside the sidecar once, before the first spawn. Dev builds
+/// already get these files from `build.rs`, so they skip this entirely.
+fn stage_packaged_runtime(app: &tauri::AppHandle, sidecar_dir: &std::path::Path) {
+    if tauri::is_dev() || sidecar_dir.join(runner_name()).exists() {
+        return;
+    }
+    let Ok(resources) = app.path().resource_dir() else {
+        log::warn!("cannot resolve resource_dir — packaged local LLM will not start");
+        return;
+    };
+    let src = resources.join("ollama-runtime");
+    if !src.is_dir() {
+        log::warn!("bundled runtime missing at {} — local LLM will not start", src.display());
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(&src) else { return };
+    for entry in entries.flatten() {
+        let from = entry.path();
+        let to = sidecar_dir.join(entry.file_name());
+        if to.exists() {
+            continue;
+        }
+        let copied = if from.is_dir() {
+            copy_dir_recursive(&from, &to)
+        } else {
+            std::fs::copy(&from, &to).map(|_| ())
+        };
+        if let Err(e) = copied {
+            log::warn!("cannot stage runtime {:?} next to sidecar: {e}", entry.file_name());
+        }
+    }
+}
+
+fn copy_dir_recursive(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let dest = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&entry.path(), &dest)?;
+        } else {
+            std::fs::copy(entry.path(), &dest)?;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn sidecar_path() -> Option<PathBuf> {
@@ -132,9 +201,11 @@ fn attempt_start(app: &tauri::AppHandle, probe: &OllamaClient) -> Outcome {
     // Since v0.40 inference needs the separate `llama-server` runner next
     // to the CLI; without it the server starts but every chat call fails.
     if let Some(dir) = path.parent() {
-        if !dir.join("llama-server").exists() {
+        stage_packaged_runtime(app, dir);
+        if !dir.join(runner_name()).exists() {
             log::warn!(
-                "llama-server runner missing next to the sidecar — run 'pnpm llm:sidecar' (chats will fail otherwise)"
+                "{} runner missing next to the sidecar — run 'pnpm llm:sidecar' (chats will fail otherwise)",
+                runner_name()
             );
         }
     }
@@ -214,20 +285,22 @@ mod tests {
     #[test]
     fn sidecar_name_follows_tauri_convention() {
         let name = sidecar_name();
+        let suffix = if cfg!(windows) { "pc-windows-msvc.exe" } else { "apple-darwin" };
         assert!(name.starts_with("ollama-"));
-        assert!(name.ends_with("-apple-darwin"));
+        assert!(name.ends_with(suffix));
     }
 
     #[test]
     fn sidecar_lookup_prefers_the_stripped_name_tauri_copies() {
         // tauri-build drops the triple suffix when copying externalBin next to
-        // the executable, so plain `ollama` must be probed first — this was
-        // exactly why the server never started in dev.
+        // the executable (`ollama` / `ollama.exe`), so plain names must be
+        // probed first — this was why the server never started in dev.
         let candidates = sidecar_candidates();
-        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates.len(), 3);
         assert_eq!(candidates[0].file_name().unwrap().to_str(), Some("ollama"));
+        assert_eq!(candidates[1].file_name().unwrap().to_str(), Some("ollama.exe"));
         assert_eq!(
-            candidates[1].file_name().unwrap().to_str(),
+            candidates[2].file_name().unwrap().to_str(),
             Some(sidecar_name().as_str())
         );
     }

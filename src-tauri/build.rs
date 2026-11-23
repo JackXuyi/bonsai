@@ -46,10 +46,18 @@ fn stage_sidecar_runtime() {
         let Ok(file_type) = entry.file_type() else { continue };
         if file_type.is_symlink() {
             // Versioned dylib names are real files; the unversioned ones are
-            // symlinks that the runtime's install names rely on.
+            // symlinks that the runtime's install names rely on. Windows
+            // runners often cannot create symlinks without developer mode,
+            // so materialise a real copy there instead.
             if let Ok(target) = std::fs::read_link(&from) {
                 let _ = std::fs::remove_file(&to);
-                let _ = std::os::unix::fs::symlink(target, &to);
+                #[cfg(unix)]
+                let _ = std::os::unix::fs::symlink(&target, &to);
+                #[cfg(windows)]
+                {
+                    let resolved = from.parent().unwrap_or_default().join(target);
+                    let _ = std::fs::copy(&resolved, &to);
+                }
             }
         } else if file_type.is_dir() {
             // MLX runtime lives in mlx_metal_v3/ / mlx_metal_v4/ subdirs.
@@ -91,14 +99,27 @@ fn ensure_sidecar_placeholder() {
         "x86_64" => "x86_64",
         _ => return, // unsupported platform: leave validation to tauri-build
     };
-    let path = std::path::Path::new("binaries").join(format!("ollama-{arch}-apple-darwin"));
+    let triple = match std::env::consts::OS {
+        "macos" => "apple-darwin",
+        "windows" => "pc-windows-msvc",
+        _ => return, // Linux sidecar is not shipped yet
+    };
+    let windows = triple == "pc-windows-msvc";
+    let file = format!("ollama-{arch}-{triple}{}", if windows { ".exe" } else { "" });
+    let path = std::path::Path::new("binaries").join(file);
     if path.exists() {
         return; // real sidecar (or a previous placeholder) is in place
     }
     if std::fs::create_dir_all("binaries").is_err() {
         return;
     }
-    let script = "#!/bin/sh\n# bonsai placeholder: run 'pnpm llm:sidecar' to install the real Ollama binary\nexit 1\n";
+    // A tiny text file is enough for tauri-build's existence check; it exits
+    // non-zero at runtime so the app logs a warning and uses rule fallbacks.
+    let script = if windows {
+        "@echo off\r\nREM bonsai placeholder: run 'pnpm llm:sidecar' for the real Ollama binary\r\nexit /b 1\r\n"
+    } else {
+        "#!/bin/sh\n# bonsai placeholder: run 'pnpm llm:sidecar' for the real Ollama binary\nexit 1\n"
+    };
     if std::fs::write(&path, script).is_ok() {
         #[cfg(unix)]
         {
