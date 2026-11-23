@@ -3,8 +3,9 @@
 // 可点的脸：poke 波纹动画 + facePoke 命令 + 浏览器预览的 greeted 演示
 // （旧 Hero 的 onClick/poke 逻辑拆出——侧栏迷你脸与表情页大脸共用）。
 import { useRef, useState } from "react";
-import { BonsaiFace } from "./BonsaiFace";
 import { POKE_LINES } from "./frames";
+import { faceSkinById } from "./skins";
+import { useFaceSkinStore } from "@/lib/stores/faceSkinStore";
 import { facePoke } from "@/lib/commands";
 import { inTauri } from "@/lib/tauriInvoke";
 import { useUiStore } from "@/lib/stores/uiStore";
@@ -24,6 +25,8 @@ export function PokeFace({ size, frame }: PokeFaceProps) {
 
   const stage = stagePreview?.stage ?? growth?.stage ?? 0;
   const dormant = stagePreview?.dormant ?? growth?.dormant ?? false;
+  const skin = faceSkinById(useFaceSkinStore((s) => s.skinId));
+  const Skin = skin.Component;
 
   function onClick() {
     setPoked(false);
@@ -47,12 +50,13 @@ export function PokeFace({ size, frame }: PokeFaceProps) {
     <button
       className={`face face-${size}${poked ? " poked" : ""}`}
       data-state={faceState}
+      data-skin={skin.id}
       aria-label="和阿盆打招呼"
       title="点一下，打个招呼"
       onClick={onClick}
     >
       <span className="ripple" aria-hidden="true" />
-      <BonsaiFace
+      <Skin
         state={faceState}
         frame={frame}
         stage={stage}

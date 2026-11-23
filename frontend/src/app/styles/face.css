@@ -160,3 +160,80 @@ svg[data-dormant="true"] .flower {
   stroke-width: 3;
   stroke-linecap: round;
 }
+
+/* ── image skin（图片形象，skins.tsx makeImageSkin） ──────────────── */
+.face img {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: contain;
+  transition: filter 0.5s ease, transform 0.35s ease;
+}
+/* 帧轻浮动（对应盆栽的 translateY 帧动画） */
+.face img[data-frame="1"] {
+  transform: translateY(-3px);
+}
+/* 休眠：降饱和偏灰 */
+.face img[data-dormant="true"] {
+  filter: grayscale(0.7) opacity(0.8);
+}
+/* 光晕/涟漪随皮肤着色（默认绿色是盆栽的） */
+.face[data-skin="deepseek"]::before {
+  background: radial-gradient(circle at 50% 42%, rgba(77, 107, 254, 0.13), transparent 68%);
+}
+.face[data-skin="deepseek"] .ripple {
+  background: radial-gradient(circle, rgba(77, 107, 254, 0.3), transparent 68%);
+}
+
+/* ── 形象选择卡（FaceSkinCard，设置页） ─────────────────────────── */
+.skin-options {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.skin-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--line, #e3e6ee);
+  border-radius: 12px;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+.skin-option.on {
+  border-color: var(--leaf, #4c8c2b);
+  background: rgba(76, 140, 43, 0.06);
+}
+.skin-preview {
+  display: inline-flex;
+  width: 56px;
+  height: 56px;
+  flex: none;
+}
+.skin-preview svg,
+.skin-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.skin-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.skin-name {
+  font-weight: 600;
+  font-size: 13px;
+}
+.skin-desc {
+  font-size: 12px;
+  opacity: 0.65;
+}
+.skin-note {
+  margin: 10px 0 0;
+  font-size: 12px;
+  opacity: 0.6;
+}
