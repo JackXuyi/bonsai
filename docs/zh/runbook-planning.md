@@ -151,7 +151,7 @@ git commit -m "<中文 subject>"
 | T3 | `cdf1ea8` `feat(planning): 计划步骤状态桥` | `cargo check` 通过；`cargo test --lib` 464 passed | — | 基线 462→464；按执行序号对齐，审计 id 前后水位关联，计划外追加 |
 | T4 | `010dfba` `feat(planning): 失败恢复与取消` | `cargo check` 通过；`cargo test --lib` 469 passed | — | 基线 464→469；AgentKit.canceled + 全局注册表 + dialogue_cancel 命令 |
 | T5 | `d84035f` `feat(planning): trace 计划卡可读化` | `cargo test --lib` 469 passed；`npx tsc --noEmit` 0 错；`vitest run` 148 passed | — | 后端补 `step_state` 记录点（`bridge_plan_step` 返回审计 id）；前端类型补三枚举 + 计划卡（`PlanSubmitBlock`/`PlanStateBlock`）+ 7 个解析/渲染单测 |
-| T6 | `feat(planning): 工具页计划进度面板`（待提交） | `cargo test --lib` 469 passed；`npx tsc --noEmit` 0 错；`vitest run` 165 passed | — | 148→165：`planStore`（事件乱序/重复/终态对齐 10）+ 卡片（首屏回放/实时推进/只读/历史/空态 5）+ 消息流隔离 A15（2）。`plan_list` 实装在 `mcp_admin.rs`（命令都住模块里，`lib.rs` 只登记）；`task_canceled` 无 id → store 归到 current；新增 `--ok/--warn/--danger` 语义色 |
+| T6 | `7b27550` `feat(planning): 工具页计划进度面板` | `cargo test --lib` 469 passed；`npx tsc --noEmit` 0 错；`vitest run` 165 passed | — | 148→165：`planStore`（事件乱序/重复/终态对齐 10）+ 卡片（首屏回放/实时推进/只读/历史/空态 5）+ 消息流隔离 A15（2）。`plan_list` 实装在 `mcp_admin.rs`（命令都住模块里，`lib.rs` 只登记）；`task_canceled` 无 id → store 归到 current；新增 `--ok/--warn/--danger` 语义色 |
 | T7 | | | | |
 
 ---

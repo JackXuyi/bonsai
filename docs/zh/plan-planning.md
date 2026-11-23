@@ -364,7 +364,7 @@ ALTER TABLE tasks ADD COLUMN confirm_mode  TEXT NOT NULL DEFAULT 'auto'; -- D1: 
 | T3 | `cdf1ea8` | `cargo test --lib` 464 passed | 步骤状态桥（done/skipped/failed + 审计 id 关联 + 计划外追加）|
 | T4 | `010dfba` | `cargo test --lib` 469 passed | 有界重试 + 取消标志 + dialogue_cancel 命令 + 预算/取消收尾 |
 | T5 | `d84035f` | `cargo test --lib` 469 passed；`tsc --noEmit` 0 错；`vitest run` 148 passed | `step_state` 记录点 + `/trace` 计划卡（`plan_submit` 目标+步骤、`step_state` 状态+审计 id）；前端类型补三枚举 + 解析容错单测 |
-| T6 | 待提交 | `cargo test --lib` 469 passed；`tsc --noEmit` 0 错；`vitest run` 165 passed | `plan_list` 命令 + `planStore`（回放/实时合流）+ 工具页 `PlanProgressCard` 只读卡；17 个新单测（store 10 / 卡片 5 / 消息流隔离 2）|
+| T6 | `7b27550` | `cargo test --lib` 469 passed；`tsc --noEmit` 0 错；`vitest run` 165 passed | `plan_list` 命令 + `planStore`（回放/实时合流）+ 工具页 `PlanProgressCard` 只读卡；17 个新单测（store 10 / 卡片 5 / 消息流隔离 2）|
 
 **T2 实现与设计的小偏差（不影响约束）**：计划轮在 `chat_with_tools` 的 msgs 尾部追加一条系统指令 user 消息（「只调用 submit_plan」），使模型明确协议；计划 msgs 用 `msgs.clone()`，不污染主循环消息序列。计划轮 HTTP 计入 `CLOUD_REQUEST_CAP`（不放大预算）。任务卡改为「计划成功即开卡」（原惰性开卡太晚，plan_json 需先有归属行），后续真实工具循环见 `task_open=true` 不再重复开卡。`submit_plan` 不落审计行（`execute_audited` 不认识它），只有真实工具审计关联 task。
 
