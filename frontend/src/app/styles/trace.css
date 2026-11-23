@@ -443,6 +443,15 @@
   padding: 2px 0;
 }
 
+/* S2：窗口外的长期记忆（跨时间召回），与窗口内结果在视觉上分开 */
+.trace-tool-beyond {
+  border-top-style: dashed;
+}
+
+.trace-tool-beyond li .trace-tool-ts {
+  margin-right: 6px;
+}
+
 /* —— 空态 / 载入中 —— */
 .trace-empty {
   padding: 48px 0;

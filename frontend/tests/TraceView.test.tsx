@@ -178,6 +178,40 @@ describe("TraceView（spec-s8 追踪页）", () => {
     expect(screen.getByText("关键词未命中 · 已退回整窗")).toBeTruthy();
   });
 
+  it("memory_search 带 beyond → 卡片单列「更早的记忆（窗口外）」", async () => {
+    const memorySummary = JSON.stringify({
+      window: "最近一周",
+      dialogue_count: 1,
+      fact_count: 0,
+      degraded: false,
+      lines: [{ ts: "11-30 21:00", who: "用户", text: "今天有点累" }],
+      facts: [],
+      beyond: [{ tag: "09-01 事实", text: "用户对花生过敏，外出点餐要避开" }],
+    });
+    getMock.mockResolvedValue(
+      trace({
+        toolLabel: "builtin:memory_search",
+        steps: [
+          {
+            seq: 1,
+            stepKind: "tool_call",
+            title: "工具调用 · memory_search",
+            argsJson: '{"query":"我对花生过敏吗"}',
+            summary: memorySummary,
+            outcome: "ok",
+            durationMs: 4,
+            ts: "2026-12-01T22:05:00+08:00",
+          },
+        ],
+      })
+    );
+    render(<TraceView turnId={419} />);
+    fireEvent.click(await screen.findByText(/工具调用 · memory_search/));
+    expect(screen.getByText("更早的记忆（窗口外）")).toBeTruthy();
+    expect(screen.getByText("09-01 事实")).toBeTruthy();
+    expect(screen.getByText("用户对花生过敏，外出点餐要避开")).toBeTruthy();
+  });
+
   it("memory_search 无 degraded 字段 → 不出现降级标记（向后兼容）", async () => {
     const memorySummary = JSON.stringify({
       window: "11月20日（周五）",

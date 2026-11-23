@@ -135,6 +135,8 @@ interface MemoryResultData {
   degraded?: boolean;
   lines?: { ts?: string; who?: string; text?: string }[];
   facts?: string[];
+  /** S2 跨时间腿：窗口外按相关度召回的长期记忆（事实/偏好/边界）。 */
+  beyond?: { tag?: string; text?: string }[];
 }
 
 /** 工具返回摘要：认识 memory_search 形态 → 结构化卡片；其他 JSON →
@@ -162,6 +164,7 @@ export function ToolResultBlock({ text }: { text: string }) {
 function MemoryResultCard({ data }: { data: MemoryResultData }) {
   const lines = data.lines ?? [];
   const facts = data.facts ?? [];
+  const beyond = data.beyond ?? [];
   return (
     <div className="trace-tool-result">
       <div className="trace-tool-head">
@@ -171,7 +174,7 @@ function MemoryResultCard({ data }: { data: MemoryResultData }) {
         </span>
         {data.degraded && <span className="trace-tool-degraded">关键词未命中 · 已退回整窗</span>}
       </div>
-      {lines.length === 0 && facts.length === 0 && (
+      {lines.length === 0 && facts.length === 0 && beyond.length === 0 && (
         <p className="trace-tool-empty">没有找到对话记录。</p>
       )}
       {lines.length > 0 && (
@@ -191,6 +194,19 @@ function MemoryResultCard({ data }: { data: MemoryResultData }) {
           <ul className="trace-tool-facts-list">
             {facts.map((f, i) => (
               <li key={i}>{f}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {beyond.length > 0 && (
+        <div className="trace-tool-facts trace-tool-beyond">
+          <span className="trace-tool-facts-label">更早的记忆（窗口外）</span>
+          <ul className="trace-tool-facts-list">
+            {beyond.map((b, i) => (
+              <li key={i}>
+                {b.tag && <span className="trace-tool-ts">{b.tag}</span>}
+                {b.text ?? ""}
+              </li>
             ))}
           </ul>
         </div>
