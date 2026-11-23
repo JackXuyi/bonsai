@@ -250,10 +250,18 @@ pub struct ClassScore {
 
 impl ClassScore {
     pub fn pure_rate(&self) -> f64 {
-        if self.total == 0 { 0.0 } else { self.pure as f64 / self.total as f64 }
+        if self.total == 0 {
+            0.0
+        } else {
+            self.pure as f64 / self.total as f64
+        }
     }
     pub fn hit_rate(&self) -> f64 {
-        if self.total == 0 { 0.0 } else { self.hits as f64 / self.total as f64 }
+        if self.total == 0 {
+            0.0
+        } else {
+            self.hits as f64 / self.total as f64
+        }
     }
 }
 
@@ -301,7 +309,12 @@ impl Report {
         }
         out.push_str("\n命中来源分布：\n");
         for o in self.outcomes.iter().filter(|o| o.hit()) {
-            out.push_str(&format!("  [{}] {} → {}\n", o.class.label(), o.question, o.source()));
+            out.push_str(&format!(
+                "  [{}] {} → {}\n",
+                o.class.label(),
+                o.question,
+                o.source()
+            ));
         }
         out
     }
@@ -369,10 +382,20 @@ fn measure(conn: &Connection, class: Class, question: &'static str, expect: &str
         .any(|k| TOPICS.iter().any(|t| t.utterance.contains(k.as_str())));
 
     let recall = memory_search::recall(conn, question);
-    let hit_lines = recall.lines.iter().any(|(_, _, text)| text.contains(expect));
+    let hit_lines = recall
+        .lines
+        .iter()
+        .any(|(_, _, text)| text.contains(expect));
     let hit_facts = recall.facts.iter().any(|f| f.contains(expect));
 
-    Outcome { class, question, legs, pure_leg, hit_lines, hit_facts }
+    Outcome {
+        class,
+        question,
+        legs,
+        pure_leg,
+        hit_lines,
+        hit_facts,
+    }
 }
 
 #[cfg(test)]
@@ -427,8 +450,10 @@ mod tests {
         let conn = bench();
         let report = run(&conn);
 
-        let hits: Vec<(Class, usize)> =
-            Class::ALL.iter().map(|c| (*c, report.score(*c).hits)).collect();
+        let hits: Vec<(Class, usize)> = Class::ALL
+            .iter()
+            .map(|c| (*c, report.score(*c).hits))
+            .collect();
         // 2026-11-23 首次测得的命中数（用例数 12/12/12/12/4）。S1/S2 或
         // embedding 上线后上调，永不为了「让测试过」而下调。
         // 「近义改写」是 0——这一行刻意留 0，它就是 embedding 的靶子：
@@ -441,11 +466,7 @@ mod tests {
             (Class::Anaphora, 2),
         ];
         for ((class, got), (_, need)) in hits.iter().zip(floor.iter()) {
-            assert!(
-                *got >= *need,
-                "{:?} 命中数从基线 {need} 掉到 {got}",
-                class
-            );
+            assert!(*got >= *need, "{:?} 命中数从基线 {need} 掉到 {got}", class);
         }
     }
 }
