@@ -36,10 +36,14 @@ const MAX_SCAN_FILES: usize = 500;
 const MAX_SEARCH_HITS: usize = 20;
 /// 授权目录上限（plan §7 开放问题 1：多了「最小授权」名存实亡）。
 const MAX_ROOTS: usize = 5;
-/// fs_read 的 model-visible summary 上限。**Deviation from the 200-char
-/// provider convention (deliberate, plan §3.3)**: 200 字读不完一篇文档，
-/// 「读文件 + 总结」就废了。沿 memory_search 1600 字的先例记 deviation。
+/// fs_read 单段默认长度（plan §3.3 deviation：200 字读不完一篇文档）。
 const READ_SUMMARY_CHARS: usize = 4000;
+/// fs_read 单段上限：模型显式要更大段也不超过这个数，防止一次烧爆单轮 token。
+const READ_SEGMENT_MAX_CHARS: usize = 8000;
+/// 长文件首读附带的全文大纲条数上限（markdown 标题行）。
+const OUTLINE_MAX_ITEMS: usize = 30;
+/// 大纲单条字符上限。
+const OUTLINE_ITEM_CHARS: usize = 80;
 /// cloud_read 关闭时 UI 侧可见的文件开头长度（内容不出机器）。
 const LOCAL_PREVIEW_CHARS: usize = 2000;
 /// 普通工具（search/list）维持 200 字惯例。
@@ -132,8 +136,8 @@ pub fn builtin_descriptors() -> Vec<ToolDescriptor> {
         },
         ToolDescriptor {
             name: "fs_read".into(),
-            summary: "读取授权目录内的文本文件（≤512KB），内容仅用于本次总结".into(),
-            detail: r#"{"type":"object","properties":{"path":{"type":"string","description":"要读取的文件的绝对路径"}},"required":["path"]}"#.into(),
+            summary: "读取授权目录内的文本文件（≤512KB）；长文件自动分段并附全文大纲，用 offset 参数继续读后续内容".into(),
+            detail: r#"{"type":"object","properties":{"path":{"type":"string","description":"要读取的文件的绝对路径"},"offset":{"type":"integer","description":"可选，从第 N 个字符开始读（首次读省略；文件较长时按返回提示传 offset 继续读）"},"max_chars":{"type":"integer","description":"可选，本次最多返回的字符数（默认 4000，上限 8000）"}},"required":["path"]}"#.into(),
             kind: ToolKind::Builtin,
             remote: false,
             access: ToolAccess::Read,
@@ -466,6 +470,27 @@ fn dir_entries(dir: &Path) -> Result<Vec<ListEntry>, FileError> {
     Ok(out)
 }
 
+/// markdown 标题行提取（`#`–`######` 后跟空白）。代码块里的 `#` 注释可能
+/// 混入，属可接受噪音——大纲只帮模型定位结构，不替代分段正文。
+fn extract_outline(content: &str) -> Vec<String> {
+    content
+        .lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            let hashes = t.chars().take_while(|c| *c == '#').count();
+            (1..=6).contains(&hashes)
+                && t.chars().nth(hashes).is_some_and(|c| c.is_whitespace())
+        })
+        .take(OUTLINE_MAX_ITEMS)
+        .map(|l| crate::agent_tools::clip_chars(&format!("- {l}"), OUTLINE_ITEM_CHARS))
+        .collect()
+}
+
+/// fs_read 的分段读语义（plan §7 开放问题 2 落地）：
+/// - 短文件（≤4000 字符）：整读直给，无分段脚手架（行为同旧版）；
+/// - 长文件首读：全文大纲（markdown 标题）+ 头段 + 续读提示；
+/// - 带 offset 读：返回指定段，末尾标注「未读完（含下一段 offset）」或「已到末尾」；
+/// - offset 按**字符**计（不是字节），CJK 内容切分安全。
 fn fs_read(roots: &[PathBuf], cloud_read: bool, args: &serde_json::Value) -> Result<ToolOutput, FileError> {
     let path = args
         .get("path")
@@ -495,14 +520,53 @@ fn fs_read(roots: &[PathBuf], cloud_read: bool, args: &serde_json::Value) -> Res
             full: head,
         });
     }
-    let head: String = content.chars().take(READ_SUMMARY_CHARS).collect();
-    let truncated = content.chars().count() > READ_SUMMARY_CHARS;
-    let summary = format!(
-        "{UNTRUSTED_TAG}\n文件：{display}（{} 字节）{}\n{}",
-        meta.len(),
-        if truncated { "…[截断]" } else { "" },
-        head
+    let total = content.chars().count();
+    let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let seg_len = args
+        .get("max_chars")
+        .and_then(|v| v.as_u64())
+        .map(|v| (v as usize).max(1))
+        .unwrap_or(READ_SUMMARY_CHARS)
+        .min(READ_SEGMENT_MAX_CHARS);
+
+    // 短文件且未指定 offset：保持旧版整读行为（无大纲/分段标记）。
+    if offset == 0 && total <= READ_SUMMARY_CHARS {
+        let summary = format!("{UNTRUSTED_TAG}\n文件：{display}（{} 字节）\n{content}", meta.len());
+        return Ok(ToolOutput { summary, full: content.to_string() });
+    }
+    if offset >= total {
+        return Ok(ToolOutput {
+            summary: format!(
+                "{UNTRUSTED_TAG}\n文件：{display}（共 {total} 字符）。offset {offset} 已超出文件末尾，无需继续读。"
+            ),
+            full: content.to_string(),
+        });
+    }
+    let segment: String = content.chars().skip(offset).take(seg_len).collect();
+    let end = offset + segment.chars().count();
+    let truncated = end < total;
+
+    let mut summary = format!(
+        "{UNTRUSTED_TAG}\n文件：{display}（{} 字节，共 {total} 字符）",
+        meta.len()
     );
+    if offset == 0 {
+        let outline = extract_outline(&content);
+        if !outline.is_empty() {
+            summary.push_str("\n\n【全文大纲】");
+            for item in &outline {
+                summary.push_str(&format!("\n{item}"));
+            }
+        }
+    }
+    summary.push_str(&format!("\n\n（以下为第 {}–{} 字符）\n{segment}", offset + 1, end));
+    if truncated {
+        summary.push_str(&format!(
+            "\n\n…[未读完：共 {total} 字符，已读 {end}。继续读请再调 fs_read，传 {{\"path\":\"{display}\",\"offset\":{end}}}]"
+        ));
+    } else {
+        summary.push_str("\n\n…[已到文件末尾]");
+    }
     Ok(ToolOutput { summary, full: content.to_string() })
 }
 
@@ -913,6 +977,68 @@ mod tests {
         assert!(out.summary.contains("云端读取已关闭"));
         assert!(out.full.contains("机密正文"), "UI 侧 full 仍可见开头");
         assert!(!out.summary.contains("机密正文"), "summary 不把正文喂给模型");
+    }
+
+    #[test]
+    fn fs_read_long_file_segments_with_outline_and_offset() {
+        let root = temp_root("readlong");
+        let p = provider(&root);
+        // CJK 正文：验证 offset 按字符计而不是字节。
+        let mut body = String::from("# 总览\n\n开头内容\n\n## 第一章\n\n");
+        body.push_str(&"正".repeat(5000));
+        body.push_str("\n## 第二章\n\n结尾内容\n");
+        let f = root.join("long.md");
+        std::fs::write(&f, &body).unwrap();
+        let path_arg = f.display().to_string();
+        let total = body.chars().count();
+
+        // 首读：大纲 + 头段 + 续读提示（offset 是字符数）
+        let out = p.execute(&call("fs_read", serde_json::json!({"path": path_arg}))).unwrap();
+        assert!(out.summary.contains("全文大纲"), "summary: {}", out.summary);
+        assert!(out.summary.contains("- # 总览"));
+        assert!(out.summary.contains("- ## 第二章"), "大纲覆盖全文而非只有头部");
+        assert!(out.summary.contains(&format!("共 {total} 字符")));
+        assert!(out.summary.contains("开头内容"), "头段正文可见");
+        assert!(out.summary.contains("未读完"));
+        assert!(out.summary.contains(&format!("\"offset\":{READ_SUMMARY_CHARS}")), "续读提示给出准确 offset");
+        assert!(!out.summary.contains("结尾内容"), "首读不该看到文件尾");
+
+        // 续读第二段：无重复大纲，读到结尾并有「已到文件末尾」
+        let out = p.execute(&call("fs_read", serde_json::json!({"path": path_arg, "offset": READ_SUMMARY_CHARS}))).unwrap();
+        assert!(!out.summary.contains("全文大纲"), "续读不重复大纲");
+        assert!(out.summary.contains("结尾内容"));
+        assert!(out.summary.contains("已到文件末尾"));
+        assert!(out.summary.contains(&format!("（以下为第 {}–{} 字符）", READ_SUMMARY_CHARS + 1, total)));
+
+        // offset 超出末尾：显式说明，不 panic、不空串
+        let out = p.execute(&call("fs_read", serde_json::json!({"path": path_arg, "offset": total + 100}))).unwrap();
+        assert!(out.summary.contains("已超出文件末尾"));
+    }
+
+    #[test]
+    fn fs_read_max_chars_is_clamped_and_short_files_have_no_scaffold() {
+        let root = temp_root("readclamp");
+        let p = provider(&root);
+
+        // max_chars 超上限 → 钳到 8000
+        let f = root.join("mid.md");
+        let body = "# 标题\n".to_string() + &"中".repeat(9000);
+        std::fs::write(&f, &body).unwrap();
+        let out = p.execute(&call("fs_read", serde_json::json!({"path": f.display().to_string(), "max_chars": 99999}))).unwrap();
+        assert!(out.summary.contains("（以下为第 1–8000 字符）"), "summary: {}", out.summary);
+        // max_chars=1 只给 1 个字符（钳下界）
+        let out = p.execute(&call("fs_read", serde_json::json!({"path": f.display().to_string(), "max_chars": 0}))).unwrap();
+        assert!(out.summary.contains("（以下为第 1–1 字符）"), "max_chars 钳到 1");
+
+        // 短文件：整读直给，无大纲/分段脚手架（旧行为保持）
+        let small = root.join("small.md");
+        std::fs::write(&small, "# 短文\n内容\n").unwrap();
+        let out = p.execute(&call("fs_read", serde_json::json!({"path": small.display().to_string()}))).unwrap();
+        assert!(out.summary.starts_with(UNTRUSTED_TAG));
+        assert!(out.summary.contains("# 短文"));
+        assert!(!out.summary.contains("全文大纲"));
+        assert!(!out.summary.contains("未读完"));
+        assert!(!out.summary.contains("已到文件末尾"));
     }
 
     #[test]
