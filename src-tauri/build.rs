@@ -55,7 +55,8 @@ fn stage_sidecar_runtime() {
                 let _ = std::os::unix::fs::symlink(&target, &to);
                 #[cfg(windows)]
                 {
-                    let resolved = from.parent().unwrap_or_default().join(target);
+                    let parent = from.parent().unwrap_or(std::path::Path::new("."));
+                    let resolved = parent.join(target);
                     let _ = std::fs::copy(&resolved, &to);
                 }
             }
