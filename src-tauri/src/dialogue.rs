@@ -748,7 +748,23 @@ fn cloud_tool_loop(
         }
     }
 
-    let tools = tool_specs(kit);
+    // T3 轮内压缩之一：目录有界化。先截单条 description，再按顺序砍尾部；
+    // 被砍掉的工具名进 trace——否则用户只会觉得「它突然不会用那个工具了」。
+    let (tools, dropped_tools) =
+        crate::context::trim_tool_catalog(tool_specs(kit), crate::context::CAP_TOOL_CATALOG);
+    if !dropped_tools.is_empty() {
+        rec.simple(
+            "tools_truncated",
+            "工具目录已裁剪",
+            "trimmed",
+            Some(&format!(
+                "kept={} dropped={} names={}",
+                tools.len(),
+                dropped_tools.len(),
+                dropped_tools.join(",")
+            )),
+        );
+    }
     kit.trace(format!(
         "cloud:tools:{}",
         tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join(",")
@@ -1053,7 +1069,14 @@ fn cloud_tool_loop(
                 let st = if step_outcome == "ok" { "ok" } else if step_outcome == "denied" { "denied" } else { "error" };
                 t.steps.push(TaskStep { seq, tool: call.name.clone(), status: st.into() });
             }
-            msgs.push(crate::llm::ToolMsg::tool_result(&call.id, &final_summary));
+            // T3 轮内压缩之二：单条结果超 1500 tokens 就换内容（head+tail），
+            // **不删消息**——call.id 与 assistant(tool_calls) 的配对原样保留，
+            // 删一条就是 400。原文仍在上面 `rec.tool_call` 的审计步里。
+            let fed = crate::context::compact_tool_result(&final_summary);
+            msgs.push(crate::llm::ToolMsg::tool_result(
+                &call.id,
+                fed.as_deref().unwrap_or(&final_summary),
+            ));
             if let (Some(cb), true) = (on_task.as_deref_mut(), task_open.get()) {
                 let t = task.borrow();
                 let last = t.steps.last().unwrap();
@@ -3461,6 +3484,142 @@ mod tests {
         assert_eq!(records[0].tool, "mcp");
         assert_eq!(records[0].result_status.as_deref(), Some("auto_allowed"));
         assert!(records[0].params_summary.as_deref().unwrap_or("").contains("杭州"));
+    }
+
+    // ---- T3 轮内压缩夹具
+
+    /// 只读工具，返回固定长文本（模拟 `fs_read` 大文件 / `web_fetch` 长页面）。
+    struct VerboseProvider {
+        descriptor: crate::agent_tools::ToolDescriptor,
+        text: String,
+    }
+    impl crate::agent_tools::ToolProvider for VerboseProvider {
+        fn descriptors(&self) -> Vec<crate::agent_tools::ToolDescriptor> {
+            vec![self.descriptor.clone()]
+        }
+        fn execute(
+            &self,
+            _call: &crate::agent_tools::ToolCall,
+        ) -> Result<crate::agent_tools::ToolOutput, String> {
+            Ok(crate::agent_tools::ToolOutput {
+                summary: self.text.clone(),
+                full: self.text.clone(),
+            })
+        }
+    }
+
+    fn verbose_kit(name: &str, text: &str) -> crate::mcp_admin::AgentKit {
+        let descriptor = crate::agent_tools::ToolDescriptor {
+            name: name.into(),
+            summary: "读大文件".into(),
+            detail: r#"{"type":"object"}"#.into(),
+            kind: crate::agent_tools::ToolKind::Mcp,
+            remote: false,
+            access: crate::agent_tools::ToolAccess::Read,
+        };
+        crate::mcp_admin::AgentKit {
+            providers: vec![Box::new(VerboseProvider { descriptor, text: text.into() })],
+            gate: Box::new(crate::agent_tools::AutoAllowGate),
+            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
+            task_id: std::sync::Mutex::new(None),
+            prompt_trace: std::sync::Mutex::new(Vec::new()),
+            ..crate::mcp_admin::AgentKit::empty()
+        }
+    }
+
+    /// 5 个「描述都很长」的 MCP 工具（A7 的复刻：目录超 1500 tokens）。
+    fn crowded_kit(n: usize) -> crate::mcp_admin::AgentKit {
+        let mut providers: Vec<Box<dyn crate::agent_tools::ToolProvider>> = Vec::new();
+        for i in 0..n {
+            providers.push(Box::new(crate::mcp::MockMcpProvider::with_tool(
+                &format!("tool{i:02}"),
+                &"很长的工具说明".repeat(40),
+                r#"{"type":"object"}"#,
+            )));
+        }
+        crate::mcp_admin::AgentKit {
+            providers,
+            gate: Box::new(crate::agent_tools::AutoAllowGate),
+            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
+            task_id: std::sync::Mutex::new(None),
+            prompt_trace: std::sync::Mutex::new(Vec::new()),
+            ..crate::mcp_admin::AgentKit::empty()
+        }
+    }
+
+    /// A8：超长工具结果降级成 head+tail，`tool_call_id` 配对不破，原文留在审计步。
+    #[test]
+    fn long_tool_result_is_compacted_without_breaking_the_pairing() {
+        let s = mem();
+        let c = card();
+        let long = "网".repeat(6000);
+        let (client, seen) = tool_client(vec![
+            tool_calls_reply(&[("dump", serde_json::json!({}))]),
+            content_reply("看完了。"),
+        ]);
+        let mut backend =
+            crate::persona::eval::LocalBackend::with_client(client, crate::llm::ClientKind::Cloud);
+        let mut kit = verbose_kit("dump", &long);
+        let out = chat_turn_with_kit(
+            &s, &mut backend, &c, "s1", "读一下那个文件", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit,
+        )
+        .unwrap();
+        assert_eq!(out.reply, "看完了。");
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2, "一轮工具循环 = 两次云端请求");
+        // 配对：assistant(tool_calls) 后面紧跟唯一一条 tool，数量一一对应。
+        let roles = &seen[1].0;
+        let tool_at = roles.iter().position(|r| r == "tool").expect("tool 消息必须在");
+        assert_eq!(roles.get(tool_at - 1).map(String::as_str), Some("assistant"));
+        assert_eq!(roles.iter().filter(|r| *r == "tool").count(), 1);
+        // 内容降级：带省略标记，且不再是全文（模型看到的是被压过的版本）。
+        let joined = &seen[1].2;
+        assert!(joined.contains("已省略"), "长结果必须降级");
+        assert!(!joined.contains(&"网".repeat(2000)), "不能原样全塞进去");
+
+        // 原文没丢：审计步里仍是完整输出（/trace 可查）。
+        let t = trace_of(&s, out.turn_id.expect("trace id"));
+        let tool_step = t
+            .steps
+            .iter()
+            .find(|st| st.step_kind == "tool_call")
+            .expect("审计步必须在");
+        assert!(
+            tool_step.summary.as_deref().unwrap_or("").chars().count() >= 6000,
+            "trace 保留原文，压缩只影响发给模型的那份"
+        );
+    }
+
+    /// A7：工具目录被裁到 1500 tokens 内，且被砍掉的名字进 trace。
+    #[test]
+    fn crowded_tool_catalog_is_trimmed_and_traced() {
+        let s = mem();
+        let c = card();
+        let (client, seen) = tool_client(vec![content_reply("好")]);
+        let mut backend =
+            crate::persona::eval::LocalBackend::with_client(client, crate::llm::ClientKind::Cloud);
+        let mut kit = crowded_kit(8);
+        let out = chat_turn_with_kit(
+            &s, &mut backend, &c, "s1", "在吗", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit,
+        )
+        .unwrap();
+
+        let names = seen.lock().unwrap()[0].1.clone();
+        assert!(names.len() < 8, "目录必须被裁（实际 {} 条）", names.len());
+        assert!(!names.is_empty(), "至少留一条，否则模型无法行动");
+
+        let t = trace_of(&s, out.turn_id.expect("trace id"));
+        let step = t
+            .steps
+            .iter()
+            .find(|st| st.step_kind == "tools_truncated")
+            .expect("裁剪必须留痕");
+        let out_text = step.output.as_deref().unwrap_or("");
+        assert!(out_text.contains("dropped="), "记清楚丢了几条：{out_text}");
+        assert!(out_text.contains("kept="));
     }
 
     /// Spec-s7 §1/§3: the kit must never jump the queue — crisis and the

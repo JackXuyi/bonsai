@@ -15,6 +15,7 @@ const STEP_TONE: Record<TraceStep["stepKind"], string> = {
   tool_intent: "tone-neutral",
   summary_intent: "tone-neutral",
   context_budget: "tone-neutral",
+  tools_truncated: "tone-warn",
   llm_round: "tone-llm",
   tool_call: "tone-tool",
   filter: "tone-ok",
@@ -40,6 +41,7 @@ function outcomeText(step: TraceStep): string {
     answered: "有输出",
     direct: "直答",
     none: "无输出",
+    trimmed: "已压缩",
     denied: "被拒绝",
     error: "出错",
   };

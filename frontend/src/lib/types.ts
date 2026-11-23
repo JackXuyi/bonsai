@@ -187,6 +187,7 @@ export interface TraceStep {
     | "tool_intent"
     | "summary_intent"
     | "context_budget"
+    | "tools_truncated"
     | "llm_round"
     | "tool_call"
     | "json_retry"

@@ -12,7 +12,8 @@
 //! provider 的 `usage.prompt_tokens` 回流校准（T7）。
 //!
 //! T1 只做纯函数（估算器 / 窗口表 / 预算 / 分段上限），T2 接上装配
-//! [`build`]（含 L0 按预算丢最旧轮）。轮内压缩（T3）与摘要（T6）仍待接线。
+//! [`build`]（含 L0 按预算丢最旧轮），T3 补轮内压缩（[`compact_tool_result`]
+//! 与 [`trim_tool_catalog`]）。摘要（T6）仍待接线。
 
 use crate::persona::eval::Turn;
 
@@ -62,6 +63,9 @@ pub const CAP_DIGEST: usize = 600;
 pub const CAP_USER_TEXT: usize = 4000;
 /// 单条工具结果上限：超了就降级成 head+tail（T3）。
 pub const CAP_TOOL_RESULT: usize = 1500;
+/// 单条工具描述上限（字）：目录裁剪前先把 description 压到这个长度，
+/// 否则一个 MCP server 的自述就能吃掉整个目录额度（plan §6.6 第 2 条）。
+pub const TOOL_DESC_MAX_CHARS: usize = 240;
 /// 本轮工具结果合计占可用额度的比例。
 pub const TOOL_ROOM_RATIO: f64 = 0.40;
 /// 历史轮上限：从 6 放宽到 12，真正的闸门是预算（装不下就丢，T2）。
@@ -322,6 +326,127 @@ pub fn build(input: BuildInput<'_>, budget: Budget) -> Built {
         dropped,
         est_tokens: fixed + used + estimate_msg(input.user_text),
     }
+}
+
+// ---------------------------------------------------------------- 轮内压缩（T3）
+//
+// 只做两件事（plan §6.6）：单条 `tool` 结果超长就降级、工具目录超长就裁。
+// **铁律：只换内容，不删消息**——Chat Completion 协议要求 `tool_call_id`
+// 与 `assistant(tool_calls)` 一一对应，删一条就 400。所以这里的产物始终
+// 「同一条消息、更短的 content」，调用方负责原地替换。
+
+/// 单字符的估算成本（与 [`estimate`] 相同的分桶，但不做整体向上取整，
+/// 便于在压缩时按 token 预算精确切片）。
+fn char_cost(c: char) -> f64 {
+    if is_cjk(c) {
+        1.0
+    } else if c.is_ascii_alphanumeric() || c.is_ascii_whitespace() {
+        0.25
+    } else {
+        0.75
+    }
+}
+
+/// 从头取，最多装 `budget` tokens，返回字符数。
+fn head_chars_for(text: &str, budget: f64) -> usize {
+    let mut used = 0.0;
+    let mut n = 0usize;
+    for c in text.chars() {
+        let next = used + char_cost(c);
+        if next > budget {
+            break;
+        }
+        used = next;
+        n += 1;
+    }
+    n
+}
+
+/// 从尾取，最多装 `budget` tokens，返回字符数。
+fn tail_chars_for(text: &str, budget: f64) -> usize {
+    let mut used = 0.0;
+    let mut n = 0usize;
+    for c in text.chars().rev() {
+        let next = used + char_cost(c);
+        if next > budget {
+            break;
+        }
+        used = next;
+        n += 1;
+    }
+    n
+}
+
+/// 省略标记。格式固定（同输入同输出），单测与「是否已压缩」的判断都靠它。
+pub fn omission_marker(omitted: usize) -> String {
+    format!("\n…（已省略 {omitted} 字）\n")
+}
+
+/// 单条工具结果降级（plan §6.6 第 1 条）。
+///
+/// 超过 [`CAP_TOOL_RESULT`] 就压成「head 70% + tail 20%（都按上限算）+ 省略
+/// 标记」。返回 `None` 表示无需压缩，调用方原样下发。
+///
+/// 为什么按上限而不是按原文比例：按原文留 90% 等于没压，8k 字的结果照样
+/// 占 8k tokens，预算永远算不准。
+pub fn compact_tool_result(text: &str) -> Option<String> {
+    let total = estimate(text);
+    if total <= CAP_TOOL_RESULT {
+        return None;
+    }
+    let head_n = head_chars_for(text, CAP_TOOL_RESULT as f64 * 0.7);
+    let tail_n = tail_chars_for(text, CAP_TOOL_RESULT as f64 * 0.2);
+    let chars = text.chars().count();
+    let omitted = chars.saturating_sub(head_n + tail_n);
+    let head: String = text.chars().take(head_n).collect();
+    let tail: String = text.chars().skip(chars - tail_n).collect();
+    Some(format!("{head}{}{tail}", omission_marker(omitted)))
+}
+
+/// 按 token 预算裁工具目录（plan §6.6 第 2 条）。
+///
+/// 两步：① 每条 description 先截到 [`TOOL_DESC_MAX_CHARS`] 字；② 按目录
+/// 顺序装，装不下就从该条起整条丢弃（**不跳着塞**，保证「有多少工具可用」
+/// 是可预测的）。返回（保留的 specs, 被丢弃的工具名）。
+///
+/// 第一条无论多大都保留：空目录 = 模型完全无法行动，比轻微超预算更糟
+/// （真实场景里只有 schema 本身超 1500 tokens 才会走到这一步）。
+pub fn trim_tool_catalog(
+    mut specs: Vec<crate::llm::ToolSpec>,
+    cap_tokens: usize,
+) -> (Vec<crate::llm::ToolSpec>, Vec<String>) {
+    for s in specs.iter_mut() {
+        if s.description.chars().count() > TOOL_DESC_MAX_CHARS {
+            let mut d: String = s.description.chars().take(TOOL_DESC_MAX_CHARS).collect();
+            d.push('…');
+            s.description = d;
+        }
+    }
+    let cost = |s: &crate::llm::ToolSpec| -> usize {
+        // parameters 是 JSON Schema，不能截（截了参数就填错），只能整条丢。
+        let params = s
+            .parameters
+            .as_ref()
+            .map(|p| p.to_string())
+            .unwrap_or_default();
+        estimate_msg(&s.name) + estimate(&s.description) + estimate(&params)
+    };
+
+    let mut kept: Vec<crate::llm::ToolSpec> = Vec::with_capacity(specs.len());
+    let mut dropped: Vec<String> = Vec::new();
+    let mut used = 0usize;
+    let mut over = false;
+    for (i, s) in specs.into_iter().enumerate() {
+        let c = cost(&s);
+        if !over && (i == 0 || used + c <= cap_tokens) {
+            used += c;
+            kept.push(s);
+        } else {
+            over = true;
+            dropped.push(s.name);
+        }
+    }
+    (kept, dropped)
 }
 
 #[cfg(test)]
@@ -692,5 +817,110 @@ mod tests {
             without_tools > with_tools,
             "不留工具额度应能多装历史（with={with_tools}, without={without_tools}）"
         );
+    }
+
+    // ------------------------------------------------------------ 轮内压缩（T3）
+
+    fn spec(name: &str, description: &str) -> crate::llm::ToolSpec {
+        crate::llm::ToolSpec {
+            name: name.into(),
+            description: description.into(),
+            parameters: Some(serde_json::json!({"type": "object"})),
+        }
+    }
+
+    #[test]
+    fn short_tool_result_is_not_touched() {
+        // 现状里 memory_search / 搜索摘要都在 200 字量级，不该被动。
+        let ok = "杭州今天多云，18 度，傍晚有阵雨。";
+        assert!(compact_tool_result(ok).is_none());
+        // 正好卡在上限内也不动（避免边界抖动）。
+        let just_fits = "字".repeat(CAP_TOOL_RESULT);
+        assert!(compact_tool_result(&just_fits).is_none());
+    }
+
+    #[test]
+    fn long_tool_result_keeps_head_and_tail_with_marker() {
+        // A8：8000 字的 read 结果 → 降级 + 省略标记，长度被压回上限内。
+        let text = format!(
+            "{}{}",
+            "开头很重要。".repeat(700),
+            "结尾也有用。".repeat(500)
+        );
+        assert!(estimate(&text) > CAP_TOOL_RESULT);
+        let out = compact_tool_result(&text).expect("超长必须被压");
+        assert!(out.contains("已省略"), "必须带省略标记");
+        assert!(out.starts_with("开头很重要。"), "head 保留");
+        assert!(out.trim_end().ends_with("结尾也有用。"), "tail 保留");
+        assert!(
+            estimate(&out) <= CAP_TOOL_RESULT,
+            "压完必须落回单条上限内（实际 {}）",
+            estimate(&out)
+        );
+        assert!(out.chars().count() < text.chars().count());
+    }
+
+    #[test]
+    fn compaction_omitted_count_matches_the_original() {
+        let text = "啊".repeat(3000);
+        let out = compact_tool_result(&text).unwrap();
+        let digits: String = out
+            .chars()
+            .skip_while(|c| !c.is_ascii_digit())
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        let omitted: usize = digits.parse().unwrap();
+        // 保留字数 + 省略字数 = 原文长度（只换内容，不凭空增删）。
+        let kept = out.chars().count() - omission_marker(omitted).chars().count();
+        assert_eq!(omitted + kept, 3000);
+    }
+
+    #[test]
+    fn trimming_clamps_each_description_before_cutting() {
+        let long = "很长的工具说明".repeat(100); // 700 字
+        let (kept, dropped) = trim_tool_catalog(vec![spec("big", &long)], CAP_TOOL_CATALOG);
+        assert!(dropped.is_empty(), "单条永远保留（否则模型无法行动）");
+        let d: Vec<char> = kept[0].description.chars().collect();
+        assert_eq!(d.len(), TOOL_DESC_MAX_CHARS + 1, "截断后补一个省略号");
+        assert_eq!(d.last(), Some(&'…'));
+    }
+
+    #[test]
+    fn trimming_drops_the_tail_in_catalog_order() {
+        // A7：5 个 MCP server 描述都很长 → 目录裁到 1500 tokens 内，丢的是尾部。
+        let specs: Vec<_> = (0..8)
+            .map(|i| spec(&format!("tool{i}"), &"很长的工具说明".repeat(40)))
+            .collect();
+        let names: Vec<String> = specs.iter().map(|s| s.name.clone()).collect();
+        let (kept, dropped) = trim_tool_catalog(specs, CAP_TOOL_CATALOG);
+
+        assert!(!dropped.is_empty(), "这么长的目录必须被裁");
+        assert_eq!(
+            kept.len() + dropped.len(),
+            names.len(),
+            "一条都不许凭空消失"
+        );
+        // 留下的一定是前缀：保留顺序与目录顺序一致。
+        let kept_names: Vec<String> = kept.iter().map(|s| s.name.clone()).collect();
+        assert_eq!(kept_names, names[..kept.len()].to_vec());
+        assert_eq!(
+            dropped,
+            names[kept.len()..].to_vec(),
+            "丢掉的是尾部且被记名"
+        );
+        let total: usize = kept
+            .iter()
+            .map(|s| estimate_msg(&s.name) + estimate(&s.description))
+            .sum();
+        assert!(total <= CAP_TOOL_CATALOG, "裁完必须落回目录预算内");
+    }
+
+    #[test]
+    fn trimming_is_a_no_op_when_the_catalog_fits() {
+        let specs = vec![spec("a", "查天气"), spec("b", "记笔记")];
+        let (kept, dropped) = trim_tool_catalog(specs, CAP_TOOL_CATALOG);
+        assert_eq!(kept.len(), 2);
+        assert!(dropped.is_empty());
+        assert_eq!(kept[1].description, "记笔记", "没超长就不该改写描述");
     }
 }
