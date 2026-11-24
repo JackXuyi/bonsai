@@ -629,3 +629,131 @@ pub fn mark_relationship_notified(conn: &Connection, id: i64) -> rusqlite::Resul
     Ok(n > 0)
 }
 
+// ------------------------------------------------- ability (plan-ability-line/v1)
+
+#[derive(Debug, Clone)]
+pub struct AbilityState {
+    pub stage: i64,
+    pub stage_since: Option<String>,
+    pub last_tick_date: Option<String>,
+}
+
+/// 能力线日证据（分数永不外露）。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AbilityDayEvidence {
+    pub present: i64,
+    pub validated: i64,
+    pub failed: i64,
+    pub canceled: i64,
+    pub score: i64,
+}
+
+pub fn ability_state(conn: &Connection) -> rusqlite::Result<Option<AbilityState>> {
+    let mut stmt = conn.prepare(
+        "SELECT stage, stage_since, last_tick_date FROM ability WHERE id = 1",
+    )?;
+    let mut rows = stmt.query_map([], |row| {
+        Ok(AbilityState {
+            stage: row.get(0)?,
+            stage_since: row.get(1)?,
+            last_tick_date: row.get(2)?,
+        })
+    })?;
+    rows.next().transpose()
+}
+
+pub fn ensure_ability(conn: &Connection) -> rusqlite::Result<AbilityState> {
+    if let Some(s) = ability_state(conn)? {
+        return Ok(s);
+    }
+    conn.execute("INSERT OR IGNORE INTO ability (id, stage) VALUES (1, 0)", [])?;
+    Ok(AbilityState {
+        stage: 0,
+        stage_since: None,
+        last_tick_date: None,
+    })
+}
+
+pub fn set_ability_stage(conn: &Connection, stage: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE ability SET stage = ?1, stage_since = ?2 WHERE id = 1 AND stage < ?1",
+        params![stage, clock::now_iso()],
+    )?;
+    Ok(())
+}
+
+pub fn set_ability_tick_date(conn: &Connection, date: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE ability SET last_tick_date = ?1 WHERE id = 1",
+        params![date],
+    )?;
+    Ok(())
+}
+
+pub fn upsert_ability_progress(
+    conn: &Connection,
+    date: &str,
+    ev: &AbilityDayEvidence,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO ability_progress
+             (date, present, validated, failed, canceled, score, computed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(date) DO UPDATE SET
+             present = excluded.present,
+             validated = excluded.validated,
+             failed = excluded.failed,
+             canceled = excluded.canceled,
+             score = excluded.score,
+             computed_at = excluded.computed_at",
+        params![
+            date,
+            ev.present,
+            ev.validated,
+            ev.failed,
+            ev.canceled,
+            ev.score,
+            clock::now_iso()
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn ability_progress_sum_between(
+    conn: &Connection,
+    from: &str,
+    before: &str,
+) -> rusqlite::Result<i64> {
+    conn.query_row(
+        "SELECT COALESCE(SUM(score), 0) FROM ability_progress
+         WHERE date >= ?1 AND date < ?2",
+        params![from, before],
+        |r| r.get(0),
+    )
+}
+
+pub fn add_ability_log(conn: &Connection, stage: i64, note: &str) -> rusqlite::Result<i64> {
+    conn.execute(
+        "INSERT INTO ability_log (stage, unlocked_at, note) VALUES (?1, ?2, ?3)",
+        params![stage, clock::now_iso(), note],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn pending_ability_logs(conn: &Connection) -> rusqlite::Result<Vec<(i64, i64, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, stage, note FROM ability_log
+          WHERE notified_at IS NULL ORDER BY id ASC",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    rows.collect()
+}
+
+pub fn mark_ability_notified(conn: &Connection, id: i64) -> rusqlite::Result<bool> {
+    let n = conn.execute(
+        "UPDATE ability_log SET notified_at = ?1 WHERE id = ?2 AND notified_at IS NULL",
+        params![clock::now_iso(), id],
+    )?;
+    Ok(n > 0)
+}
+

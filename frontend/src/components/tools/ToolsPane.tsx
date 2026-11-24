@@ -12,6 +12,7 @@ import { WebCard } from "./WebCard";
 import { MailCard } from "./MailCard";
 import { BoundaryCard } from "./BoundaryCard";
 import { RelationshipCard } from "./RelationshipCard";
+import { AbilityCard } from "./AbilityCard";
 import { PlanProgressCard } from "./PlanProgressCard";
 import { ToolResult } from "./ToolResult";
 import { ReportDialog } from "./ReportDialog";
@@ -39,6 +40,7 @@ export function ToolsPane() {
       <FileCard active />
       <BoundaryCard active />
       <RelationshipCard />
+      <AbilityCard />
       <PlanProgressCard active />
       <ToolCallRecords />
       <ToolResult />

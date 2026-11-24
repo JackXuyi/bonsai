@@ -1,7 +1,13 @@
 "use client";
 
 import { create } from "zustand";
-import { FACE_STATES, type FaceState, type GrowthStatus, type RelationshipStatus } from "@/lib/types";
+import {
+  FACE_STATES,
+  type AbilityStatus,
+  type FaceState,
+  type GrowthStatus,
+  type RelationshipStatus,
+} from "@/lib/types";
 
 export interface Toast {
   id: number;
@@ -21,6 +27,7 @@ interface UiState {
   faceState: FaceState;
   growth: GrowthStatus | null;
   relationship: RelationshipStatus | null;
+  ability: AbilityStatus | null;
   /** 表情页形态演示的临时覆盖（null = 用真实 growth） */
   stagePreview: { stage: number; dormant: boolean } | null;
   /** 云端 opt-in 警示每会话只弹一次（spec-m2 §3） */
@@ -34,6 +41,7 @@ interface UiState {
   setFaceState: (s: string) => void;
   setGrowth: (g: GrowthStatus | null) => void;
   setRelationship: (r: RelationshipStatus | null) => void;
+  setAbility: (a: AbilityStatus | null) => void;
   setStagePreview: (p: { stage: number; dormant: boolean } | null) => void;
   ackCloudOptin: () => void;
   setToolResult: (r: ToolResult | null) => void;
@@ -51,6 +59,7 @@ export const useUiStore = create<UiState>((set) => ({
   faceState: "calm",
   growth: null,
   relationship: null,
+  ability: null,
   stagePreview: null,
   cloudOptinAcked: false,
   toolResult: null,
@@ -63,6 +72,7 @@ export const useUiStore = create<UiState>((set) => ({
   },
   setGrowth: (g) => set({ growth: g, stagePreview: null }),
   setRelationship: (r) => set({ relationship: r }),
+  setAbility: (a) => set({ ability: a }),
   setStagePreview: (p) => set({ stagePreview: p }),
   ackCloudOptin: () => set({ cloudOptinAcked: true }),
   setToolResult: (r) => set({ toolResult: r }),

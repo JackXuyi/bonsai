@@ -225,6 +225,14 @@ pub fn forget_relationship(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Reset ONLY the ability line (P4-4)：不动记忆 / 盆栽 / 关系。
+pub fn forget_ability(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "DELETE FROM ability_log; DELETE FROM ability_progress; DELETE FROM ability;",
+    )?;
+    Ok(())
+}
+
 // ------------------------------------------------------- reads for consolidate
 
 /// Unconsumed events inside `[window_start, window_end)`, oldest first.

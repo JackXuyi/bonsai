@@ -73,6 +73,21 @@ export interface RelationshipStatus {
   pending?: RelationshipAnnouncement[];
 }
 
+// ── ability（ability.rs，P4-4）────────────────────────────────
+export interface AbilityAnnouncement {
+  id: number;
+  stage: number;
+  note: string;
+}
+
+export interface AbilityStatus {
+  stage: number;
+  stage_name?: string;
+  day_index?: number;
+  stage_since?: string;
+  pending?: AbilityAnnouncement[];
+}
+
 // ── perception（perception.rs）────────────────────────────────
 /** P2-4 教名词（src-tauri/src/perception.rs TaughtNoun）。 */
 export interface TaughtNoun {
@@ -142,6 +157,15 @@ export interface MailStatus {
   today_reads: number;
   today_drafts: number;
   note: string;
+}
+
+/** P4-3 / G-18 日时间线导出（src-tauri/src/observability.rs）。 */
+export interface DayTimelineExport {
+  day: string;
+  markdown: string;
+  turns: number;
+  tools: number;
+  security: number;
 }
 
 /** 表情自定义皮肤 manifest（src-tauri/src/faceskins.rs FaceSkinManifest）。

@@ -45,7 +45,7 @@
 | 人格全程注入云端循环 system prompt（D6 裁决） | `dialogue.rs:383-389`、`plan-task-card.md:129-135` | 计划段的注入不得稀释人格；计划指令走 system 尾段，优先级声明低于 L1 宪法 |
 | 画像固定注入 prompt（≤200 字），每轮都有 | `persona/prompt.rs:97-121` | 计划可利用画像做目标消歧（如「我的项目」），但不得把画像原文塞进计划 JSON 外发审计 |
 | schema 当前 v13（画像表）；改 schema 必须同步 bump `user_version`，v10 有惨痛教训 | `memory/db.rs:20-36,391-448` | 本方案用 **v14**；迁移走 `add_column_if_missing` + `IF NOT EXISTS` 幂等范式 |
-| 能力线只存在于调研文档，代码里 growth 只有形态线（`morph.rs`）与关系线（`relationship.rs`），**无能力线实体** | `research-report.md:262-268`、`src-tauri/src/` 无 `ability.rs` | 计划完成质量可**预留**能力线证据出口，但不得在方案里假装有能力线可写入 |
+| ~~能力线无实体~~ → **P4-4 已兑现**（2026-11-24） | `ability.rs` + plan-ability-line/v1 | 见 §5.7 |
 | `tasks` 表数据**未暴露给前端**：`lib.rs` 的 `generate_handler!` 无 task 命令、`commands.ts` 无 task 封装；`db::task_list` 存在但无人调用 | `lib.rs:241`、`commands.ts`、`db.rs:1561` | 进度面板必须新增 `plan_list` 命令 + 前端类型化封装；这部分是 D6 的**净新增工作量**，不计入「零改动」 |
 | 前端 store 用 zustand，落在 `lib/stores/`（`chatStore` / `uiStore` / `llmStore` / `faceSkinStore`）；工具页卡片群在 `ToolsPane.tsx` 顺序排列 | `frontend/src/lib/stores/`、`components/tools/ToolsPane.tsx:18-48` | 进度面板按既有惯例加 `planStore.ts` + `PlanProgressCard.tsx` 插入 `ToolsPane`，不新开页面 |
 
@@ -238,9 +238,9 @@ ALTER TABLE tasks ADD COLUMN confirm_mode  TEXT NOT NULL DEFAULT 'auto'; -- D1: 
 
 **测试**：`planStore.applyTaskEvent` 单测（事件乱序/重复 id 去重/终态对齐）+ `PlanProgressCard` 最小渲染测试，放 `frontend/tests/`，与现有结构一致。
 
-### 5.7 能力线证据出口（预留，不实现）
+### 5.7 能力线证据出口（已兑现 → P4-4）
 
-计划终态可产一条结构化证据（`{goal, steps_done, steps_total, replans, failed}`）——但代码里**没有能力线实体**，本方案只定义数据形状与落点（`tasks` 表已含终态字段），待 G 系列能力线立项时消费。**不得在方案里承诺「已接入能力线」**。
+计划终态经 `tasks.finished_at` + `task_fully_validated` 由能力线日证据重算消费（docs/zh/plan-ability-line/v1）。本方案不在 finish 路径写计数器；权威在 `ability.rs`。
 
 ---
 
@@ -335,7 +335,7 @@ ALTER TABLE tasks ADD COLUMN confirm_mode  TEXT NOT NULL DEFAULT 'auto'; -- D1: 
 | 进度面板侵入消息流（推翻 11-22「过程不进消息流」裁决） | 产品 | 2 | 4 | 8 中 | D6 面板只在工具页 + `/trace`；`useChat` 的 `task_step` 转 `planStore` 后 return，**绝不进 `chatStore.messages`**；A15 单测锁定 |
 | 本地路径被间接引入规划（零工具调用失守） | 合规 | 2 | 5 | 10 高 | `plan_intent` 只在云端分支调用；A9 单测锁死；提示词/代码双检查 |
 | 取消后已执行的 ask 档写操作无法回滚 | 安全 | 2 | 3 | 6 中 | 取消只拦未执行步骤；已执行写操作的用户已确认过，文档明示「取消不回滚」 |
-| 能力线证据出口被误当成已实现 | 范围 | 3 | 2 | 6 中 | §5.7 明确「预留不实现」；文档不承诺接入 |
+| ~~能力线证据出口被误当成已实现~~ | — | — | — | — | P4-4 已兑现（plan-ability-line/v1） |
 | 进度面板两份状态相斥（事件实时态 vs `plan_list` 回放态） | 可信 | 3 | 3 | 9 中 | 面板首屏拉 `plan_list` 建基线、执行中事件增量覆盖；终态以 `tasks` 表为准；A14 锁定 |
 | `manual` 确认门被误做成真阻塞（本版不该卡住用户） | 范围 | 2 | 3 | 6 中 | 本版 `plan_confirm_gate()` 恒 Allow；A12 单测锁定「设 manual 也不卡」 |
 
@@ -382,6 +382,7 @@ ALTER TABLE tasks ADD COLUMN confirm_mode  TEXT NOT NULL DEFAULT 'auto'; -- D1: 
 |---|---|---|
 | v0.1 | 2026-11-23 | 初稿：认识纠偏（不重造 ReAct）+ 方案骨架；D1/D6 待裁决 |
 | v0.2 | 2026-11-23 | 用户裁决落地：**D1** 计划默认确认（auto 直放、manual 扩展位）；**D6** 做进度面板（工具页只读卡 + `/trace`，不进消息流）。新增 §4.1 `confirm_mode` 列、§5.2 D1 确认门、§5.6 进度面板、§6 前端落点、A11–A15 验收、T6 里程碑、相应风险行 |
+| v0.5 | 2026-11-24 | §5.7 能力线证据出口由 P4-4 兑现（plan-ability-line/v1） |
 | v0.4 | 2026-11-24 | P2-12 真机验收通过：规划命中/进度面板/取消/本地零规划抽测过线 |
 | v0.3 | 2026-11-24 | P2-10 文首回填：状态改为已实施（T1–T6）；T7 真机验收仍待 |
 

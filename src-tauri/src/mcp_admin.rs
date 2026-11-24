@@ -667,13 +667,24 @@ pub fn execute_audited(
     };
     let duration = Some(started.elapsed().as_millis() as i64);
     match result {
-        Ok(out) => {
+        Ok(mut out) => {
+            // P4-3：外部/工具正文含注入特征 → 降级声明 + security 留痕（E1）。
+            let (summary, hit) = crate::injection::degrade_if_injection(&out.summary);
+            out.summary = summary;
+            let result_detail = if let Some(pattern) = hit {
+                if let Ok(conn) = store.write_guard() {
+                    crate::injection::record_flag(&conn, name, pattern);
+                }
+                "ok_injection_flagged"
+            } else {
+                gate_status
+            };
             audit_log(
                 store,
                 descriptor.kind.as_str(),
                 &descriptor.name,
                 "ok",
-                gate_status,
+                result_detail,
                 Some(&args_summary),
                 Some(kit.trace_ref().as_str()),
                 descriptor.remote,

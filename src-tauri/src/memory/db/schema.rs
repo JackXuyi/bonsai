@@ -6,6 +6,8 @@ use rusqlite::{params, Connection};
 
 use crate::memory::clock;
 
+/// SCHEMA_VERSION = 21（2026-11-24）：P4-4 能力线（docs/zh/plan-ability-line/v1）——
+/// `ability` / `ability_progress` / `ability_log`；`tasks.finished_at` 供日证据重算。
 /// SCHEMA_VERSION = 20（2026-11-24）：Autonomy Phase 3
 /// （docs/zh/plan-autonomy-phase3/v1）——
 /// `tasks` 恢复列（resume_cursor / safe_checkpoint / interrupt_kind）；
@@ -56,7 +58,7 @@ use crate::memory::clock;
 /// EXISTS 不会给已有表加列；v9→v9 不触发 migrate，INSERT 带 user_text 直接
 /// 报 "table turn_trace has no column named user_text"。教训：改 SCHEMA 必
 /// 须同时 bump 此版本号。
-pub(crate) const SCHEMA_VERSION: i64 = 20;
+pub(crate) const SCHEMA_VERSION: i64 = 21;
 
 /// 不进会话列表的保留 session id：主动搭话（bubble 照旧实时显示，但不占
 /// 用户能切换的对话窗口）。sessions 里**永不建行**（plan-context D6）。
@@ -366,7 +368,35 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- Phase 3 A1：恢复检查点（docs/zh/plan-autonomy-phase3/v1）
     resume_cursor   INTEGER,          -- 下一待执行 seq；NULL = 未进入恢复语义
     safe_checkpoint TEXT,             -- 上次检查点提交成功 ISO 时间
-    interrupt_kind  TEXT              -- 'crash' | 'timeout' | 'budget' | 'external' | NULL
+    interrupt_kind  TEXT,             -- 'crash' | 'timeout' | 'budget' | 'external' | NULL
+    -- P4-4：结算时间（日证据重算用；running 时为 NULL）
+    finished_at     TEXT
+);
+
+-- P4-4 能力线（docs/zh/plan-ability-line/v1）：靠任务卡校验质量推进。
+CREATE TABLE IF NOT EXISTS ability (
+    id             INTEGER PRIMARY KEY CHECK (id = 1),
+    stage          INTEGER NOT NULL DEFAULT 0,   -- 0 陪聊 | 1 能办事 | 2 真帮手
+    stage_since    TEXT,
+    last_tick_date TEXT
+);
+
+CREATE TABLE IF NOT EXISTS ability_progress (
+    date          TEXT PRIMARY KEY,
+    present       INTEGER NOT NULL DEFAULT 0,
+    validated     INTEGER NOT NULL DEFAULT 0,
+    failed        INTEGER NOT NULL DEFAULT 0,
+    canceled      INTEGER NOT NULL DEFAULT 0,
+    score         INTEGER NOT NULL DEFAULT 0,
+    computed_at   TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ability_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    stage       INTEGER NOT NULL,
+    unlocked_at TEXT NOT NULL,
+    notified_at TEXT,
+    note        TEXT
 );
 
 -- Phase 3 A5 / P3-5：统一常驻 job（consolidate 等迁入；执行体仍在各模块）
@@ -645,6 +675,8 @@ pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         "CREATE INDEX IF NOT EXISTS idx_tool_calls_idem ON tool_calls(idempotency_key);",
     )?;
     // jobs 种子在 open 后由 `memory::job::seed_builtin_jobs` 调用（避免 schema↔job 循环依赖）。
+    // v21：P4-4 能力线 — ability* 表由 SCHEMA IF NOT EXISTS 建出；补 finished_at。
+    add_column_if_missing(conn, "tasks", "finished_at", "TEXT")?;
 
     set_user_version_if_behind(conn)?;
     Ok(())

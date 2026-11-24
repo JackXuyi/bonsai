@@ -3,6 +3,7 @@
 // 一律经 invokeWithTimeout（15s 超时兜底）；浏览器预览时返回兜底值而不是抛错。
 import { invokeWithTimeout, inTauri } from "./tauriInvoke";
 import type {
+  AbilityStatus,
   Boundary,
   CalendarStatus,
   CatalogRow,
@@ -43,6 +44,7 @@ import type {
   TurnTrace,
   WebStatus,
   MailStatus,
+  DayTimelineExport,
   FaceSkinManifest,
   FailureRecent,
   LoopStatus,
@@ -66,6 +68,9 @@ export const relationshipStatus = () =>
 export const relationshipAck = (id: number) =>
   call<void>("relationship_ack", { id });
 export const relationshipReset = () => call<void>("relationship_reset");
+export const abilityStatus = () => call<AbilityStatus>("ability_status");
+export const abilityAck = (id: number) => call<void>("ability_ack", { id });
+export const abilityReset = () => call<void>("ability_reset");
 
 // ---------- dialogue ----------
 /** 一轮对话是最长的 IPC，命令本身 **fire-and-forget**（立即返回受理结果），
@@ -147,6 +152,10 @@ export const mailSetEnabled = (enabled: boolean) =>
   call<MailStatus>("mail_set_enabled", { enabled });
 export const mailProbe = () =>
   call<{ ok: boolean; count: number }>("mail_probe");
+
+// ---------- observability（P4-3 / G-18） ----------
+export const observabilityDayExport = (day?: string) =>
+  call<DayTimelineExport>("observability_day_export", day ? { day } : {});
 
 // ---------- filetools（P3-2，plan-files.md §3.6） ----------
 export const fsStatus = () => call<FsStatus>("fs_status");

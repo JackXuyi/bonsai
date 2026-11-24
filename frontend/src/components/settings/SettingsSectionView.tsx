@@ -10,11 +10,13 @@ import { SkillSection } from "@/components/agent/SkillSection";
 import { LogsCard } from "@/components/settings/LogsCard";
 import { LoopsCard } from "@/components/settings/LoopsCard";
 import { DiagnosticsCard } from "@/components/settings/DiagnosticsCard";
+import { ObservabilityCard } from "@/components/settings/ObservabilityCard";
 import { MemoryOverview } from "@/components/memory/MemoryOverview";
 import { ActionRow } from "@/components/tools/ActionRow";
 import { PersonaCard } from "@/components/tools/PersonaCard";
 import { ProfileCard } from "@/components/tools/ProfileCard";
 import { RelationshipCard } from "@/components/tools/RelationshipCard";
+import { AbilityCard } from "@/components/tools/AbilityCard";
 import { CalendarCard } from "@/components/tools/CalendarCard";
 import { MailCard } from "@/components/tools/MailCard";
 import { FileCard } from "@/components/tools/FileCard";
@@ -65,6 +67,7 @@ function SectionBody({ id }: { id: SettingsSectionId }) {
           <PersonaCard />
           <ProfileCard active />
           <RelationshipCard />
+          <AbilityCard />
         </>
       );
     case "memory":
@@ -96,6 +99,7 @@ function SectionBody({ id }: { id: SettingsSectionId }) {
       return (
         <>
           <LoopsCard />
+          <ObservabilityCard />
           <DiagnosticsCard />
           <LogsCard />
           <ToolCallRecords />

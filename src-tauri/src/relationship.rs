@@ -429,20 +429,29 @@ pub fn spawn(app: tauri::AppHandle) {
                 continue;
             };
             let now = chrono::Local::now();
+            let ability_boot = !booted;
             if !booted {
                 booted = true;
                 let _ = backfill(&conn, now, EVIDENCE_WINDOW_DAYS);
             }
-            let _ = pg.tick(|| match tick(&conn, now) {
-                Ok(out) => {
-                    if out.unlocked.is_some() || out.cold_changed.is_some() {
-                        let payload = status_payload(&conn);
-                        drop(conn);
-                        use tauri::Emitter;
-                        let _ = app.emit("relationship:stage", payload);
+            let _ = pg.tick(|| {
+                // P4-4：能力线共跑（不新开 loop；LOOP_NAMES 仍为 8）。
+                let ability_payload =
+                    crate::ability::cotick_with_relationship(&conn, now, ability_boot);
+                let rel_payload = match tick(&conn, now) {
+                    Ok(out) if out.unlocked.is_some() || out.cold_changed.is_some() => {
+                        Some(status_payload(&conn))
                     }
+                    _ => None,
+                };
+                drop(conn);
+                use tauri::Emitter;
+                if let Some(payload) = rel_payload {
+                    let _ = app.emit("relationship:stage", payload);
                 }
-                Err(_) => {}
+                if let Some(ap) = ability_payload {
+                    let _ = app.emit("ability:stage", ap);
+                }
             });
             if pg.stopped() {
                 if crate::failure::on_loop_cap(&app, "relationship", "consecutive panic cap") {

@@ -91,19 +91,6 @@ pub fn seed_builtin_packs(root: &Path) -> std::io::Result<Vec<String>> {
     Ok(created)
 }
 
-/// Injection blacklist (spec-s5 §2): static samples only; the reviewer
-/// grows this list, the model never sees a rejected pack at all.
-const INJECTION_PATTERNS: &[&str] = &[
-    "忽略之前的指令",
-    "忽略 constitution",
-    "无视边界",
-    "危机词表",
-    "忽略人格宪法",
-    "disregard previous instructions",
-    "ignore previous instructions",
-    "ignore the constitution",
-];
-
 #[derive(Debug, Clone)]
 pub struct SkillPack {
     pub id: String,
@@ -195,11 +182,9 @@ fn parse_frontmatter(text: &str) -> Result<(String, String, Option<String>, &str
 }
 
 pub(crate) fn check_injection(body: &str) -> Result<(), SkillError> {
-    let lower = body.to_lowercase();
-    for p in INJECTION_PATTERNS {
-        if lower.contains(&p.to_lowercase()) {
-            return Err(SkillError::Injection("blacklisted pattern"));
-        }
+    // P4-3：与运行时工具扫描共用一份特征表（plan-external-content/v1）。
+    if crate::injection::find_pattern(body).is_some() {
+        return Err(SkillError::Injection("blacklisted pattern"));
     }
     Ok(())
 }

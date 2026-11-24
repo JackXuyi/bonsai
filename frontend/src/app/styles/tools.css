@@ -259,6 +259,20 @@
   align-items: center;
 }
 
+/* P4-3 日时间线预览 */
+.obs-preview {
+  margin: 8px 0 0;
+  max-height: 220px;
+  overflow: auto;
+  padding: 8px 10px;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: rgba(0, 0, 0, 0.04);
+  border-radius: 8px;
+}
+
 .row {
   display: flex;
   align-items: center;

@@ -8,6 +8,7 @@ import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { faceCurrent, facePreview } from "@/lib/commands";
 import {
+  drainAbilityAnnouncements,
   drainGrowthAnnouncements,
   drainRelationshipAnnouncements,
 } from "@/lib/announcements";
@@ -35,6 +36,9 @@ export function useAppEvents() {
   useTauriEvent<unknown>("relationship:stage", () => {
     drainRelationshipAnnouncements().catch(() => {});
   });
+  useTauriEvent<unknown>("ability:stage", () => {
+    drainAbilityAnnouncements().catch(() => {});
+  });
   // sidecar 起来了 → 补一次配置读取（页头状态依赖 provider / activeId）。
   useTauriEvent<unknown>("llm:ready", () => {
     void useLlmStore.getState().load();
@@ -43,6 +47,7 @@ export function useAppEvents() {
     // tray「重新做一次引导」等：重查 growth/关系播报与 onboarding
     drainGrowthAnnouncements().catch(() => {});
     drainRelationshipAnnouncements().catch(() => {});
+    drainAbilityAnnouncements().catch(() => {});
     useUiStore.getState().bumpWindowShown();
   });
 
@@ -94,5 +99,6 @@ export function useAppEvents() {
     faceCurrent().then(setFaceState).catch(() => {});
     drainGrowthAnnouncements().catch(() => {});
     drainRelationshipAnnouncements().catch(() => {});
+    drainAbilityAnnouncements().catch(() => {});
   }, [setFaceState]);
 }

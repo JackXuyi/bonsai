@@ -30,8 +30,10 @@ pub mod llm_admin;
 pub mod llm_cloud;
 pub mod llm_models;
 pub mod llm_pull;
+pub mod injection;
 pub mod mail;
 pub mod mcp;
+pub mod observability;
 pub mod mcp_admin;
 pub mod mcp_discover;
 pub mod memory;
@@ -42,6 +44,7 @@ pub mod perception;
 pub mod perception_search;
 pub mod persona;
 pub mod predict;
+pub mod ability;
 pub mod relationship;
 pub mod report;
 pub mod session;
@@ -317,6 +320,9 @@ pub fn run() {
             relationship::relationship_status,
             relationship::relationship_ack,
             relationship::relationship_reset,
+            ability::ability_status,
+            ability::ability_ack,
+            ability::ability_reset,
             calendar::calendar_status,
             calendar::calendar_request_access,
             calendar::calendar_set_config,
@@ -392,6 +398,7 @@ pub fn run() {
             mail::mail_status,
             mail::mail_set_enabled,
             mail::mail_probe,
+            observability::observability_day_export,
             faceskins::face_skin_list,
             faceskins::face_skin_create,
             faceskins::face_skin_pick_and_import,

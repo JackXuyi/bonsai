@@ -749,9 +749,14 @@ use crate::memory::clock;
         // forget_all still cascades the relationship tables.
         ensure_relationship(&conn).unwrap();
         add_relationship_log(&conn, 1, "熟络了。").unwrap();
+        // P4-4：能力线一并清掉。
+        ensure_ability(&conn).unwrap();
+        add_ability_log(&conn, 1, "能办事了。").unwrap();
         forget_all(&conn).unwrap();
         assert!(relationship_state(&conn).unwrap().is_none());
         assert!(pending_relationship_logs(&conn).unwrap().is_empty());
+        assert!(ability_state(&conn).unwrap().is_none());
+        assert!(pending_ability_logs(&conn).unwrap().is_empty());
     }
 
     #[test]

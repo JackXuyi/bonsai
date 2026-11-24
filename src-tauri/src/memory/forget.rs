@@ -92,7 +92,9 @@ pub fn forget_all(conn: &Connection) -> rusqlite::Result<()> {
          DELETE FROM sessions; DELETE FROM tool_calls; DELETE FROM calendar_cache;
          DELETE FROM user_profile_history; DELETE FROM user_profile;
          DELETE FROM relationship_log; DELETE FROM relationship_progress;
-         DELETE FROM relationship; DELETE FROM onboarding_answers; DELETE FROM settings;
+         DELETE FROM relationship;
+         DELETE FROM ability_log; DELETE FROM ability_progress; DELETE FROM ability;
+         DELETE FROM onboarding_answers; DELETE FROM settings;
          DELETE FROM growth_log; DELETE FROM growth; DELETE FROM predictions;
          DELETE FROM boundaries; DELETE FROM preferences; DELETE FROM facts;
          DELETE FROM events;",

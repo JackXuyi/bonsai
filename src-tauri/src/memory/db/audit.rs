@@ -290,10 +290,38 @@ pub fn task_finish(
     final_reply: Option<&str>,
 ) -> rusqlite::Result<()> {
     conn.execute(
-        "UPDATE tasks SET status = ?2, tool_calls = ?3, final_reply = ?4 WHERE id = ?1",
-        params![id, status, tool_calls_count, final_reply],
+        "UPDATE tasks SET status = ?2, tool_calls = ?3, final_reply = ?4,
+                finished_at = COALESCE(finished_at, ?5) WHERE id = ?1",
+        params![id, status, tool_calls_count, final_reply, clock::now_iso()],
     )?;
     Ok(())
+}
+
+/// P4-4：任务是否「全部校验通过」——`done` 且（无计划或每步 status=done）。
+pub fn task_fully_validated(conn: &Connection, id: &str) -> rusqlite::Result<bool> {
+    let row: Option<(String, String)> = conn
+        .query_row(
+            "SELECT status, COALESCE(plan_mode, 'none') FROM tasks WHERE id = ?1",
+            params![id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((status, mode)) = row else {
+        return Ok(false);
+    };
+    if status != "done" {
+        return Ok(false);
+    }
+    if mode != "planned" {
+        return Ok(true);
+    }
+    let Some(plan) = plan_get(conn, id)? else {
+        return Ok(false);
+    };
+    if plan.steps.is_empty() {
+        return Ok(false);
+    }
+    Ok(plan.steps.iter().all(|s| s.status == "done"))
 }
 
 /// 写计划 JSON（T2 计划轮产出 / T4 replan 覆盖）。
