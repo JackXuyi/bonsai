@@ -14,6 +14,7 @@ use chrono::{DateTime, Local};
 use rusqlite::Connection;
 
 use crate::calendar::{self, CalendarAccess, CalendarError, EventItem};
+use crate::intent_router::{self, Match, Rule, Table};
 
 // ---------------------------------------------------------------- intents
 
@@ -85,26 +86,46 @@ const SCHEDULE_WORDS: &[&str] = &[
     "一场会",
 ];
 
+/// Bare schedule nouns that default to today without a time word.
+/// "会议" alone is ambiguous ("会议室…") — excluded on purpose.
+const BARE_TODAY: &[&str] = &["日程", "安排"];
+
 /// These turn a calendar-ish sentence into a different task (notes, minutes,
 /// summaries). "帮我整理今天的会议记录" is not a schedule query.
 const EXCLUSIONS: &[&str] = &["记录", "纪要", "总结", "整理", "复盘", "模板"];
 
-fn normalise(text: &str) -> String {
-    text.chars()
-        .filter(|c| !c.is_whitespace())
-        .collect::<String>()
-        .to_lowercase()
-}
+/// 日程双命中表（Today / Tomorrow / 裸「日程|安排」）。Next 与 Search 在表前处理：
+/// Next 是长短语优先；Search 带查询捕获，无法进纯标签表。
+const AGENDA_RULES: &[Rule<'static, ToolIntent>] = &[
+    Rule {
+        when: Match::All(&[SCHEDULE_WORDS, TOMORROW_WORDS]),
+        label: ToolIntent::AgendaTomorrow,
+    },
+    Rule {
+        when: Match::All(&[SCHEDULE_WORDS, TODAY_WORDS]),
+        label: ToolIntent::AgendaToday,
+    },
+    Rule {
+        when: Match::Any(BARE_TODAY),
+        label: ToolIntent::AgendaToday,
+    },
+];
+
+const AGENDA_TABLE: Table<'static, ToolIntent> = Table {
+    exclusions: &[], // 排除词在 route 入口统一处理
+    rules: AGENDA_RULES,
+};
 
 pub fn route(text: &str) -> ToolIntent {
-    let t = normalise(text);
+    let t = intent_router::normalise(text);
     if t.is_empty() {
         return ToolIntent::None;
     }
     if EXCLUSIONS.iter().any(|w| t.contains(w)) {
         return ToolIntent::None;
     }
-    if NEXT_PHRASES.iter().any(|p| t.contains(p)) {
+    // 顺序锁定：长短语 Next → 搜索捕获 → 日程双命中（与历史逐字等价）。
+    if Match::Any(NEXT_PHRASES).hits(&t) {
         return ToolIntent::NextEvent;
     }
     // "找一下关于预算的会" / "查查有关部门的会议": requires a lookup verb AND a
@@ -115,21 +136,9 @@ pub fn route(text: &str) -> ToolIntent {
             return ToolIntent::SearchEvent(q);
         }
     }
-    let has_schedule = SCHEDULE_WORDS.iter().any(|w| t.contains(w));
-    if has_schedule {
-        if TOMORROW_WORDS.iter().any(|w| t.contains(w)) {
-            return ToolIntent::AgendaTomorrow;
-        }
-        if TODAY_WORDS.iter().any(|w| t.contains(w)) {
-            return ToolIntent::AgendaToday;
-        }
-        // "日程" with no time word means today; "会议" without a time word is
-        // ambiguous ("会议室…"), so it needs the time word to route.
-        if t.contains("日程") || t.contains("安排") {
-            return ToolIntent::AgendaToday;
-        }
-    }
-    ToolIntent::None
+    AGENDA_TABLE
+        .first_on_normalised(&t)
+        .unwrap_or(ToolIntent::None)
 }
 
 fn extract_query(t: &str) -> Option<String> {

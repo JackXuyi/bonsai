@@ -21,6 +21,7 @@ pub mod faceskins;
 pub mod failure;
 pub mod filetools;
 pub mod generation;
+pub mod intent_router;
 pub mod llm;
 pub mod llm_admin;
 pub mod llm_cloud;

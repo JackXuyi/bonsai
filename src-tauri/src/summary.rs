@@ -126,36 +126,31 @@ const EXCLUDE_OBJECTS: &[&str] = &[
     "会议内容",
 ];
 
-fn normalise(text: &str) -> String {
-    text.chars()
-        .filter(|c| !c.is_whitespace())
-        .collect::<String>()
-        .to_lowercase()
-}
-
 /// Rule-based intent, deliberately model-free: a wrong hijack is the most
 /// damaging failure this feature can have, and a dead model must not change
 /// whether "总结一下今天" works.
+///
+/// 表驱动（intent_router）：排除物 → 动词∩周窗 → 动词∩日窗。周优先于日
+/// （「今天和这周」取宽窗）。
+const SUMMARY_RULES: &[crate::intent_router::Rule<'static, SummaryKind>] = &[
+    crate::intent_router::Rule {
+        when: crate::intent_router::Match::All(&[SUMMARY_VERBS, WEEK_WORDS]),
+        label: SummaryKind::Weekly,
+    },
+    crate::intent_router::Rule {
+        when: crate::intent_router::Match::All(&[SUMMARY_VERBS, DAY_WORDS]),
+        label: SummaryKind::Daily,
+    },
+];
+
+const SUMMARY_TABLE: crate::intent_router::Table<'static, SummaryKind> =
+    crate::intent_router::Table {
+        exclusions: EXCLUDE_OBJECTS,
+        rules: SUMMARY_RULES,
+    };
+
 pub fn intent(text: &str) -> Option<SummaryKind> {
-    let t = normalise(text);
-    if t.is_empty() {
-        return None;
-    }
-    if EXCLUDE_OBJECTS.iter().any(|w| t.contains(w)) {
-        return None;
-    }
-    if !SUMMARY_VERBS.iter().any(|w| t.contains(w)) {
-        return None;
-    }
-    // Weekly wins when both appear ("今天和这周"): the wider window contains
-    // the narrower one, so answering weekly loses nothing.
-    if WEEK_WORDS.iter().any(|w| t.contains(w)) {
-        return Some(SummaryKind::Weekly);
-    }
-    if DAY_WORDS.iter().any(|w| t.contains(w)) {
-        return Some(SummaryKind::Daily);
-    }
-    None
+    SUMMARY_TABLE.first(text)
 }
 
 // ---------------------------------------------------------------- window

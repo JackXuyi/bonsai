@@ -37,23 +37,31 @@ pub(crate) const CLOUD_REQUEST_CAP: usize = 6;
 ///
 /// **只在云端分支调用**——本地路径永不规划（本地零工具调用硬约束，A9）。
 /// 保守判定：宁可漏规划，不可误规划——误规划会多花一次云端请求且打断
-/// 单步任务。三级信号：
+/// 单步任务。三级信号（intent_router::Match）：
 ///   1. 显式规划 cue（「规划一下/列步骤/分几步」）或成对序列词（先…再）→ 命中；
 ///   2. ≥2 个不同动作动词 且 kit 有 ≥2 工具 → 命中；
 ///   3. ≥2 个工具域关键词 且 kit 有 ≥2 工具 → 命中。
 pub(crate) fn plan_intent(user_text: &str, kit: &crate::mcp_admin::AgentKit) -> bool {
+    use crate::intent_router::{normalise, Match};
+
+    let t = normalise(user_text);
     // 强 cue：明确要求规划/分步/多件事一起做，单个即命中（不依赖 kit）。
     pub(crate) const STRONG: &[&str] = &[
         "规划一下", "帮我规划", "列个步骤", "列出步骤", "列步骤",
         "分几步", "分步骤", "一步步", "一起做", "按顺序",
     ];
-    if STRONG.iter().any(|c| user_text.contains(c)) {
+    if Match::Any(STRONG).hits(&t) {
         return true;
     }
     // 序列 cue 必须成对（「先…再」「先…然后」）——单字「先/再」太易误伤
     // （「再说」「先这样」）。
     pub(crate) const SEQ: &[&str] = &["先", "再", "然后", "接着", "随后", "之后"];
-    if SEQ.iter().filter(|c| user_text.contains(**c)).count() >= 2 {
+    if (Match::AtLeast {
+        lexicon: SEQ,
+        min: 2,
+    })
+    .hits(&t)
+    {
         return true;
     }
     // 多动作 / 多域都要求 kit 有 ≥2 工具：单工具场景一步就做完，无需规划。
@@ -67,24 +75,23 @@ pub(crate) fn plan_intent(user_text: &str, kit: &crate::mcp_admin::AgentKit) -> 
         "整理", "总结", "合并", "生成", "汇总", "对比", "列出",
         "下载", "打开", "删除", "导出", "导入", "复制", "移动",
     ];
-    let actions: std::collections::HashSet<&str> = ACTIONS
-        .iter()
-        .copied()
-        .filter(|a| user_text.contains(a))
-        .collect();
-    if actions.len() >= 2 {
+    if (Match::AtLeast {
+        lexicon: ACTIONS,
+        min: 2,
+    })
+    .hits(&t)
+    {
         return true;
     }
     pub(crate) const DOMAINS: &[&str] = &[
         "文件", "文档", "网页", "网址", "链接", "日程", "会议", "日历",
         "邮件", "记忆", "笔记", "备忘录", "剪贴板", "目录", "文件夹",
     ];
-    let domains: std::collections::HashSet<&str> = DOMAINS
-        .iter()
-        .copied()
-        .filter(|d| user_text.contains(d))
-        .collect();
-    domains.len() >= 2
+    (Match::AtLeast {
+        lexicon: DOMAINS,
+        min: 2,
+    })
+    .hits(&t)
 }
 
 /// 计划步数上限（plan-planning §7）：低于 CLOUD_TOOL_CALL_CAP=8，留 2 步
@@ -311,14 +318,21 @@ pub(crate) fn skip_remaining_steps(store: &MemoryStore, task_id: &str, reason: &
 
 /// T4：自然语言取消意图（纯规则，零成本）。仅识别明确的停止指令，
 /// 避免误伤「别做了那件事吧」这类含「别做」的正常表达——要求短句或
-/// 取消词独立成词。
+/// 取消词独立成词（intent_router NearPhrase / Exact）。
 pub(crate) fn cancel_intent(user_text: &str) -> bool {
-    let t = user_text.trim();
-    pub(crate) const FULL_STOPS: [&str; 6] = ["别做了", "停一下", "停停", "取消吧", "不做了", "停手"];
-    if FULL_STOPS.iter().any(|s| t == *s || t.len() <= s.len() + 2 && t.contains(s)) {
-        return true;
+    use crate::intent_router::{normalise, Match};
+
+    // 取消指令按「去空白后」比对，与历史 trim 语义对齐并吞掉中间空格。
+    let t = normalise(user_text);
+    pub(crate) const FULL_STOPS: &[&str] =
+        &["别做了", "停一下", "停停", "取消吧", "不做了", "停手"];
+    pub(crate) const EXACT: &[&str] = &["停", "取消", "别做", "不要了"];
+    Match::NearPhrase {
+        phrases: FULL_STOPS,
+        slack: 2,
     }
-    t == "停" || t == "取消" || t == "别做" || t == "不要了"
+    .hits(&t)
+        || Match::Exact(EXACT).hits(&t)
 }
 
 /// `AgentKit` → DeepSeek `tools[]`。skill 不进列表（提示注入、不可执行）；
