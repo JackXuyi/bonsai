@@ -276,6 +276,7 @@ pub fn run() {
             failure::loops_status,
             failure::loop_autorestart_get,
             failure::loop_autorestart_set,
+            failure::failures_recent,
             memory::memory_overview,
             generation::scaffold_reply,
             face::face_current,

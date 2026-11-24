@@ -40,6 +40,7 @@ import type {
   TurnTrace,
   WebStatus,
   FaceSkinManifest,
+  FailureRecent,
   LoopStatus,
 } from "./types";
 
@@ -242,6 +243,10 @@ export const loopsStatus = () => call<LoopStatus[]>("loops_status");
 export const loopAutorestartGet = () => call<boolean>("loop_autorestart_get");
 export const loopAutorestartSet = (enabled: boolean) =>
   call<boolean>("loop_autorestart_set", { enabled });
+
+/** 设置页诊断：最近失败（turn + consolidate），默认 10 条。 */
+export const failuresRecent = (limit?: number) =>
+  call<FailureRecent[]>("failures_recent", { limit });
 
 // ---------- agent 工具管线（mcp_admin.rs，spec-s2/s4/s5）----------
 export const mcpServerList = () => call<McpServerRow[]>("mcp_server_list");

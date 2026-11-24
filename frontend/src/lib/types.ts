@@ -12,6 +12,14 @@ export interface LoopStatus {
   restarts: number;
 }
 
+/** 设置页诊断行（plan-retry §7.4 / failure::failures_recent） */
+export interface FailureRecent {
+  source: "turn" | "consolidate" | string;
+  kind: string;
+  hint: string;
+  at: string;
+}
+
 // ── face ──────────────────────────────────────────────────────
 export type FaceState =
   | "calm"

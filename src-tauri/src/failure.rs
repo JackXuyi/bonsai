@@ -911,6 +911,95 @@ pub fn on_loop_cap(app: &AppHandle, name: &'static str, detail: &str) -> bool {
 
 // ---------------------------------------------------------------- commands
 
+/// 设置页「诊断」只读行（plan-retry §7.4）：turn 失败 + 巩固失败合并，按时间倒序。
+#[derive(Debug, Clone, Serialize)]
+pub struct FailureRecentDto {
+    /// `"turn"` | `"consolidate"`
+    pub source: String,
+    pub kind: String,
+    pub hint: String,
+    /// ISO 时间（turn=`ts`；consolidate=`finished_at`/`started_at`）
+    pub at: String,
+}
+
+/// 合并 `turn_trace.error_kind`（仅未落 assistant 的失败轮）与
+/// `consolidate_runs.error`，取最近 `limit` 条（默认 10，上限 50）。
+pub fn list_recent_failures(conn: &rusqlite::Connection, limit: u32) -> rusqlite::Result<Vec<FailureRecentDto>> {
+    let cap = limit.clamp(1, 50) as usize;
+    let fetch = (cap * 2).max(20) as i64; // 每源多取一点再归并截断
+
+    let mut rows: Vec<(String, FailureRecentDto)> = Vec::new();
+
+    {
+        let mut stmt = conn.prepare(
+            "SELECT error_kind, ts FROM turn_trace
+             WHERE error_kind IS NOT NULL AND TRIM(error_kind) != ''
+               AND assistant_event_id IS NULL
+             ORDER BY ts DESC LIMIT ?1",
+        )?;
+        let iter = stmt.query_map(rusqlite::params![fetch], |r| {
+            let kind_raw: String = r.get(0)?;
+            let at: String = r.get(1)?;
+            Ok((kind_raw, at))
+        })?;
+        for item in iter {
+            let (kind_raw, at) = item?;
+            let kind = FailureKind::parse(&kind_raw).unwrap_or(FailureKind::Internal);
+            rows.push((
+                at.clone(),
+                FailureRecentDto {
+                    source: "turn".into(),
+                    kind: kind.as_str().into(),
+                    hint: kind.hint().into(),
+                    at,
+                },
+            ));
+        }
+    }
+
+    {
+        let mut stmt = conn.prepare(
+            "SELECT error, COALESCE(finished_at, started_at) AS at
+             FROM consolidate_runs
+             WHERE status IN ('error', 'failed')
+               AND error IS NOT NULL AND TRIM(error) != ''
+             ORDER BY at DESC LIMIT ?1",
+        )?;
+        let iter = stmt.query_map(rusqlite::params![fetch], |r| {
+            let detail: String = r.get(0)?;
+            let at: String = r.get(1)?;
+            Ok((detail, at))
+        })?;
+        for item in iter {
+            let (detail, at) = item?;
+            let f = Failure::from_tool(&detail);
+            rows.push((
+                at.clone(),
+                FailureRecentDto {
+                    source: "consolidate".into(),
+                    kind: f.kind.as_str().into(),
+                    hint: f.hint.into(),
+                    at,
+                },
+            ));
+        }
+    }
+
+    rows.sort_by(|a, b| b.0.cmp(&a.0));
+    Ok(rows.into_iter().take(cap).map(|(_, dto)| dto).collect())
+}
+
+#[tauri::command]
+pub fn failures_recent(
+    store: tauri::State<'_, MemoryStore>,
+    limit: Option<u32>,
+) -> Result<Vec<FailureRecentDto>, String> {
+    let n = limit.unwrap_or(10);
+    store
+        .with_read(|conn| list_recent_failures(conn, n))
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn loops_status(registry: tauri::State<'_, LoopRegistry>) -> Vec<LoopStatusDto> {
     registry.snapshot()
@@ -1049,5 +1138,53 @@ mod guard_tests {
         assert_eq!(cal.state, "running");
         assert_eq!(cal.restarts, 1);
         assert!(!reg.try_consume_restart("calendar"));
+    }
+
+    #[test]
+    fn recent_failures_merge_turn_and_consolidate_newest_first() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::memory::db::SCHEMA).unwrap();
+
+        // 有 assistant 的失败轮不进诊断（已收尾 / 本地拼装）。
+        conn.execute(
+            "INSERT INTO turn_trace (session_id, assistant_event_id, kind, error_kind, ts)
+             VALUES ('s', 1, 'model', 'server', '2026-11-24T10:00:00+08:00')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO turn_trace (session_id, kind, error_kind, ts)
+             VALUES ('s', 'model', 'timeout', '2026-11-24T12:00:00+08:00')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO turn_trace (session_id, kind, error_kind, ts)
+             VALUES ('s', 'model', 'auth', '2026-11-24T11:00:00+08:00')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO consolidate_runs
+               (started_at, finished_at, trigger, window_start, window_end, status, error)
+             VALUES ('2026-11-24T11:30:00+08:00', '2026-11-24T11:30:01+08:00',
+                     'nightly', 'a', 'b', 'error', 'connection refused')",
+            [],
+        )
+        .unwrap();
+
+        let list = list_recent_failures(&conn, 10).unwrap();
+        assert_eq!(list.len(), 3, "有 assistant 的那条被过滤");
+        assert_eq!(list[0].source, "turn");
+        assert_eq!(list[0].kind, "timeout");
+        assert_eq!(list[0].hint, FailureKind::Timeout.hint());
+        assert_eq!(list[1].source, "consolidate");
+        assert_eq!(list[1].kind, "transport");
+        assert_eq!(list[2].kind, "auth");
+
+        let capped = list_recent_failures(&conn, 2).unwrap();
+        assert_eq!(capped.len(), 2);
+        assert_eq!(capped[0].kind, "timeout");
+        assert_eq!(capped[1].kind, "transport");
     }
 }
