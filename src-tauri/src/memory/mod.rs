@@ -24,6 +24,7 @@ pub mod index;
 pub mod overview;
 pub mod profile;
 pub mod scheduler;
+pub mod synonym;
 
 use std::ops::Deref;
 use std::sync::{Mutex, MutexGuard};

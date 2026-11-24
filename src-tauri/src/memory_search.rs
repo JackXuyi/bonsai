@@ -424,9 +424,9 @@ pub(crate) fn keywords(text: &str, date_phrase: &str) -> Vec<String> {
     keywords_with(text, date_phrase, &[])
 }
 
-/// 单条 SQL 里最多挂多少条 LIKE 腿。16 条 × 万级行仍是毫秒量级，
-/// 而再多的 2-gram 只会把噪声腿也带进来。
-const MAX_LIKE_LEGS: usize = 16;
+/// 单条 SQL 里最多挂多少条 LIKE 腿。原腿 + 同义展开共享此上限
+///（S3：24，给近义簇留位；再多噪声腿收益递减）。
+const MAX_LIKE_LEGS: usize = 24;
 
 /// 能进腿的字符：停用字、ASCII 标点、空白一律不参与（它们是分词边界）。
 fn is_leg_char(c: char) -> bool {
@@ -486,9 +486,14 @@ fn push_leg(out: &mut Vec<String>, leg: String) {
 
 /// memory_search 真正下发给 SQL 的腿。基线（eval_recall）也走这一份，
 /// 量的才是线上行为。
+///
+/// S3（近义召回）：原腿之后追加同义簇展开，OR 进 LIKE——只多召回不漏。
 pub(crate) fn legs(text: &str, date_phrase: &str) -> Vec<String> {
     let bare = stripped(text, date_phrase, &[]);
-    legs_from_segments(&keywords(text, date_phrase), &bare)
+    let base = legs_from_segments(&keywords(text, date_phrase), &bare);
+    let mut out = crate::memory::synonym::expand_legs(&bare, &base);
+    out.truncate(MAX_LIKE_LEGS);
+    out
 }
 
 // ---------------------------------------------------------------- search core
@@ -601,8 +606,10 @@ fn beyond_window(
     window_start_iso: &str,
     out: &Recall,
 ) -> Vec<(String, String)> {
-    let rows = if crate::memory::index::has_tokens(query) {
-        crate::memory::db::search(conn, query, 16, true).unwrap_or_default()
+    // S3：FTS 查询侧同样扩同义，索引正文不改。
+    let expanded = crate::memory::synonym::expand_query(query);
+    let rows = if crate::memory::index::has_tokens(&expanded) {
+        crate::memory::db::search(conn, &expanded, 16, true).unwrap_or_default()
     } else {
         crate::memory::db::salient_facts(conn, MAX_BEYOND_ROWS).unwrap_or_default()
     };
