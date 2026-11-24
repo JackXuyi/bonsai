@@ -199,6 +199,50 @@ pub(crate) fn chat_turn_inner(
         match crate::tools::maybe_answer(&conn, access, user_text, chrono::Local::now()) {
             None => {
                 rec.simple("tool_intent", "日历规则路由", "miss", None);
+                // P3-1 邮件规则腿（plan-mail/v1）：日历 miss 后再判；本地零 tools[]。
+                // AppleMailSource 无状态；关开关时不调脚本，只回引导文案。
+                if let Some(reply) =
+                    crate::mail::maybe_answer(&conn, &crate::mail::AppleMailSource, user_text)
+                {
+                    rec.simple("tool_intent", "邮件规则路由", "hit", Some(&reply));
+                    let user_id = db::add_event_meta(
+                        &conn,
+                        "dialogue",
+                        user_text,
+                        Some("user"),
+                        Some(session_id),
+                    )?;
+                    let asst_id = db::add_event_meta(
+                        &conn,
+                        "dialogue",
+                        &reply,
+                        Some("assistant"),
+                        Some(session_id),
+                    )?;
+                    let turn_id = rec.persist(
+                        &conn,
+                        session_id,
+                        Some(user_id),
+                        Some(asst_id),
+                        "tool",
+                        false,
+                        Some("mail:unread".into()),
+                        None,
+                        Some(user_text),
+                        Some(&reply),
+                    )?;
+                    return Ok(DialogueOutcome {
+                        reply,
+                        filter: generation::FilterReport::default(),
+                        model_used: false,
+                        crisis: false,
+                        tool: Some("mail_unread".into()),
+                        task: None,
+                        turn_id: Some(turn_id),
+                        failure: None,
+                    });
+                }
+                rec.simple("tool_intent", "邮件规则路由", "miss", None);
             }
             Some(t) => {
                 rec.simple("tool_intent", "日历规则路由", "hit", Some(&t.reply));

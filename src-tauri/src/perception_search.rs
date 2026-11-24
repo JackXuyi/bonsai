@@ -46,6 +46,8 @@ const DOWNLOAD_LIMIT: usize = 30;
 const PREFIX_APP: &str = "app: ";
 const PREFIX_CLIP: &str = "clipboard: ";
 const PREFIX_DL: &str = "download: ";
+const PREFIX_WINDOW: &str = "window: ";
+const WINDOW_LIMIT: usize = 20;
 
 // ---------------------------------------------------------------- intent gate
 
@@ -141,6 +143,13 @@ struct DownloadRow {
     label: String,
 }
 
+/// P2-4 window title coarse labels: content is `window: App | label`.
+struct WindowRow {
+    stamp: String,
+    label: String,
+    count: i64,
+}
+
 struct PerceptionDigest {
     window_label: String,
     enabled: bool,
@@ -149,6 +158,8 @@ struct PerceptionDigest {
     clip_total: i64,
     downloads: Vec<DownloadRow>,
     download_total: i64,
+    windows: Vec<WindowRow>,
+    window_total: i64,
 }
 
 /// Aggregated GROUP BY rows for one content prefix: `(content, n, min_ts, max_ts)`.
@@ -262,6 +273,19 @@ fn collect(
     }
     let download_total = count_rows(conn, PREFIX_DL, iso_start, iso_end);
 
+    let win_rows = agg_rows(conn, PREFIX_WINDOW, iso_start, iso_end, true, WINDOW_LIMIT)
+        .into_iter()
+        .filter(|(c, _, _, _)| matches(c));
+    let mut windows = Vec::new();
+    for (c, n, _, max_ts) in win_rows {
+        windows.push(WindowRow {
+            stamp: crate::memory_search::local_stamp(&max_ts),
+            label: c.trim_start_matches(PREFIX_WINDOW).trim().to_string(),
+            count: n,
+        });
+    }
+    let window_total = count_rows(conn, PREFIX_WINDOW, iso_start, iso_end);
+
     PerceptionDigest {
         window_label: label.to_string(),
         enabled: true,
@@ -270,6 +294,8 @@ fn collect(
         clip_total,
         downloads,
         download_total,
+        windows,
+        window_total,
     }
 }
 
@@ -279,13 +305,18 @@ impl PerceptionDigest {
         if !self.enabled {
             return "感知采集没开，工具页里打开我才能看到你的电脑使用情况。".into();
         }
-        if self.apps.is_empty() && self.clips.is_empty() && self.downloads.is_empty() {
+        if self.apps.is_empty()
+            && self.clips.is_empty()
+            && self.downloads.is_empty()
+            && self.windows.is_empty()
+        {
             return format!("{}没有感知记录。", self.window_label);
         }
         let mut out = format!(
-            "【{}感知】应用 {} 个、剪贴板 {} 条、下载 {} 个\n",
+            "【{}感知】应用 {} 个、窗口 {} 条、剪贴板 {} 条、下载 {} 个\n",
             self.window_label,
             self.apps.len(),
+            self.window_total,
             self.clip_total,
             self.download_total
         );
@@ -297,6 +328,15 @@ impl PerceptionDigest {
                 .collect::<Vec<_>>()
                 .join("、");
             out.push_str(&format!("应用：{list}\n"));
+        }
+        if !self.windows.is_empty() {
+            let list = self
+                .windows
+                .iter()
+                .map(|w| format!("{}「{}」×{}", w.stamp, w.label, w.count))
+                .collect::<Vec<_>>()
+                .join("、");
+            out.push_str(&format!("窗口：{list}\n"));
         }
         if !self.clips.is_empty() {
             let list = self
@@ -327,10 +367,14 @@ impl PerceptionDigest {
             "window": self.window_label,
             "perception_enabled": self.enabled,
             "app_count": self.apps.len(),
+            "window_title_count": self.window_total,
             "clipboard_count": self.clip_total,
             "download_count": self.download_total,
             "apps": self.apps.iter().map(|a| serde_json::json!({
                 "name": a.name, "count": a.count, "first": a.first, "last": a.last,
+            })).collect::<Vec<_>>(),
+            "window_titles": self.windows.iter().map(|w| serde_json::json!({
+                "ts": w.stamp, "label": w.label, "count": w.count,
             })).collect::<Vec<_>>(),
             "clipboard": self.clips.iter().map(|c| serde_json::json!({
                 "ts": c.stamp, "text": c.text,
@@ -368,7 +412,8 @@ fn perception_enabled(conn: &Connection) -> bool {
                 return false;
             };
             let cfg = crate::perception::load_config(&parent.join("perception.json"));
-            cfg.enabled && (cfg.active_app || cfg.clipboard || cfg.downloads)
+            cfg.enabled
+                && (cfg.active_app || cfg.clipboard || cfg.downloads || cfg.window_title)
         }
     }
 }
@@ -380,7 +425,7 @@ fn perception_enabled(conn: &Connection) -> bool {
 pub fn builtin_descriptor() -> ToolDescriptor {
     ToolDescriptor {
         name: "perception_search".into(),
-        summary: "查一段时间内你在用什么应用、复制过什么、下载过什么（本地，聚合视图）".into(),
+        summary: "查一段时间内你在用什么应用、窗口粗标签、复制过什么、下载过什么（本地，聚合视图）".into(),
         detail: r#"{"type":"object","properties":{"query":{"type":"string","description":"用户原话，日期由系统解析；给了 date_from/date_to 时可省"},"date_from":{"type":"string","description":"显式开始日期 YYYY-MM-DD（含）；与 date_to 成对给出，给出时按整窗聚合，忽略关键词"},"date_to":{"type":"string","description":"显式结束日期 YYYY-MM-DD（含）"}}}"#.into(),
         kind: ToolKind::Builtin,
         remote: false,

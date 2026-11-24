@@ -74,17 +74,31 @@ export interface RelationshipStatus {
 }
 
 // ── perception（perception.rs）────────────────────────────────
+/** P2-4 教名词（src-tauri/src/perception.rs TaughtNoun）。 */
+export interface TaughtNoun {
+  needle: string;
+  label: string;
+}
+
 export interface PerceptionConfig {
   enabled: boolean;
   clipboard: boolean;
   active_app: boolean;
   downloads: boolean;
+  /** P2-4：窗口标题白名单采集，默认关。 */
+  window_title?: boolean;
+  title_allowlist?: string[];
+  taught_nouns?: TaughtNoun[];
 }
 
 export interface PerceptionStatus {
   enabled: boolean;
   idle_secs?: number;
   front_app?: string;
+  front_title?: string | null;
+  window_title?: boolean;
+  title_allowlist?: string[];
+  taught_nouns?: TaughtNoun[];
 }
 
 // ── calendar（calendar.rs）────────────────────────────────────
@@ -119,6 +133,15 @@ export interface FsStatus {
 /** P3-3 Web 检索状态（src-tauri/src/webtools.rs WebStatus）。 */
 export interface WebStatus {
   enabled: boolean;
+}
+
+/** P3-1 邮件状态（src-tauri/src/mail.rs MailStatus）。 */
+export interface MailStatus {
+  enabled: boolean;
+  supported: boolean;
+  today_reads: number;
+  today_drafts: number;
+  note: string;
 }
 
 /** 表情自定义皮肤 manifest（src-tauri/src/faceskins.rs FaceSkinManifest）。

@@ -37,9 +37,25 @@ describe("commands", () => {
     await calendarSetConfig({ enabled: true });
     expect(invokeMock).toHaveBeenCalledWith("calendar_set_config", { enabled: true });
 
-    await perceptionSetConfig({ enabled: true, clipboard: false, active_app: true, downloads: false });
+    await perceptionSetConfig({
+      enabled: true,
+      clipboard: false,
+      active_app: true,
+      downloads: false,
+      window_title: true,
+      title_allowlist: ["Cursor"],
+      taught_nouns: [{ needle: "bonsai", label: "盆栽" }],
+    });
     expect(invokeMock).toHaveBeenCalledWith("perception_set_config", {
-      cfg: { enabled: true, clipboard: false, active_app: true, downloads: false },
+      cfg: {
+        enabled: true,
+        clipboard: false,
+        active_app: true,
+        downloads: false,
+        window_title: true,
+        title_allowlist: ["Cursor"],
+        taught_nouns: [{ needle: "bonsai", label: "盆栽" }],
+      },
     });
 
     const channel = { toJSON: () => 0 };

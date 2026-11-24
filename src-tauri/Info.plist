@@ -10,5 +10,11 @@
   <string>阿盆读你的日程，只为了在你开会前提醒一句、开会时不打扰你。</string>
   <key>NSCalendarsWriteOnlyAccessUsageDescription</key>
   <string>阿盆不会创建或修改日程。</string>
+  <!-- P3-1 邮件：osascript 控制 Mail.app 需要 Automation；缺此键时授权框可能不出现。 -->
+  <key>NSAppleEventsUsageDescription</key>
+  <string>阿盆只读你的未读邮件发件人与主题，并可帮你开草稿（不会代发）。邮件内容不会离开这台电脑。</string>
+  <!-- P2-4：读取窗口标题（CGWindowList / kCGWindowName）在较新 macOS 上会走屏幕录制权限。 -->
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>阿盆只在你勾选的应用上读取窗口标题粗标签，不会截屏，内容不会离开这台电脑。</string>
 </dict>
 </plist>

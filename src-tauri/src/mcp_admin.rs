@@ -789,6 +789,11 @@ pub fn build_agent_kit(conn: &Connection, state: &AgentState, user_text: &str) -
         providers.push(Box::new(crate::webtools::WebToolsProvider::new()));
     }
 
+    // P3-1 邮件（plan-mail/v1）：默认关；开了才进 kit。Denied ≠ empty。
+    if crate::mail::is_enabled(conn) {
+        providers.push(Box::new(crate::mail::MailToolsProvider::apple()));
+    }
+
     // Skills first (prompt-only), then MCP tools — catalog order is stable
     // either way (sorted by name in AgentKit::catalog).
     // Engine packs are loaded separately and handed to summary.rs: they must
@@ -2013,5 +2018,33 @@ pub(crate) mod tests {
         assert_eq!(records[0].action, "weather");
         assert_eq!(records[1].result_status.as_deref(), Some("asked_allowed"));
         assert_eq!(records[2].result_status.as_deref(), Some("cache_hit"));
+    }
+
+    #[test]
+    fn mail_provider_mounts_only_when_enabled() {
+        let s = mem_store();
+        let state = AgentState {
+            manager: crate::mcp::McpManager::default(),
+            skills_dir: std::env::temp_dir(),
+            approvals: Arc::new(ApprovalBroker::default()),
+            app: None,
+        };
+        let off = with_conn(&s, |conn| build_agent_kit(conn, &state, "今天有什么邮件"));
+        assert!(
+            !off.catalog_all().iter().any(|d| d.name.starts_with("mail_")),
+            "默认关时 kit 不得出现 mail_*"
+        );
+        with_conn(&s, |conn| {
+            crate::mail::set_enabled(conn, true).unwrap();
+        });
+        let on = with_conn(&s, |conn| build_agent_kit(conn, &state, "今天有什么邮件"));
+        let names: Vec<_> = on
+            .catalog_all()
+            .into_iter()
+            .map(|d| d.name)
+            .filter(|n| n.starts_with("mail_"))
+            .collect();
+        assert!(names.contains(&"mail_unread".to_string()));
+        assert!(names.contains(&"mail_draft".to_string()));
     }
 }

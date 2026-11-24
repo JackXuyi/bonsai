@@ -30,6 +30,7 @@ pub mod llm_admin;
 pub mod llm_cloud;
 pub mod llm_models;
 pub mod llm_pull;
+pub mod mail;
 pub mod mcp;
 pub mod mcp_admin;
 pub mod mcp_discover;
@@ -258,6 +259,12 @@ pub fn run() {
             app.manage(calendar::CalendarState { source: calendar_source });
             calendar::spawn(app.handle().clone());
 
+            // P3-1 邮件（docs/zh/plan-mail/v1）：默认关；Automation 权限由用户
+            // 开开关后首次读触发。MailSource 无状态，AppleScript 进程内执行。
+            app.manage(mail::MailState {
+                source: Box::new(mail::AppleMailSource),
+            });
+
             // L0: tray icon + menu. The main window is created lazily on click,
             // keeping "boot to tray ready" fast.
             tray::setup(app)?;
@@ -382,6 +389,9 @@ pub fn run() {
             filetools::fs_pick_directory,
             webtools::web_status,
             webtools::web_set_config,
+            mail::mail_status,
+            mail::mail_set_enabled,
+            mail::mail_probe,
             faceskins::face_skin_list,
             faceskins::face_skin_create,
             faceskins::face_skin_pick_and_import,

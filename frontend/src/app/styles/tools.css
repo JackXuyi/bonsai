@@ -238,6 +238,27 @@
   filter: saturate(0.4);
 }
 
+/* P2-4 窗口标题白名单 / 教名词（PerceptionCard） */
+.perc-screen {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  padding: 6px 2px 8px;
+}
+
+.perc-screen-list {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.perc-screen-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
 .row {
   display: flex;
   align-items: center;

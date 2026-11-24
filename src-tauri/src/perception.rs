@@ -1,11 +1,12 @@
-//! L1 — Perception layer (report §8.2): 前台 App、idle、剪贴板、下载目录。
+//! L1 — Perception layer (report §8.2): 前台 App、idle、剪贴板、下载目录；
+//! P2-4（plan-screen-l2/v1）起可选窗口标题（仅白名单 App + 教名词粗标签）。
 //!
 //! Hard constraints from the research report:
 //! - **逐项授权、默认关闭**: every signal source has its own switch and the
 //!   whole layer is off until the user turns it on (`perception_set_config`).
 //! - **原文不出机器**: signals land in the local SQLite events table as
-//!   coarse labels only. Window titles are deliberately NOT captured —
-//!   only the frontmost app name is.
+//!   coarse labels only. 默认只记前台 App 名；窗口标题须显式开启且 App
+//!   在 `title_allowlist` 内，否则事件中不得出现窗口信息。
 //! - L1 feeds L4 (decision). Whether to speak ≠ what to say: this module
 //!   only produces the *input* to `decision::should_speak`.
 
@@ -22,8 +23,17 @@ use crate::memory::MemoryStore;
 pub const POLL_INTERVAL_SECS: u64 = 15;
 /// Clipboard text above this is truncated before it is stored (bloat guard).
 pub const MAX_CLIPBOARD_CHARS: usize = 1000;
+/// Window title coarse label cap (plan-screen-l2/v1).
+pub const MAX_TITLE_CHARS: usize = 80;
 
 // ---------------------------------------------------------------- config
+
+/// User-taught noun: if the raw title contains `needle`, store `label` instead.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaughtNoun {
+    pub needle: String,
+    pub label: String,
+}
 
 /// Per-signal switches, persisted as JSON in the app data dir.
 /// **Default all-off**: the user enables each source explicitly.
@@ -33,6 +43,15 @@ pub struct PerceptionConfig {
     pub clipboard: bool,
     pub active_app: bool,
     pub downloads: bool,
+    /// P2-4：是否采集窗口标题（仍须命中 allowlist）。
+    #[serde(default)]
+    pub window_title: bool,
+    /// 允许写入 `window:` 事件的前台 App 名（与 OS 回报名大小写不敏感匹配）。
+    #[serde(default)]
+    pub title_allowlist: Vec<String>,
+    /// 标题含子串 needle 时改存用户给的短 label。
+    #[serde(default)]
+    pub taught_nouns: Vec<TaughtNoun>,
 }
 
 impl Default for PerceptionConfig {
@@ -42,6 +61,9 @@ impl Default for PerceptionConfig {
             clipboard: false,
             active_app: false,
             downloads: false,
+            window_title: false,
+            title_allowlist: Vec::new(),
+            taught_nouns: Vec::new(),
         }
     }
 }
@@ -56,7 +78,18 @@ impl PerceptionConfig {
             Source::Clipboard => self.clipboard,
             Source::ActiveApp => self.active_app,
             Source::Downloads => self.downloads,
+            Source::WindowTitle => self.window_title,
         }
+    }
+
+    pub fn app_allowlisted(&self, app: &str) -> bool {
+        let app = app.trim();
+        if app.is_empty() {
+            return false;
+        }
+        self.title_allowlist
+            .iter()
+            .any(|a| a.trim().eq_ignore_ascii_case(app))
     }
 }
 
@@ -65,6 +98,8 @@ pub enum Source {
     Clipboard,
     ActiveApp,
     Downloads,
+    /// P2-4 window title (allowlisted apps only).
+    WindowTitle,
 }
 
 /// Load the persisted config, falling back to all-off on any error
@@ -92,8 +127,10 @@ pub fn save_config(cfg: &PerceptionConfig, path: &std::path::Path) -> std::io::R
 pub struct LatestSignals {
     /// Seconds since the last keyboard/mouse input (macOS CGEventSource).
     pub idle_secs: f64,
-    /// Frontmost application name (coarse; no window titles).
+    /// Frontmost application name (coarse).
     pub front_app: Option<String>,
+    /// Coarse window label when allowlisted + window_title on; else None.
+    pub front_title: Option<String>,
     pub updated_ts: String,
 }
 
@@ -128,12 +165,12 @@ mod os {
         }
     }
 
-    /// Frontmost application name via NSWorkspace. Coarse label only.
-    pub fn front_app() -> Option<String> {
+    /// `(app_name, window_title)` — title may be empty without Screen Recording.
+    pub fn front_window() -> Option<(String, String)> {
         active_win_pos_rs::get_active_window()
             .ok()
-            .map(|w| w.app_name)
-            .filter(|s| !s.trim().is_empty())
+            .map(|w| (w.app_name, w.title))
+            .filter(|(app, _)| !app.trim().is_empty())
     }
 }
 
@@ -142,7 +179,7 @@ mod os {
     pub fn idle_secs() -> Option<f64> {
         None
     }
-    pub fn front_app() -> Option<String> {
+    pub fn front_window() -> Option<(String, String)> {
         None
     }
 }
@@ -153,16 +190,30 @@ mod os {
 pub struct OsInputs {
     pub idle: Option<f64>,
     pub app: Option<String>,
+    /// Raw window title from OS (may be empty); Collector decides allowlist.
+    pub title: Option<String>,
     pub clipboard: Option<String>,
 }
 
 impl OsInputs {
     /// Sample the actual OS (macOS collectors; clipboard via arboard).
     pub fn real(cfg: &PerceptionConfig) -> Self {
+        let need_front =
+            cfg.source_on(Source::ActiveApp) || cfg.source_on(Source::WindowTitle);
+        let (app, title) = if need_front {
+            match os::front_window() {
+                Some((a, t)) => (Some(a), Some(t)),
+                None => (None, None),
+            }
+        } else {
+            (None, None)
+        };
         OsInputs {
             idle: os::idle_secs(),
-            app: if cfg.source_on(Source::ActiveApp) {
-                os::front_app()
+            // window_title 也需要 app 名做白名单；active_app 关时仍可写 window:。
+            app: if need_front { app } else { None },
+            title: if cfg.source_on(Source::WindowTitle) {
+                title
             } else {
                 None
             },
@@ -173,6 +224,26 @@ impl OsInputs {
             },
         }
     }
+}
+
+/// Resolve stored coarse label for a raw title (taught noun wins).
+pub fn resolve_window_label(cfg: &PerceptionConfig, raw_title: &str) -> String {
+    let t = raw_title.trim();
+    if t.is_empty() {
+        return "(无标题)".into();
+    }
+    let lower = t.to_lowercase();
+    for n in &cfg.taught_nouns {
+        let needle = n.needle.trim();
+        let label = n.label.trim();
+        if needle.is_empty() || label.is_empty() {
+            continue;
+        }
+        if lower.contains(&needle.to_lowercase()) {
+            return label.chars().take(40).collect();
+        }
+    }
+    clip_clipboard(t, MAX_TITLE_CHARS)
 }
 
 /// Clipboard text. Any failure (empty, non-text, permissions) → None.
@@ -240,6 +311,8 @@ fn list_downloads() -> Vec<(String, u64)> {
 pub struct Collector {
     last_clip_hash: Option<u64>,
     last_app: Option<String>,
+    /// Dedup key: `(app, coarse_label)`.
+    last_window: Option<(String, String)>,
     seen_downloads: HashSet<String>,
 }
 
@@ -286,6 +359,24 @@ impl Collector {
                         content: format!("app: {app}"),
                         source: Source::ActiveApp,
                     });
+                }
+            }
+        }
+
+        // P2-4：仅白名单 App 写 window:；未勾选 = 无窗口信息（S2/S4）。
+        if cfg.source_on(Source::WindowTitle) {
+            if let Some(app) = &inputs.app {
+                if cfg.app_allowlisted(app) {
+                    let raw = inputs.title.as_deref().unwrap_or("");
+                    let label = resolve_window_label(cfg, raw);
+                    let key = (app.clone(), label.clone());
+                    if self.last_window.as_ref() != Some(&key) {
+                        self.last_window = Some(key);
+                        out.push(Sample {
+                            content: format!("window: {app} | {label}"),
+                            source: Source::WindowTitle,
+                        });
+                    }
                 }
             }
         }
@@ -368,7 +459,23 @@ pub fn spawn(app: tauri::AppHandle, cfg_path: PathBuf) {
                 if let Some(state) = app.try_state::<PerceptionState>() {
                     let mut latest = state.latest.lock().unwrap_or_else(|e| e.into_inner());
                     latest.idle_secs = idle;
-                    latest.front_app = inputs.app;
+                    latest.front_app = if cfg.source_on(Source::ActiveApp) || cfg.source_on(Source::WindowTitle)
+                    {
+                        inputs.app.clone()
+                    } else {
+                        None
+                    };
+                    latest.front_title = match (&inputs.app, &inputs.title) {
+                        (Some(app), Some(_))
+                            if cfg.source_on(Source::WindowTitle) && cfg.app_allowlisted(app) =>
+                        {
+                            Some(resolve_window_label(
+                                &cfg,
+                                inputs.title.as_deref().unwrap_or(""),
+                            ))
+                        }
+                        _ => None,
+                    };
                     latest.updated_ts = crate::memory::clock::now_iso();
                 }
             });
@@ -410,11 +517,16 @@ pub fn perception_status(
         .latest
         .lock()
         .map_err(|e| e.to_string())?;
+    let cfg = load_config(&state.inner().cfg_path);
     Ok(serde_json::json!({
         "idle_secs": latest.idle_secs,
         "front_app": latest.front_app,
+        "front_title": latest.front_title,
         "updated_ts": latest.updated_ts,
-        "enabled": load_config(&state.inner().cfg_path).enabled,
+        "enabled": cfg.enabled,
+        "window_title": cfg.window_title,
+        "title_allowlist": cfg.title_allowlist,
+        "taught_nouns": cfg.taught_nouns,
     }))
 }
 
@@ -431,6 +543,9 @@ mod tests {
         assert!(!cfg.source_on(Source::Clipboard));
         assert!(!cfg.source_on(Source::ActiveApp));
         assert!(!cfg.source_on(Source::Downloads));
+        assert!(!cfg.source_on(Source::WindowTitle));
+        assert!(cfg.title_allowlist.is_empty());
+        assert!(cfg.taught_nouns.is_empty());
     }
 
     #[test]
@@ -452,12 +567,35 @@ mod tests {
             clipboard: true,
             active_app: false,
             downloads: true,
+            window_title: true,
+            title_allowlist: vec!["Cursor".into()],
+            taught_nouns: vec![TaughtNoun {
+                needle: "bonsai".into(),
+                label: "盆栽".into(),
+            }],
         };
         save_config(&cfg, &path).unwrap();
         assert_eq!(load_config(&path), cfg);
 
         std::fs::write(&path, "{not json").unwrap();
         assert_eq!(load_config(&path), PerceptionConfig::default()); // fail safe off
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn old_config_without_screen_l2_fields_defaults() {
+        let dir = std::env::temp_dir().join("bonsai-perception-legacy");
+        let path = dir.join("perception.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"enabled":true,"clipboard":false,"active_app":true,"downloads":false}"#,
+        )
+        .unwrap();
+        let cfg = load_config(&path);
+        assert!(cfg.enabled && cfg.active_app);
+        assert!(!cfg.window_title);
+        assert!(cfg.title_allowlist.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -483,6 +621,7 @@ mod tests {
             clipboard: true,
             active_app: true,
             downloads: true,
+            ..Default::default()
         };
         let mut c = Collector::default();
         // First tick: one clipboard item, one app change. Downloads use the
@@ -492,6 +631,7 @@ mod tests {
             idle: Some(10.0),
             app: Some("Code".into()),
             clipboard: Some("hello".into()),
+            ..Default::default()
         };
         let out = c.tick(&cfg, &inputs);
         assert_eq!(out[0].content, "clipboard: hello");
@@ -507,6 +647,7 @@ mod tests {
             idle: Some(10.0),
             app: Some("Safari".into()),
             clipboard: Some("hello".into()),
+            ..Default::default()
         };
         let out = c.tick(&cfg, &inputs);
         assert_eq!(
@@ -521,8 +662,104 @@ mod tests {
             idle: Some(10.0),
             app: Some("Terminal".into()),
             clipboard: Some("fresh".into()),
+            ..Default::default()
         };
         assert!(c.tick(&cfg, &inputs).is_empty());
+    }
+
+    #[test]
+    fn window_title_only_for_allowlisted_apps() {
+        let cfg = PerceptionConfig {
+            enabled: true,
+            active_app: true,
+            window_title: true,
+            title_allowlist: vec!["Cursor".into()],
+            ..Default::default()
+        };
+        let mut c = Collector::default();
+        // S2: Safari 不在名单 → 仅 app:，无 window:
+        let out = c.tick(
+            &cfg,
+            &OsInputs {
+                app: Some("Safari".into()),
+                title: Some("Apple".into()),
+                ..Default::default()
+            },
+        );
+        assert!(out.iter().any(|s| s.content == "app: Safari"));
+        assert!(!out.iter().any(|s| s.source == Source::WindowTitle));
+
+        // S1: Cursor 在名单 → window:
+        let out = c.tick(
+            &cfg,
+            &OsInputs {
+                app: Some("Cursor".into()),
+                title: Some("bonsai — perception.rs".into()),
+                ..Default::default()
+            },
+        );
+        assert!(out.iter().any(|s| s.content == "app: Cursor"));
+        assert!(out.iter().any(|s| {
+            s.content
+                .starts_with("window: Cursor | bonsai — perception.rs")
+        }));
+
+        // 同标题再 tick → 不去重窗口以外的重复
+        let again = c.tick(
+            &cfg,
+            &OsInputs {
+                app: Some("Cursor".into()),
+                title: Some("bonsai — perception.rs".into()),
+                ..Default::default()
+            },
+        );
+        assert!(!again.iter().any(|s| s.source == Source::WindowTitle));
+    }
+
+    #[test]
+    fn taught_noun_replaces_raw_title() {
+        let cfg = PerceptionConfig {
+            enabled: true,
+            window_title: true,
+            title_allowlist: vec!["Cursor".into()],
+            taught_nouns: vec![TaughtNoun {
+                needle: "bonsai".into(),
+                label: "盆栽".into(),
+            }],
+            ..Default::default()
+        };
+        let mut c = Collector::default();
+        let out = c.tick(
+            &cfg,
+            &OsInputs {
+                app: Some("Cursor".into()),
+                title: Some("edit docs/zh/plan-screen-l2 · bonsai".into()),
+                ..Default::default()
+            },
+        );
+        assert!(out.iter().any(|s| s.content == "window: Cursor | 盆栽"));
+    }
+
+    #[test]
+    fn window_title_off_never_emits_window_events() {
+        let cfg = PerceptionConfig {
+            enabled: true,
+            active_app: true,
+            window_title: false,
+            title_allowlist: vec!["Cursor".into()],
+            ..Default::default()
+        };
+        let mut c = Collector::default();
+        let out = c.tick(
+            &cfg,
+            &OsInputs {
+                app: Some("Cursor".into()),
+                title: Some("secret".into()),
+                ..Default::default()
+            },
+        );
+        assert!(out.iter().any(|s| s.content == "app: Cursor"));
+        assert!(!out.iter().any(|s| s.content.contains("window:")));
     }
 
     #[test]

@@ -66,12 +66,12 @@
 | 对话 | 本地 Ollama sidecar（qwen3.5:2b，GGUF 本地导入）、流式输出、危机词拦截、未成年门禁 | C1（部分）、C6（入口） |
 | 人格 | persona.json 三层（宪法/表达/状态）、disagreement_policy 反谄媚、prompt 四档亲疏 | C3 个性化（独有深度） |
 | 记忆 | SQLite 事件/事实/偏好/边界（schema v8）、抽取、夜间 consolidate、预测-验证循环（48h 反馈窗） | C3（自建，无向量检索） |
-| 感知 | L1：前台 App、idle、剪贴板（≤1000 字符）、下载目录；逐项授权默认关闭、粗标签、不抓窗口标题 | C4 感知（部分） |
+| 感知 | L1：前台 App、idle、剪贴板、下载；P2-4 窗口标题白名单+教名词（默认关） | C4 感知 |
 | 决策 | should_speak（含 in_meeting 闭嘴、日历联动） | C4 决策 |
 | 工具 | 日历只读（TTL 5min 缓存、提醒 lane 四道闸、22–08 静默）、tool_calls 计数 | C2、C6（最小集） |
 | 成长 | 形态线 4 阶段、关系线（评分/双条件/冷淡）、能力线绑定预测-验证准确度 | 独有，通用产品没有 |
 | 日报 | 每日 digest（剪贴板/下载/App/事实，本地 LLM 可选，规则兜底） | C3+C6 衍生 |
-| 待实现 | P2-3 语音、P2-4 屏幕感知 L2、P2-5 数据可携带、T5 邮件只读 | 见 roadmap |
+| 待实现 | P2-3 语音、P2-5 数据可携带 | 见 roadmap；P2-4 / P3-1 已落地 |
 | 明确不做 | 恋爱/虚拟伴侣、角色扮演社区、角色商店、无限对话 | 与定位一致，维持 |
 
 ---
@@ -83,9 +83,9 @@
 | 编号 | 通用能力 | bonsai 现状 | 裁决 | 理由 | 落点 |
 |---|---|---|---|---|---|
 | G-01 | 语音输入/输出（ASR/TTS） | 无 | 采纳 | 原规划 P2-3；端侧 whisper + macOS TTS 可离线 | P2-3 |
-| G-02 | 屏幕感知（截图/窗口理解） | 仅 App 名称粗标签 | 改造 | 原规划 P2-4；因 2B 模型不能做多模态理解，改为「窗口标题白名单 + 用户主动圈选」的 L2，不做截屏理解 | P2-4 |
+| G-02 | 屏幕感知（截图/窗口理解） | 仅 App 名称粗标签 → **P2-4 已落地**（2026-11-24） | 改造 | 窗口标题白名单 + 教名词；不截屏 | P2-4（docs/zh/plan-screen-l2/v1） |
 | G-03 | 记忆导出/导入（可携带） | 无 | 采纳 | 原规划 P2-5；用户对本地数据有所有权预期，也是迁移主因 | P2-5 |
-| G-04 | 邮件工具 | 无 | 改造 | 原规划 T5；只读摘要先做，发送必须 Ask-first | P3-1 |
+| G-04 | 邮件工具 | 无 → **P3-1 已落地**（2026-11-24） | 改造 | 只读未读+草稿 Ask；Denied≠empty；仅 Mail.app | P3-1（docs/zh/plan-mail/v1） |
 | G-05 | 文件系统操作 | 无 → **T0–T4 已实施**（2026-11-22 代码；2026-11-24 T4 真机通过，plan-files.md §11）；**PDF 文本层可读**（2026-11-24，plan-pdf-read/v1） | 改造 | 只读搜索/摘要先行；写入仅限用户指定目录且二次确认（Ask 档复用 AskFirstGate）；delete/move/rename 连执行分支都没有；PDF 仅文本层抽取（无 OCR） | P3-2（docs/zh/plan-files.md；docs/zh/plan-pdf-read/v1） |
 | G-06 | Web 检索 | 无 → **T0–T3 已落地**（2026-11-23 代码；2026-11-24 T3 真机通过） | 改造 | 本地 LLM 总结网页/搜索结果；无网时明示不可用 | P3-3（plan-web.md §11） |
 | G-07 | MCP 客户端 | 无 → **已落地** | 采纳 | 行业标准工具协议；本地 stdio MCP 服务器不影响隐私定位 | P3-4（2026-11-20 实施，stdio + Streamable HTTP） |
@@ -111,7 +111,7 @@
 | 编号 | 事项 | 方案要点 | 验收标准（Given/When/Then 摘要） | 依赖 |
 |---|---|---|---|---|
 | P2-3 | 语音输入与播报 | 端侧 ASR（whisper.cpp 或系统能力）→ 走现有 chat_turn；TTS 用系统语音合成；逐项授权默认关闭 | Given 授权开启，When 按住快捷键说话，Then 文本进入对话且可用开关关闭；Given 未授权，Then 无任何音频采集 | sidecar 就绪 |
-| P2-4 | 屏幕感知 L2（改造） | 窗口标题白名单抓取（仅用户勾选的 App）+ 用户主动「教」盆栽的名词；不截屏、不做视觉理解 | Given 用户勾选某 App，When 前台切换，Then 仅该 App 粗标签入事件；Given 未勾选，Then 事件无窗口信息 | perception.rs 扩展 |
+| P2-4 | 屏幕感知 L2（改造） | ✅ **已实施（2026-11-24）**：`window_title` + `title_allowlist` + `taught_nouns`；事件 `window: App \| label`；未勾选无窗口信息；perception_search 聚合；见 docs/zh/plan-screen-l2/v1 | Given 用户勾选某 App，When 前台切换，Then 仅该 App 粗标签入事件；Given 未勾选，Then 事件无窗口信息 | perception.rs 扩展 |
 | P2-5 | 数据可携带 | 一键导出：SQLite 全量 + persona.json + 设置 → 单文件 zip（含 schema 版本）；导入校验 schema 后合并/替换二选一 | Given 导出，When 换机导入，Then 对话/记忆/成长/边界全部恢复且人格不变；Given schema 不匹配，Then 明确报错不写入 | schema v8 稳定 |
 | P2-6 | 打包发布实测 | sidecar + ollama-runtime 进 bundle；签名与公证流程 | ✅ **2026-11-24 真机通过**（P2-12）：干净机 dmg 断网可聊 | 229MB runtime 裁剪评估 |
 
@@ -119,7 +119,7 @@
 
 | 编号 | 事项 | 方案要点 | 验收标准 | 依赖 |
 |---|---|---|---|---|
-| P3-1 | 邮件只读 + 摘要 | MailKit/系统框架只读；摘要走本地 LLM；发送功能仅出「草稿」不发送 | Given 授权，When 用户问「今天有什么邮件」，Then 摘要准确且原文不出机器；Given 未授权，Then Err(mail_denied)（对齐日历 TCC 教训） | 日历 TCC 验收经验 |
+| P3-1 | 邮件只读 + 摘要 | ✅ **已实施（2026-11-24）**：AppleScript 只读未读（发件人+主题）；`mail_unread` Read / `mail_draft` Ask（可见草稿永不 send）；`tools.mail.enabled` 默认关；本地规则腿 + kit 挂载；见 docs/zh/plan-mail/v1 | Given 授权，When 用户问「今天有什么邮件」，Then 摘要准确且原文不出机器；Given 未授权，Then Err(mail_denied)（对齐日历 TCC 教训） | 日历 TCC 验收经验 |
 | P3-2 | 文件操作（分级） | T0：指定目录内搜索+读取+摘要；T1：写文件（仅用户显式给的目录+二次确认）；禁止移动/删除 | Given T0 授权目录，When 查询，Then 仅返回该目录内容；Given 删除请求，Then 永远拒绝 | P4-2 权限框架可并行设计 |
 | P3-3 | Web 检索 | 系统默认浏览器打开 + 本地抓取（HTTP 客户端）→ 本地 LLM 总结；外部内容强制打 untrusted 标签 | Given 断网，When 触发搜索，Then 明示「当前离线」不虚构；Given 抓取到网页，When 总结，Then 引用含 URL 可溯源 | G-12 同期落地 |
 | P3-4 | MCP 客户端（stdio + HTTP） | ✅ **已实施（2026-11-20）**：rmcp 官方 SDK 双传输（stdio 子进程 / Streamable HTTP）、schema v8 `mcp_servers`、三级渐进注入（名称→候选→详情）、`ApprovalGate`（默认 auto；ask 弹卡 30s 超时拒绝）、tool_calls 审计（脱敏参数摘要 + result_status + prompt_trace）、Skill 包提示注入同期落地 | 见 docs/zh/plan-agent-mcp-skill.md §8；真机项待验（MCP 实连 / 2B 误触发率） | P4-2 审批框架的**钩子**已先行（分级仍在 P4-2） |

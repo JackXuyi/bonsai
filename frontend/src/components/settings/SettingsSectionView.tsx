@@ -16,6 +16,7 @@ import { PersonaCard } from "@/components/tools/PersonaCard";
 import { ProfileCard } from "@/components/tools/ProfileCard";
 import { RelationshipCard } from "@/components/tools/RelationshipCard";
 import { CalendarCard } from "@/components/tools/CalendarCard";
+import { MailCard } from "@/components/tools/MailCard";
 import { FileCard } from "@/components/tools/FileCard";
 import { WebCard } from "@/components/tools/WebCard";
 import { PerceptionCard } from "@/components/tools/PerceptionCard";
@@ -83,6 +84,7 @@ function SectionBody({ id }: { id: SettingsSectionId }) {
           <PermissionTiersCard />
           <AuditTimeline variant="full" />
           <CalendarCard active />
+          <MailCard active />
           <FileCard active />
           <WebCard active />
           <PerceptionCard active />

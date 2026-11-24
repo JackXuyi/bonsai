@@ -42,6 +42,7 @@ import type {
   ProactiveReply,
   TurnTrace,
   WebStatus,
+  MailStatus,
   FaceSkinManifest,
   FailureRecent,
   LoopStatus,
@@ -139,6 +140,13 @@ export const calendarOpenSettings = () => call<void>("calendar_open_settings");
 export const webStatus = () => call<WebStatus>("web_status");
 export const webSetConfig = (opts: { enabled?: boolean }) =>
   call<WebStatus>("web_set_config", opts);
+
+// ---------- mail（P3-1，plan-mail/v1） ----------
+export const mailStatus = () => call<MailStatus>("mail_status");
+export const mailSetEnabled = (enabled: boolean) =>
+  call<MailStatus>("mail_set_enabled", { enabled });
+export const mailProbe = () =>
+  call<{ ok: boolean; count: number }>("mail_probe");
 
 // ---------- filetools（P3-2，plan-files.md §3.6） ----------
 export const fsStatus = () => call<FsStatus>("fs_status");
