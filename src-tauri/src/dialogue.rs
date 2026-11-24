@@ -258,6 +258,52 @@ fn filter_json(filter: &generation::FilterReport) -> String {
     .to_string()
 }
 
+/// §5.3 失败轮落库（D1）：完全失败（无正文）**不落 assistant 事件**——兜底句
+/// 只回 UI 不进历史，`dialogue_history` / digest / 气泡三处零改动自动免疫；
+/// 部分成功正文照落。trace 同规则：空正文 `reply_text` 传 None，失败详情由
+/// error 步的 `kind=… attempts=…` 说话。反谄媚过滤只对真正文有意义。
+#[allow(clippy::too_many_arguments)]
+fn persist_model_turn(
+    store: &MemoryStore,
+    rec: &mut TraceRecorder,
+    session_id: &str,
+    user_text: &str,
+    reply: &str,
+    model_used: bool,
+    tool_label: Option<String>,
+    filter: Option<&generation::FilterReport>,
+) -> rusqlite::Result<i64> {
+    if model_used {
+        rec.simple("filter", "反谄媚过滤", "pass", None);
+    }
+    let conn = lock_conn(store)?;
+    let user_id =
+        db::add_event_meta(&conn, "dialogue", user_text, Some("user"), Some(session_id))?;
+    let asst_id = if model_used {
+        Some(db::add_event_meta(
+            &conn,
+            "dialogue",
+            reply,
+            Some("assistant"),
+            Some(session_id),
+        )?)
+    } else {
+        None
+    };
+    rec.persist(
+        &conn,
+        session_id,
+        Some(user_id),
+        asst_id,
+        "model",
+        model_used,
+        tool_label,
+        filter.filter(|_| model_used).map(|f| filter_json(f)),
+        Some(user_text),
+        if model_used { Some(reply) } else { None },
+    )
+}
+
 const FALLBACK_REPLY: &str = "（盆栽这会儿状态不太好，脑子转不动——稍后再聊，别走开。）";
 
 /// FaceState → the mood wording the persona prompt expects (report §5.1).
@@ -940,26 +986,86 @@ fn cloud_tool_loop(
             msgs.push(crate::llm::ToolMsg::user(note));
         }
         let t = std::time::Instant::now();
-        let out = if force_answer {
+        let mut out = if force_answer {
             client.chat_with_tools(&msgs, &[], CHAT_TEMPERATURE, crate::llm::CHAT_TIMEOUT_SECS)
         } else {
             client.chat_with_tools(&msgs, &tools, CHAT_TEMPERATURE, crate::llm::CHAT_TIMEOUT_SECS)
         };
         requests += 1;
-        let reply_text = match out {
-            Ok(r) => r,
-            Err(_e) => {
-                // 云端失败 → 空回复，调用方走诚实兜底（不静默编造）。
-                rec.llm_round(
-                    &format!("云端工具轮 #{requests}"),
-                    &serde_json::to_string(&msgs).unwrap_or_default(),
-                    "",
-                    "error",
-                    t.elapsed(),
+        // T3 §5.2 三段式恢复：失败不是整轮放弃——已跑过的工具成果不许丢。
+        // ① 可重试 kind 且预算有余 → 重发同一 msgs（纯读：工具结果都已在
+        //    msgs 里，不重跑，符合不变量 1）。
+        // ② 仍失败且 executed > 0 → 收尾请求不带 tools（模型只能基于已有
+        //    结果散文作答，force_answer 同款手法）。
+        // ③ 连收尾也失败 → 本地拼装「做到了 X / Y，剩下没做完」+ failure
+        //    hint，绝不带兜底句；无成果则空回复（调用方 §5.3 诚实落库）。
+        let mut recovered_by_closing = false;
+        if let Err(first) = &out {
+            let f = crate::failure::Failure::from_llm(first);
+            rec.llm_round(
+                &format!("云端工具轮 #{requests}"),
+                &serde_json::to_string(&msgs).unwrap_or_default(),
+                &format!("kind={} attempts={}", f.kind.as_str(), requests),
+                "error",
+                t.elapsed(),
+            );
+            if f.retryable && requests < CLOUD_REQUEST_CAP {
+                rec.simple("retry", "轮层重发", "pending", Some(f.kind.as_str()));
+                out = client.chat_with_tools(
+                    &msgs, &tools, CHAT_TEMPERATURE, crate::llm::CHAT_TIMEOUT_SECS,
                 );
-                return Ok((String::new(), label, None, false));
+                requests += 1;
+                rec.simple(
+                    "retry",
+                    "轮层重发",
+                    if out.is_ok() { "ok" } else { "error" },
+                    None,
+                );
             }
-        };
+            if out.is_err() && executed > 0 {
+                rec.simple(
+                    "closing",
+                    "收尾请求",
+                    "pending",
+                    Some(&format!("executed={executed}")),
+                );
+                msgs.push(crate::llm::ToolMsg::user(
+                    "（系统注入的一次性指令：刚才的请求失败了。请只根据上面已经拿到的工具结果，用一两句话告诉用户做到了什么、还没做完什么；不要再调用工具。）",
+                ));
+                out = client.chat_with_tools(&msgs, &[], CHAT_TEMPERATURE, crate::llm::CHAT_TIMEOUT_SECS);
+                requests += 1;
+                recovered_by_closing = true;
+            }
+            if out.is_err() {
+                let e3 = out.unwrap_err();
+                let f3 = crate::failure::Failure::from_llm(&e3);
+                rec.simple(
+                    "fallback",
+                    "本地拼装",
+                    if summaries.is_empty() { "empty" } else { "ok" },
+                    Some(&format!("kind={}", f3.kind.as_str())),
+                );
+                reply = if summaries.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "我做到了：{}。剩下的没做完（{}）",
+                        summaries.join("；"),
+                        f3.hint
+                    )
+                };
+                break;
+            }
+            if recovered_by_closing {
+                // 收尾成功：只取散文正文。请求没带 tools，模型不该也无法调工具。
+                let r = out.unwrap();
+                rec.simple("closing", "收尾成功", "ok", None);
+                reply = r.content.unwrap_or_default();
+                break;
+            }
+            // 走到这说明 ① 重发成功 → 接回主流程（可能是 tool_calls，继续循环）。
+        }
+        let reply_text = out.unwrap();
         rec.llm_round(
             &format!("云端工具轮 #{requests}"),
             &serde_json::to_string(&msgs).unwrap_or_default(),
@@ -1776,30 +1882,19 @@ fn chat_turn_inner(
             }
         }
         let filter = generation::filter(&reply);
-        rec.simple("filter", "反谄媚过滤", "pass", None);
-        let conn = lock_conn(store)?;
-        let user_id =
-            db::add_event_meta(&conn, "dialogue", user_text, Some("user"), Some(session_id))?;
-        let asst_id =
-            db::add_event_meta(&conn, "dialogue", &reply, Some("assistant"), Some(session_id))?;
-        let turn_id = rec.persist(
-            &conn,
-            session_id,
-            Some(user_id),
-            Some(asst_id),
-            "model",
-            model_used,
-            tool_label.clone(),
-            Some(filter_json(&filter)),
-            Some(user_text),
-            Some(&reply),
+        let turn_id = persist_model_turn(
+            store, &mut rec, session_id, user_text, &reply, model_used, tool_label.clone(),
+            Some(&filter),
         )?;
-        if filter.explicit_disagreement {
-            db::add_event(&conn, "disagreement", &clip(&reply, 80))?;
-        }
-        if filter.hedged_disagreement {
-            db::add_event(&conn, "disagreement_hedged", &clip(&reply, 80))?;
-            let _ = relationship::maybe_first_refusal(&conn, chrono::Local::now());
+        if model_used {
+            let conn = lock_conn(store)?;
+            if filter.explicit_disagreement {
+                db::add_event(&conn, "disagreement", &clip(&reply, 80))?;
+            }
+            if filter.hedged_disagreement {
+                db::add_event(&conn, "disagreement_hedged", &clip(&reply, 80))?;
+                let _ = relationship::maybe_first_refusal(&conn, chrono::Local::now());
+            }
         }
         return Ok(DialogueOutcome {
             reply,
@@ -1825,37 +1920,25 @@ fn chat_turn_inner(
         FALLBACK_REPLY.to_string()
     };
     let filter = generation::filter(&reply);
-    rec.simple("filter", "反谄媚过滤", "pass", None);
-    let conn = lock_conn(store)?;
-    let user_id =
-        db::add_event_meta(&conn, "dialogue", user_text, Some("user"), Some(session_id))?;
-    let asst_id =
-        db::add_event_meta(&conn, "dialogue", &reply, Some("assistant"), Some(session_id))?;
-    let turn_id = rec.persist(
-        &conn,
-        session_id,
-        Some(user_id),
-        Some(asst_id),
-        "model",
-        model_used,
-        None,
-        Some(filter_json(&filter)),
-        Some(user_text),
-        Some(&reply),
+    let turn_id = persist_model_turn(
+        store, &mut rec, session_id, user_text, &reply, model_used, None, Some(&filter),
     )?;
 
     // Anti-sycophancy evidence (plan-relationship.md §3.6): the filter used to
     // be report-only, so "how often does it actually push back" was
     // unknowable. Record the two shapes as events — explicit push-back is the
     // relationship line's only qualitative evidence.
-    if filter.explicit_disagreement {
-        db::add_event(&conn, "disagreement", &clip(&reply, 80))?;
-    }
-    if filter.hedged_disagreement {
-        db::add_event(&conn, "disagreement_hedged", &clip(&reply, 80))?;
-        // The wishy-washy moment may be the one worth telling a story about
-        // (R2 + 7 days, fired at most once, ever).
-        let _ = relationship::maybe_first_refusal(&conn, chrono::Local::now());
+    if model_used {
+        let conn = lock_conn(store)?;
+        if filter.explicit_disagreement {
+            db::add_event(&conn, "disagreement", &clip(&reply, 80))?;
+        }
+        if filter.hedged_disagreement {
+            db::add_event(&conn, "disagreement_hedged", &clip(&reply, 80))?;
+            // The wishy-washy moment may be the one worth telling a story about
+            // (R2 + 7 days, fired at most once, ever).
+            let _ = relationship::maybe_first_refusal(&conn, chrono::Local::now());
+        }
     }
     Ok(DialogueOutcome {
         reply,
@@ -3585,6 +3668,64 @@ mod tests {
         )
     }
 
+    /// 可按脚本依次吐 Ok / Err 的客户端（T3 §5.2 轮层恢复测试用）。
+    struct MockFlakyToolClient {
+        script: std::sync::Mutex<std::collections::VecDeque<Result<crate::llm::ToolReply, crate::llm::LlmError>>>,
+        seen: CloudCapture,
+    }
+    impl crate::llm::ChatClient for MockFlakyToolClient {
+        fn chat(&self, _m: &[crate::llm::Msg], _t: f64, _to: u64) -> Result<String, crate::llm::LlmError> {
+            Ok(String::new())
+        }
+        fn chat_stream(
+            &self,
+            _m: &[crate::llm::Msg],
+            _t: f64,
+            _to: u64,
+            _d: &mut dyn FnMut(&str),
+        ) -> Result<String, crate::llm::LlmError> {
+            Ok(String::new())
+        }
+        fn is_up(&self) -> bool {
+            true
+        }
+        fn chat_with_tools(
+            &self,
+            msgs: &[crate::llm::ToolMsg],
+            tools: &[crate::llm::ToolSpec],
+            _t: f64,
+            _to: u64,
+        ) -> Result<crate::llm::ToolReply, crate::llm::LlmError> {
+            self.seen.lock().unwrap().push((
+                msgs.iter().map(|m| m.role.clone()).collect(),
+                tools.iter().map(|t| t.name.clone()).collect(),
+                msgs.iter().filter_map(|m| m.content.clone()).collect::<Vec<_>>().join("\n"),
+            ));
+            self.script
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| Err(crate::llm::LlmError::Decode("script exhausted".into())))
+        }
+    }
+
+    fn flaky_backend(
+        script: Vec<Result<crate::llm::ToolReply, crate::llm::LlmError>>,
+    ) -> (
+        crate::persona::eval::LocalBackend,
+        CloudCapture,
+    ) {
+        let seen: CloudCapture = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let client = std::sync::Arc::new(MockFlakyToolClient {
+            script: std::sync::Mutex::new(script.into()),
+            seen: seen.clone(),
+        });
+        (
+            crate::persona::eval::LocalBackend::with_client(client, crate::llm::ClientKind::Cloud),
+            seen,
+        )
+    }
+
     /// finish_reason=tool_calls 的响应（自动编 id）。
     fn tool_calls_reply(calls: &[(&str, serde_json::Value)]) -> crate::llm::ToolReply {
         crate::llm::ToolReply {
@@ -3690,6 +3831,129 @@ mod tests {
         assert_eq!(records[0].tool, "mcp");
         assert_eq!(records[0].result_status.as_deref(), Some("auto_allowed"));
         assert!(records[0].params_summary.as_deref().unwrap_or("").contains("杭州"));
+    }
+
+    // ---- T3 §5.2 轮层恢复 ----
+
+    fn err502() -> Result<crate::llm::ToolReply, crate::llm::LlmError> {
+        Err(crate::llm::LlmError::Status(502, "bad gateway".into()))
+    }
+
+    /// A5：云端循环第 3 次请求 502，此前已跑 2 个工具 → 任务卡保留 2 步；
+    /// 重发 1 次 → 仍失败 → 收尾请求也失败 → 本地拼装「做到了什么」+ hint，
+    /// **不出现**兜底句。
+    #[test]
+    fn a5_cloud_failure_keeps_finished_steps_and_assembles_locally() {
+        let s = mem();
+        let c = card();
+        let (mut backend, seen) = flaky_backend(vec![
+            Ok(tool_calls_reply(&[("weather", serde_json::json!({"city": "杭州"}))])),
+            Ok(tool_calls_reply(&[("weather", serde_json::json!({"city": "杭州"}))])),
+            err502(), // 第 3 次请求挂
+            err502(), // ① 重发同一 msgs 也挂
+            err502(), // ② 收尾请求也挂 → ③ 本地拼装
+        ]);
+        let mut kit = weather_kit();
+        let out = chat_turn_with_kit(
+            &s, &mut backend, &c, "s-a5", "杭州天气怎么样（两步任务）", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit,
+        )
+        .unwrap();
+        assert!(out.model_used, "本地拼装算有产出");
+        assert!(
+            out.reply.contains("我做到了") && out.reply.contains("weather"),
+            "拼装要复述已完成的步：{}",
+            out.reply
+        );
+        assert!(
+            out.reply.contains("云端出故障"),
+            "附 failure hint：{}",
+            out.reply
+        );
+        assert!(!out.reply.contains("状态不太好"), "兜底句不许出现：{}", out.reply);
+        let card = out.task.expect("任务卡要活着回来");
+        assert_eq!(card.status, "done");
+        assert_eq!(card.steps.len(), 2, "已完成的 2 步不许丢");
+        // 请求次数：2 次成功 + 1 失败 + 1 重发 + 1 收尾 = 5（cap 6 之内）。
+        assert_eq!(seen.lock().unwrap().len(), 5);
+    }
+
+    /// ① 重发同一 msgs 成功 → 直接接回主流程出正文（收尾/拼装都不触发）。
+    #[test]
+    fn cloud_failure_resend_same_msgs_recovers() {
+        let s = mem();
+        let c = card();
+        let (mut backend, seen) = flaky_backend(vec![
+            Ok(tool_calls_reply(&[("weather", serde_json::json!({"city": "杭州"}))])),
+            Err(crate::llm::LlmError::Status(429, "rate limited".into())),
+            Ok(content_reply("查到了：杭州多云。")),
+        ]);
+        let mut kit = weather_kit();
+        let out = chat_turn_with_kit(
+            &s, &mut backend, &c, "s-resend", "杭州天气怎么样", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit,
+        )
+        .unwrap();
+        assert!(out.reply.contains("多云"), "{}", out.reply);
+        assert_eq!(out.task.expect("card").steps.len(), 1);
+        let calls = seen.lock().unwrap();
+        assert_eq!(calls.len(), 3, "失败 + 重发 = 3 次请求");
+        // 重发与失败请求携带同一 msgs（工具结果原样在序列里，不重跑）。
+        assert_eq!(calls[1].0, calls[2].0);
+        assert_eq!(calls[1].2, calls[2].2);
+    }
+
+    /// A11（§5.3 D1）：一轮完全失败 → assistant 事件**不落库**（兜底句只回
+    /// UI）；下一轮请求的历史里看不到兜底句，digest 也不含它。
+    #[test]
+    fn a11_failed_turn_persists_no_assistant_event_and_pollutes_no_history() {
+        let s = mem();
+        let c = card();
+        // 空脚本 = 首请求即 Decode 失败（不可重试、无已执行工具）→ 完全失败。
+        let (mut backend, seen) = flaky_backend(vec![]);
+        let mut kit = weather_kit();
+        let out = chat_turn_with_kit(
+            &s, &mut backend, &c, "s-a11", "在吗", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit,
+        )
+        .unwrap();
+        assert!(!out.model_used);
+        assert_eq!(out.reply, FALLBACK_REPLY, "UI 层仍给兜底句");
+        // ① assistant 事件不落库；user 事件照落（诚实的一条没人答的气泡）。
+        let (user_n, asst_n) = with_conn(&s, |conn| -> rusqlite::Result<(i64, i64)> {
+            Ok((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM events WHERE kind='dialogue' AND role='user' AND session_id=?1",
+                    ["s-a11"],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap(),
+                conn.query_row(
+                    "SELECT COUNT(*) FROM events WHERE kind='dialogue' AND role='assistant' AND session_id=?1",
+                    ["s-a11"],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap(),
+            ))
+        })
+        .unwrap();
+        assert_eq!(user_n, 1);
+        assert_eq!(asst_n, 0, "兜底句不许进历史");
+        // ② 下一轮的历史请求里没有兜底句。
+        let (mut backend2, seen2) = flaky_backend(vec![Ok(content_reply("好的。"))]);
+        let mut kit2 = weather_kit();
+        chat_turn_with_kit(
+            &s, &mut backend2, &c, "s-a11", "谢谢你", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit2,
+        )
+        .unwrap();
+        for call in seen2.lock().unwrap().iter() {
+            assert!(
+                !call.2.contains("状态不太好"),
+                "兜底句不许漏进 system/历史：{}",
+                call.2
+            );
+        }
     }
 
     // ---- T3 轮内压缩夹具

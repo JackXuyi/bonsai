@@ -417,7 +417,7 @@ failure?: { kind: string; text: string; retryable: boolean };
 |---|---|---|---|
 | T1 | 本提交 | `cargo test --lib` **552 passed / 1 ignored**（+10 `failure::`）；`cargo check` 无新告警 | 新增 `src-tauri/src/failure.rs`：11 个 `FailureKind`（含 `retryable` / `hint` / `parse`）、`Failure::{new, downgrade, from_llm, from_tool, from_db}`、`is_corrupt_db` / `is_busy_db`、`Backoff`（splitmix64 确定性抖动、cap 为硬上限）与五层预算常量、`JobState`（`after_fail` 第 5 次推到明天 03:00）。零接线 |
 | T2 | 本提交 | `cargo test --lib` **559 passed / 1 ignored**（+7 `persona::eval`：A1–A4 模型层）；`tsc` 0 错、`vitest` 187；`cargo check` 仅既有 dead_code | `LlmError::Status` 带 body 摘要（三处传输齐改，401/502 可区分）；`DialogueBackend` 加默认方法 `take_failure` / `attempts`（8 个 impl 零改动）；`LocalBackend` 存 `last_failure`，非流式重试 ≤2 次、流式仅零 delta 重试 1 次、断流交回已流出正文且标 `Interrupted`（不可重试）；`dialogue.rs` 直答收敛进 `call_backend_with_trace`（调用点开头清残留失败，output 记 `kind=… attempts=… detail…`）；前端 `IDLE_TIMEOUT_MS` 150s→240s；既有 `trace_dead_model_still_records_empty_round` 断言同步升级（answered→error + kind=transport，语义升级非回归） |
-| T3 | | | |
+| T3 | 本提交 | `cargo test --lib` **562 passed / 1 ignored**（+3：A5 三段式、重发恢复、A11 落库）；`tsc` 0 错、`vitest` 187 | 云循环失败分支从「整轮放弃」改三段式（§5.2）：①可重试 kind 且预算有余 → 重发同一 msgs（纯读不重跑工具）②仍失败且已执行工具 → 收尾请求不带 tools ③连收尾也失败 → 本地拼装「做到了 X/Y + hint」（A5：任务卡保留已完成步，兜底句不出现）；失败轮落库（§5.3/D1）：`persist_model_turn` 单点接线两处落库段——完全失败不落 assistant 事件（兜底句只回 UI，A11：历史/digest 零污染），trace `reply_text` 空正文传 None、error 步带 `kind=… attempts=…`；反谄媚过滤与 disagreement 事件只对真正文执行 |
 | T4 | | | |
 | T5 | | | |
 | T6 | | | |
@@ -430,5 +430,6 @@ failure?: { kind: string; text: string; retryable: boolean };
 | 版本 | 日期 | 变更 |
 |---|---|---|
 | v0.1 | 2026-11-23 | 初稿：现状 17 条实测锚点、`Failure` 分类法、分层策略表、T1–T7、A1–A12、D1–D8 |
+| v0.4 | 2026-11-24 | T3 落地：轮层恢复三段式限定「重发 1 次 + 收尾 1 次」的硬预算（重发还受 `requests < CLOUD_REQUEST_CAP` 门控）；`error_kind` 落在 trace 的 error 步 output（`kind=…`），不新增 schema 列；`flaky_backend` 测试桩可按脚本重放 `Result<ToolReply, LlmError>` |
 | v0.3 | 2026-11-24 | T2 落地：`Failure` 加 `attempts` 字段（`trace.attempts` 的来源，成功路径从 `backend.attempts()` 读）；流式部分成功（已流出正文）走 `Interrupted` 而非原 kind；`LlmError` 变 `Clone`（测试桩按脚本重放） |
 | v0.2 | 2026-11-23 | T1 落地：`Backoff` 的 cap 改为硬上限（抖动不许越过）；`mcp_unreachable` 归 `Transport` 而非 `Unavailable`（连接层失败该重试 1 次，与 T4 现状一致，见 §5.4 落地细节） |
