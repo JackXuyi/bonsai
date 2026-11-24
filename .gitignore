@@ -31,3 +31,5 @@ src-tauri/binaries/
 s1.yaml
 chat.yaml
 frontend/chat.yaml
+
+target/
