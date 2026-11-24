@@ -1,22 +1,18 @@
 "use client";
 
-// 对话页（旧 tab-chat）：消息流 + 渐增气泡 + typing + 回到底部 + composer。
-// 主动搭话 / 预测 / 提醒事件已上移 useAppEvents（路由化后 ChatPane 只在 /
-// 挂载）；消息流状态在 chatStore，跨页保留。
-//
-// 多会话（plan-context.md §6.8）：顶部一颗「会话」药丸开右侧抽屉。切换时
-// 消息流整条清空再按新会话回放（A12 不串味）；一轮在飞时抽屉禁点（A13）。
+// Companion 对话页（plan-chat-first-ui v2）：ChatChrome + 消息流 + 浮起
+// Composer + 左会话抽屉。主动搭话等事件在 useAppEvents；消息在 chatStore。
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MessageBubble } from "./MessageBubble";
 import { Composer } from "./Composer";
 import { SessionDrawer } from "./SessionDrawer";
+import { ChatChrome } from "@/components/layout/ChatChrome";
+import { PokeFace } from "@/components/face/PokeFace";
+import { useFaceFrame } from "@/hooks/useFaceFrame";
 import { useChat } from "@/hooks/useChat";
 import { useChatStore, type ChatMessage } from "@/lib/stores/chatStore";
-import {
-  sessionTitle,
-  useCurrentSession,
-  useSessionStore,
-} from "@/lib/stores/sessionStore";
+import { useSessionStore } from "@/lib/stores/sessionStore";
+import { useUiStore } from "@/lib/stores/uiStore";
 import { dialogueHistory } from "@/lib/commands";
 import { inTauri } from "@/lib/tauriInvoke";
 
@@ -49,10 +45,11 @@ export function ChatPane() {
   const messages = useChatStore((s) => s.messages);
   const { send, chatting, cancel, retry } = useChat();
   const currentId = useSessionStore((s) => s.currentId);
-  const current = useCurrentSession();
+  const drawerOpen = useUiStore((s) => s.sessionDrawerOpen);
+  const setDrawerOpen = useUiStore((s) => s.setSessionDrawerOpen);
+  const faceFrame = useFaceFrame();
   const scrollRef = useRef<HTMLDivElement>(null);
   const [showToBottom, setShowToBottom] = useState(false);
-  const [drawerOpen, setDrawerOpen] = useState(false);
 
   // —— 分页回放状态（refs：不参与渲染，避免 onScroll 高频重渲） ——
   const PAGE_SIZE = 30;
@@ -203,27 +200,15 @@ export function ChatPane() {
 
   return (
     <>
-      <div className="chat-topbar">
-        <button
-          type="button"
-          className={`sess-pill ${chatting ? "busy" : ""}`}
-          onClick={() => setDrawerOpen(true)}
-          title={chatting ? "这一轮说完就能换会话" : "会话"}
-          aria-label="会话"
-        >
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <line x1="4" y1="7" x2="20" y2="7" />
-            <line x1="4" y1="12" x2="13" y2="12" />
-            <line x1="4" y1="17" x2="16" y2="17" />
-          </svg>
-          <span className="sess-pill-title">{sessionTitle(current)}</span>
-        </button>
-      </div>
+      <ChatChrome />
 
       <div className="chat-body">
         <div className="messages" ref={scrollRef} onScroll={onMessagesScroll}>
           {empty && (
             <div className="empty">
+              <div className="empty-face">
+                <PokeFace size="lg" frame={faceFrame} />
+              </div>
               <p className="empty-title">还没聊过</p>
               <p className="empty-sub">
                 说句话，或者等它自己开口。

@@ -1,8 +1,9 @@
 "use client";
 
-// composer：自适应高 + IME guard + 发送按钮（旧 autosize / keydown / submit）。
+// composer：浮起条 + ModelChip + IME guard + 发送/停（plan-chat-first-ui v2）。
 import { useRef, useState } from "react";
 import { shouldBlockSubmit } from "@/lib/ime";
+import { ModelChip } from "@/components/chat/ModelChip";
 
 export function Composer({
   onSend,
@@ -36,51 +37,54 @@ export function Composer({
   }
 
   return (
-    <form
-      className="composer"
-      onSubmit={(e) => {
-        e.preventDefault();
-        if (value.trim()) submit();
-      }}
-    >
-      <textarea
-        ref={ref}
-        rows={1}
-        placeholder="说点什么…"
-        autoComplete="off"
-        spellCheck={false}
-        value={value}
-        onChange={(e) => {
-          setValue(e.target.value);
-          autosize();
-        }}
-        onKeyDown={(e) => {
-          if (shouldBlockSubmit(e.nativeEvent.isComposing ?? false, e.key, e.shiftKey))
-            return;
+    <div className="composer-dock">
+      <form
+        className="composer"
+        onSubmit={(e) => {
           e.preventDefault();
-          submit();
+          if (value.trim()) submit();
         }}
-      />
-      {chatBusy && onCancel ? (
-        <button
-          type="button"
-          className="send stop"
-          aria-label="停止"
-          title="叫停这一轮"
-          onClick={onCancel}
-        >
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <rect x="7" y="7" width="10" height="10" rx="2" />
-          </svg>
-        </button>
-      ) : (
-        <button type="submit" className="send" aria-label="发送" disabled={!canSend}>
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <line x1="12" y1="19" x2="12" y2="6" />
-            <polyline points="6 12 12 6 18 12" />
-          </svg>
-        </button>
-      )}
-    </form>
+      >
+        <textarea
+          ref={ref}
+          rows={1}
+          placeholder="说点什么…"
+          autoComplete="off"
+          spellCheck={false}
+          value={value}
+          onChange={(e) => {
+            setValue(e.target.value);
+            autosize();
+          }}
+          onKeyDown={(e) => {
+            if (shouldBlockSubmit(e.nativeEvent.isComposing ?? false, e.key, e.shiftKey))
+              return;
+            e.preventDefault();
+            submit();
+          }}
+        />
+        <ModelChip />
+        {chatBusy && onCancel ? (
+          <button
+            type="button"
+            className="send stop"
+            aria-label="停止"
+            title="叫停这一轮"
+            onClick={onCancel}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="7" y="7" width="10" height="10" rx="2" />
+            </svg>
+          </button>
+        ) : (
+          <button type="submit" className="send" aria-label="发送" disabled={!canSend}>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <line x1="12" y1="19" x2="12" y2="6" />
+              <polyline points="6 12 12 6 18 12" />
+            </svg>
+          </button>
+        )}
+      </form>
+    </div>
   );
 }

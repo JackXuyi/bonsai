@@ -32,4 +32,11 @@ describe("uiStore", () => {
     useUiStore.getState().setFaceState("proud");
     expect(useUiStore.getState().faceState).toBe("proud");
   });
+
+  it("sessionDrawerOpen 可设可翻", () => {
+    useUiStore.getState().setSessionDrawerOpen(true);
+    expect(useUiStore.getState().sessionDrawerOpen).toBe(true);
+    useUiStore.getState().toggleSessionDrawer();
+    expect(useUiStore.getState().sessionDrawerOpen).toBe(false);
+  });
 });

@@ -15,10 +15,10 @@ use tauri::{
     App, AppHandle, Manager, PhysicalSize, Size, WebviewUrl, WebviewWindowBuilder,
 };
 
-/// Default face window size (logical px): width = 520×3, height 960 (1080p).
-const DEFAULT_SIZE: (f64, f64) = (1560.0, 960.0);
-/// Floor for drag-resize: below this the tab layout starts to collapse.
-const MIN_SIZE: (f64, f64) = (520.0, 480.0);
+/// Default Companion window (plan-chat-first-ui v2 Q5): 380×560.
+const DEFAULT_SIZE: (f64, f64) = (380.0, 560.0);
+/// Floor for drag-resize: Companion 窄窗下限。
+const MIN_SIZE: (f64, f64) = (360.0, 480.0);
 /// settings key holding the last user-chosen size, "WIDTHxHEIGHT" in
 /// physical px (what `inner_size()` reports, DPI-independent round-trip).
 const SIZE_SETTING: &str = "window_size_px";

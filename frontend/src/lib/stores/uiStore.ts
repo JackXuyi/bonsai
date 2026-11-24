@@ -28,6 +28,8 @@ interface UiState {
   toolResult: ToolResult | null;
   /** window:shown 断点计数（托盘唤起 / growth 播报重引导的触发器） */
   windowShownAt: number;
+  /** Companion：左会话抽屉开关（⌘⇧O / ChatChrome ≡） */
+  sessionDrawerOpen: boolean;
   toasts: Toast[];
   setFaceState: (s: string) => void;
   setGrowth: (g: GrowthStatus | null) => void;
@@ -36,6 +38,8 @@ interface UiState {
   ackCloudOptin: () => void;
   setToolResult: (r: ToolResult | null) => void;
   bumpWindowShown: () => void;
+  setSessionDrawerOpen: (open: boolean) => void;
+  toggleSessionDrawer: () => void;
   pushToast: (text: string) => void;
   dismissToast: (id: number) => void;
 }
@@ -51,6 +55,7 @@ export const useUiStore = create<UiState>((set) => ({
   cloudOptinAcked: false,
   toolResult: null,
   windowShownAt: 0,
+  sessionDrawerOpen: false,
   toasts: [],
   setFaceState: (s) => {
     if (!FACE_STATES.includes(s as FaceState)) return;
@@ -62,6 +67,9 @@ export const useUiStore = create<UiState>((set) => ({
   ackCloudOptin: () => set({ cloudOptinAcked: true }),
   setToolResult: (r) => set({ toolResult: r }),
   bumpWindowShown: () => set((st) => ({ windowShownAt: st.windowShownAt + 1 })),
+  setSessionDrawerOpen: (open) => set({ sessionDrawerOpen: open }),
+  toggleSessionDrawer: () =>
+    set((st) => ({ sessionDrawerOpen: !st.sessionDrawerOpen })),
   pushToast: (text) => {
     const id = ++toastSeq;
     set((st) => ({ toasts: [...st.toasts, { id, text }].slice(-TOAST_CAP) }));

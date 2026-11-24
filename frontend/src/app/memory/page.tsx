@@ -1,12 +1,14 @@
 "use client";
 
-// 记忆 tab（spec-m3）：只读总览。记忆可看是信任，可改是作弊。
-import { MemoryOverview } from "@/components/memory/MemoryOverview";
+// 旧 /memory → 设置·记忆（plan-chat-first-ui v2）。
+import { useEffect } from "react";
+import { useRouter } from "next/navigation";
+import { settingsHref } from "@/lib/settingsSections";
 
-export default function MemoryPage() {
-  return (
-    <div className="tab-body">
-      <MemoryOverview />
-    </div>
-  );
+export default function MemoryRedirectPage() {
+  const router = useRouter();
+  useEffect(() => {
+    router.replace(settingsHref("memory"));
+  }, [router]);
+  return null;
 }

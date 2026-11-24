@@ -30,6 +30,17 @@
   animation: fade-in 0.25s ease-out;
 }
 
+.empty-face {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 10px;
+}
+
+.empty-face .face-lg {
+  width: 108px;
+  height: 108px;
+}
+
 .empty-title {
   font-size: 12.5px;
   font-weight: 600;
@@ -382,6 +393,12 @@
   color: var(--accent-ink);
 }
 
+/* 浮起输入条：左右底留白（v2 Companion） */
+.composer-dock {
+  flex: none;
+  padding: 0 2px 2px;
+}
+
 .composer {
   display: flex;
   align-items: flex-end;
@@ -390,7 +407,8 @@
   padding: 5px 5px 5px 11px;
   background: var(--card);
   border: 1px solid var(--line);
-  border-radius: 15px;
+  border-radius: 16px;
+  box-shadow: var(--shadow);
   transition: border-color 0.2s, box-shadow 0.2s;
 }
 
@@ -471,59 +489,109 @@
   stroke: none;
 }
 
-/* ── 会话药丸 + 抽屉（plan-context.md §8，D7：抽屉不加侧栏项）──── */
+/* ── ModelChip（Composer 内）──────────────────────────────── */
 
-.chat-topbar {
-  display: flex;
-  justify-content: flex-end;
+.model-chip-wrap {
+  position: relative;
   flex: none;
-  padding: 0 2px;
+  align-self: center;
 }
 
-.sess-pill {
+.model-chip {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  max-width: 190px;
-  padding: 3px 9px 3px 7px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: var(--card);
+  gap: 3px;
+  max-width: 110px;
+  padding: 3px 6px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
   color: var(--muted);
   font: inherit;
   font-size: 10.5px;
   cursor: pointer;
-  transition: color 0.16s, border-color 0.16s;
+  transition: color 0.16s, background 0.16s;
 }
 
-.sess-pill:hover {
+.model-chip:hover:not(:disabled) {
   color: var(--ink);
-  border-color: rgba(76, 140, 43, 0.35);
+  background: var(--accent-wash);
 }
 
-/* 在飞时药丸仍可点开（看得见列表），但操作全部置灰——不静默 cancel */
-.sess-pill.busy {
-  opacity: 0.72;
+.model-chip:disabled {
+  opacity: 0.65;
+  cursor: default;
 }
 
-.sess-pill svg {
-  width: 12px;
-  height: 12px;
-  flex: none;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 2;
-  stroke-linecap: round;
-}
-
-.sess-pill-title {
+.model-chip-label {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-/* 遮罩与抽屉：z-index 30/31，低于 toast(50) 与 onboarding(60)，
-   高于页内容——弹层顺序由低到高：抽屉 < 删除确认(40) < toast */
+.model-chip svg {
+  width: 10px;
+  height: 10px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.model-chip-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+  z-index: 40;
+  min-width: 160px;
+  max-width: 240px;
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 4px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+}
+
+.model-chip-item {
+  display: block;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 11.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.model-chip-item:hover {
+  background: var(--accent-wash);
+}
+
+.model-chip-item.on {
+  color: var(--accent-ink);
+  font-weight: 600;
+}
+
+.model-chip-item.manage {
+  color: var(--muted);
+}
+
+.model-chip-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--line-soft);
+}
+
+/* ── 会话抽屉：左侧（plan-chat-first-ui v2）────────────────── */
+
+/* 遮罩与抽屉：z-index 30/31，低于 toast(50) 与 onboarding(60) */
 .sess-scrim {
   position: fixed;
   inset: 0;
@@ -542,22 +610,20 @@
 .sess-drawer {
   position: fixed;
   top: 0;
-  right: 0;
+  left: 0;
   bottom: 0;
   z-index: 31;
-  width: 260px;
+  width: 220px;
   display: flex;
   flex-direction: column;
   gap: 6px;
   padding: 10px 10px 12px;
   background: var(--card);
-  border-left: 1px solid var(--line);
-  box-shadow: -8px 0 24px rgba(60, 50, 30, 0.08);
-  /* 抽屉整条滚动、列表本身不滚：行尾「…」菜单是绝对定位，列表一滚就会被
-     裁掉半个；会话一多时滚抽屉，菜单始终画得出来 */
+  border-right: 1px solid var(--line);
+  box-shadow: 8px 0 24px rgba(60, 50, 30, 0.08);
   overflow-y: auto;
   scrollbar-width: none;
-  transform: translateX(100%);
+  transform: translateX(-100%);
   visibility: hidden;
   transition: transform 0.2s ease, visibility 0s 0.2s;
 }

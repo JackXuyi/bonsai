@@ -1,24 +1,24 @@
 "use client";
 
-// 设置页：M1 模型配置 + M4 日志 + agent 能力（MCP / Skill，spec-s6）+ 形象选择。
-import { LogsCard } from "@/components/settings/LogsCard";
-import { LoopsCard } from "@/components/settings/LoopsCard";
-import { DiagnosticsCard } from "@/components/settings/DiagnosticsCard";
-import { McpSection } from "@/components/agent/McpSection";
-import { SkillSection } from "@/components/agent/SkillSection";
-import { ModelSection } from "@/components/settings/ModelSection";
-import { FaceSkinCard } from "@/components/settings/FaceSkinCard";
+// 设置：索引钻取 / 分区详情（plan-chat-first-ui v2）。
+import { Suspense } from "react";
+import { useSearchParams } from "next/navigation";
+import { SettingsIndex } from "@/components/settings/SettingsIndex";
+import { SettingsSectionView } from "@/components/settings/SettingsSectionView";
+import { sectionById } from "@/lib/settingsSections";
+
+function SettingsBody() {
+  const params = useSearchParams();
+  const raw = params.get("section");
+  const section = sectionById(raw);
+  if (section) return <SettingsSectionView sectionId={section.id} />;
+  return <SettingsIndex />;
+}
 
 export default function SettingsPage() {
   return (
-    <div className="tab-body">
-      <FaceSkinCard />
-      <ModelSection />
-      <McpSection />
-      <SkillSection />
-      <LoopsCard />
-      <DiagnosticsCard />
-      <LogsCard />
-    </div>
+    <Suspense fallback={<SettingsIndex />}>
+      <SettingsBody />
+    </Suspense>
   );
 }

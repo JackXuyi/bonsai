@@ -1,12 +1,10 @@
 "use client";
 
-// 链路追踪入口（spec-s8 S8-d）：/trace?turn={id} 直取主档；
-// /trace?event={eventId} 先反查 turn（历史气泡的懒查入口）。
-// 静态导出（output: export）不支持动态路由段，参数一律走 query；
-// useSearchParams 在预渲染期需要 Suspense 边界包裹。
+// 链路追踪入口（spec-s8）：/trace?turn= / ?event=；Companion 二级顶栏。
 import { Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import { TraceView } from "@/components/trace/TraceView";
+import { SecondaryChrome } from "@/components/layout/SecondaryChrome";
 
 function TraceByQuery() {
   const sp = useSearchParams();
@@ -22,10 +20,13 @@ function TraceByQuery() {
 
 export default function TraceIndexPage() {
   return (
-    <div className="tab-body">
-      <Suspense fallback={<p className="hint-line trace-empty">链路读取中…</p>}>
-        <TraceByQuery />
-      </Suspense>
-    </div>
+    <>
+      <SecondaryChrome title="生成链路" />
+      <div className="tab-body">
+        <Suspense fallback={<p className="hint-line trace-empty">链路读取中…</p>}>
+          <TraceByQuery />
+        </Suspense>
+      </div>
+    </>
   );
 }

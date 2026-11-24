@@ -1,25 +1,35 @@
 import { describe, expect, it } from "vitest";
-import { ROUTES, routeForKeys, titleForPath } from "@/lib/shortcut";
+import {
+  routeForKeys,
+  shortcutAction,
+  titleForPath,
+  normalizePath,
+} from "@/lib/shortcut";
 
-describe("shortcut", () => {
-  it("⌘1–⌘5 → 五条路由映射（1=对话 固定最前）", () => {
-    expect(routeForKeys(true, "1")).toBe("/");
-    expect(routeForKeys(true, "2")).toBe("/face");
-    expect(routeForKeys(true, "3")).toBe("/tools");
-    expect(routeForKeys(true, "4")).toBe("/memory");
-    expect(routeForKeys(true, "5")).toBe("/settings");
-    expect(ROUTES).toHaveLength(5);
-    expect(ROUTES[0]).toEqual({ path: "/", label: "对话" });
+describe("shortcut v2", () => {
+  it("⌘, → 设置；⌘⇧O → 会话抽屉；其它不触发", () => {
+    expect(shortcutAction(true, false, ",")).toEqual({
+      kind: "route",
+      path: "/settings",
+    });
+    expect(shortcutAction(true, true, "o")).toEqual({ kind: "toggleSessions" });
+    expect(shortcutAction(true, true, "O")).toEqual({ kind: "toggleSessions" });
+    expect(shortcutAction(false, false, ",")).toBeNull();
+    expect(shortcutAction(true, false, "1")).toBeNull();
+    expect(shortcutAction(true, false, "o")).toBeNull();
   });
 
-  it("无修饰键 / 非数字键不触发；标题映射回落", () => {
-    expect(routeForKeys(false, "1")).toBeNull();
-    expect(routeForKeys(true, "a")).toBeNull();
-    expect(routeForKeys(true, "6")).toBeNull();
-    expect(routeForKeys(true, "F1")).toBeNull();
+  it("routeForKeys 仅映射逗号（兼容包装）", () => {
+    expect(routeForKeys(true, ",")).toBe("/settings");
+    expect(routeForKeys(true, "1")).toBeNull();
+  });
 
+  it("标题与路径归一化", () => {
     expect(titleForPath("/")).toBe("对话");
-    expect(titleForPath("/memory")).toBe("记忆");
+    expect(titleForPath("/settings")).toBe("设置");
+    expect(titleForPath("/trace?turn=1")).toBe("生成链路");
     expect(titleForPath("/unknown")).toBe("阿盆");
+    expect(normalizePath("/index.html")).toBe("/");
+    expect(normalizePath("/settings.html")).toBe("/settings");
   });
 });
