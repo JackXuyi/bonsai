@@ -100,7 +100,12 @@ impl OllamaClient {
             .post(&format!("{}/api/chat", self.base_url))
             .send_json(&req)
             .map_err(|e| match e {
-                ureq::Error::Status(code, _) => LlmError::Status(code),
+                ureq::Error::Status(code, resp) => LlmError::Status(
+                    code,
+                    resp.into_string()
+                        .map(|b| super::cloud::error_message(&b))
+                        .unwrap_or_default(),
+                ),
                 other => LlmError::Transport(other.to_string()),
             })?;
         let body: ChatResponse = resp
@@ -136,7 +141,12 @@ impl OllamaClient {
             .post(&format!("{}/api/chat", self.base_url))
             .send_json(&req)
             .map_err(|e| match e {
-                ureq::Error::Status(code, _) => LlmError::Status(code),
+                ureq::Error::Status(code, resp) => LlmError::Status(
+                    code,
+                    resp.into_string()
+                        .map(|b| super::cloud::error_message(&b))
+                        .unwrap_or_default(),
+                ),
                 other => LlmError::Transport(other.to_string()),
             })?;
         let reader = std::io::BufReader::new(resp.into_reader());

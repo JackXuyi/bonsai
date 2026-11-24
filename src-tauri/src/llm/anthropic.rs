@@ -69,12 +69,9 @@ impl AnthropicClient {
                 // 非 2xx 的 body 才是「模型名写错 / key 无效」的唯一线索。
                 ureq::Error::Status(code, resp) => {
                     let raw = resp.into_string().unwrap_or_default();
-                    log::warn!(
-                        "claude llm {} failed {code}: {}",
-                        self.endpoint(),
-                        super::cloud::error_message(&raw)
-                    );
-                    LlmError::Status(code)
+                    let msg = super::cloud::error_message(&raw);
+                    log::warn!("claude llm {} failed {code}: {}", self.endpoint(), msg);
+                    LlmError::Status(code, msg)
                 }
                 other => LlmError::Transport(other.to_string()),
             })

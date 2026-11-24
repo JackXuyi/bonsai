@@ -17,9 +17,10 @@ import { useSessionStore } from "@/lib/stores/sessionStore";
 import { toast } from "@/lib/stores/uiStore";
 import type { DialogueOutcome } from "@/lib/types";
 
-/** 事件静默上限：一轮真实对话里最长静默是单次云端 HTTP（上限 120s），
- *  取 150s 留余量——只判「真断了」，不判「慢」。 */
-export const IDLE_TIMEOUT_MS = 150000;
+/** 事件静默上限：模型层重试（plan-retry §4.2）把最长静默拉到
+ *  3 次 × 120s ≈ 360s；240s 是折中——覆盖「一次超时 + 一次重试」的常见
+ *  形状，又不至于让真断流的等待变得不可忍受。只判「真断了」，不判「慢」。 */
+export const IDLE_TIMEOUT_MS = 240000;
 
 type StreamMsg = {
   delta?: string;

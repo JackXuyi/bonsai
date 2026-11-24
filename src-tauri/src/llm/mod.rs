@@ -202,12 +202,15 @@ pub struct ToolReply {
     pub finish_reason: String,
 }
 
-#[derive(Debug, thiserror::Error)]
+/// 可 Clone 是为了测试桩能按脚本重放同一组错误（plan-retry §5.1）。
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum LlmError {
     #[error("http transport error: {0}")]
     Transport(String),
-    #[error("server returned {0}")]
-    Status(u16),
+    /// 第二个字段是响应体摘要（`error_message`，≤200 字）：401 的
+    /// 「invalid api key」与 502 的「上游崩了」必须能区分（plan-retry §1）。
+    #[error("server returned {0}: {1}")]
+    Status(u16, String),
     #[error("response decode failed: {0}")]
     Decode(String),
 }

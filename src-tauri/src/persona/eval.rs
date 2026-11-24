@@ -87,6 +87,20 @@ pub trait DialogueBackend: Send {
     fn tool_client(&self) -> Option<std::sync::Arc<dyn crate::llm::ChatClient>> {
         None
     }
+
+    /// 上一轮 `reply*` 的失败（plan-retry §5.1）。默认 None——8 个 impl
+    /// 零改动；`LocalBackend` 把 `LlmError` 分类成 [`crate::failure::Failure`]
+    /// 存起来，调用点在拿到回复后立刻取走。**取走即清空**：失败不允许串到
+    /// 下一轮。
+    fn take_failure(&mut self) -> Option<crate::failure::Failure> {
+        None
+    }
+
+    /// 最近一次 `reply*` 实际发起的请求次数（含重试）。成功路径没有
+    /// `Failure` 可携带，trace 的 `attempts` 从这里读。
+    fn attempts(&self) -> u32 {
+        1
+    }
 }
 
 /// CI backend: maps scripted user turns to scripted replies; everything
@@ -124,17 +138,61 @@ pub struct LocalBackend {
     pub client: std::sync::Arc<dyn crate::llm::ChatClient>,
     /// 传输类别（plan-task-card v0.2 §2）：只有 Cloud 走 function calling。
     pub kind: crate::llm::ClientKind,
+    /// 最近一次 `reply*` 的失败（plan-retry §5.1）。`take_failure` 取走即清，
+    /// 不允许串到下一轮。
+    last_failure: Option<crate::failure::Failure>,
+    /// 最近一次请求的真实尝试次数（含重试）。
+    last_attempts: u32,
 }
 
 impl LocalBackend {
     pub fn new() -> Self {
         let (client, kind) = crate::llm::current_client_with_kind();
-        LocalBackend { client, kind }
+        LocalBackend { client, kind, last_failure: None, last_attempts: 1 }
     }
 
     /// 测试/工具桩注入：指定传输类别与客户端（如云端 kind + 脚本桩）。
     pub fn with_client(client: std::sync::Arc<dyn crate::llm::ChatClient>, kind: crate::llm::ClientKind) -> Self {
-        LocalBackend { client, kind }
+        LocalBackend { client, kind, last_failure: None, last_attempts: 1 }
+    }
+
+    /// 非流式请求 + 有界重试（plan-retry §4.2 模型层：2 次重试，按 kind）。
+    /// 幂等请求才允许走到这里——纯读，重发无副作用。
+    fn chat_retrying(&mut self, msgs: &[crate::llm::Msg], temperature: f64) -> String {
+        let mut attempts = 0u32;
+        loop {
+            attempts += 1;
+            match self.client.chat(msgs, temperature, crate::llm::CHAT_TIMEOUT_SECS) {
+                Ok(text) => {
+                    self.last_attempts = attempts;
+                    return text;
+                }
+                Err(e) => {
+                    let f = crate::failure::Failure::from_llm(&e).with_attempts(attempts);
+                    if attempts > crate::failure::MODEL_RETRIES || !f.retryable {
+                        log::warn!(
+                            "llm failed ({}, attempts={}): {}",
+                            f.kind.as_str(),
+                            f.attempts,
+                            f.detail
+                        );
+                        self.last_attempts = attempts;
+                        self.last_failure = Some(f);
+                        return String::new();
+                    }
+                    let delay = crate::failure::MODEL.delay(attempts);
+                    log::warn!(
+                        "llm failed ({}) — retry {}/{} in {}ms: {}",
+                        f.kind.as_str(),
+                        attempts,
+                        crate::failure::MODEL_RETRIES,
+                        delay.as_millis(),
+                        f.detail
+                    );
+                    std::thread::sleep(delay);
+                }
+            }
+        }
     }
 }
 
@@ -165,10 +223,17 @@ impl DialogueBackend for LocalBackend {
         }
     }
 
+    fn take_failure(&mut self) -> Option<crate::failure::Failure> {
+        self.last_failure.take()
+    }
+
+    fn attempts(&self) -> u32 {
+        self.last_attempts
+    }
+
     fn reply(&mut self, system: &str, history: &[Turn], user: &str, temperature: f64) -> String {
-        self.client
-            .chat(&build_msgs(system, history, user), temperature, crate::llm::CHAT_TIMEOUT_SECS)
-            .unwrap_or_default()
+        let msgs = build_msgs(system, history, user);
+        self.chat_retrying(&msgs, temperature)
     }
 
     fn reply_streaming(
@@ -179,14 +244,64 @@ impl DialogueBackend for LocalBackend {
         temperature: f64,
         on_delta: &mut dyn FnMut(&str),
     ) -> String {
-        self.client
-            .chat_stream(
-                &build_msgs(system, history, user),
-                temperature,
-                crate::llm::CHAT_TIMEOUT_SECS,
-                &mut |delta: &str| on_delta(delta),
-            )
-            .unwrap_or_default()
+        let msgs = build_msgs(system, history, user);
+        let mut attempts = 0u32;
+        loop {
+            attempts += 1;
+            // acc 是「已经流出去的字」：出错时它们是唯一值得保留的东西
+            //（plan-retry 不变量 2——已流出的字只增不减）。
+            let mut acc = String::new();
+            let mut emitted = false;
+            let out = {
+                let mut sink = |delta: &str| {
+                    emitted = true;
+                    acc.push_str(delta);
+                    on_delta(delta);
+                };
+                self.client
+                    .chat_stream(&msgs, temperature, crate::llm::CHAT_TIMEOUT_SECS, &mut sink)
+            };
+            match out {
+                Ok(text) => {
+                    self.last_attempts = attempts;
+                    return text;
+                }
+                Err(e) => {
+                    let f = crate::failure::Failure::from_llm(&e).with_attempts(attempts);
+                    let can_retry =
+                        f.retryable && attempts <= crate::failure::STREAM_RETRIES && !emitted;
+                    if can_retry {
+                        let delay = crate::failure::STREAM.delay(attempts);
+                        log::warn!(
+                            "llm stream failed ({}) — retry {}/{} in {}ms: {}",
+                            f.kind.as_str(),
+                            attempts,
+                            crate::failure::STREAM_RETRIES,
+                            delay.as_millis(),
+                            f.detail
+                        );
+                        std::thread::sleep(delay);
+                        continue;
+                    }
+                    self.last_attempts = attempts;
+                    if emitted && !acc.trim().is_empty() {
+                        // 已说了一半：不重试（用户会看到重复的半句话），把
+                        // 已有正文交回去，失败标 Interrupted 且**不可重试**——
+                        // 断在半句话上的轮只能由用户重新开一轮。
+                        self.last_failure =
+                            Some(crate::failure::Failure::new(
+                                crate::failure::FailureKind::Interrupted,
+                                f.detail,
+                            )
+                            .with_attempts(attempts)
+                            .downgrade());
+                        return acc;
+                    }
+                    self.last_failure = Some(f);
+                    return String::new();
+                }
+            }
+        }
     }
 }
 
@@ -577,5 +692,178 @@ mod tests {
         let report = run_suite(&mut sycophant, &card, &system, &set.scenarios);
         assert!(report.worst_disagreement_rate < MIN_DISAGREEMENT_RATE);
         assert!(!report.passed);
+    }
+    // --------------------------------------------- 模型层失败（plan-retry §5.1）
+
+    /// 可脚本化的传输桩：按调用次数依次吐 `Err` / `Ok`。
+    struct FlakyClient {
+        script: Vec<Result<String, crate::llm::LlmError>>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl FlakyClient {
+        fn new(script: Vec<Result<String, crate::llm::LlmError>>) -> Self {
+            FlakyClient { script, calls: std::sync::atomic::AtomicUsize::new(0) }
+        }
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl crate::llm::ChatClient for FlakyClient {
+        fn chat(
+            &self,
+            _m: &[crate::llm::Msg],
+            _t: f64,
+            _to: u64,
+        ) -> Result<String, crate::llm::LlmError> {
+            let i = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.script.get(i).cloned().unwrap_or(Ok("兜底脚本".into()))
+        }
+        fn chat_stream(
+            &self,
+            _m: &[crate::llm::Msg],
+            _t: f64,
+            _to: u64,
+            on_delta: &mut dyn FnMut(&str),
+        ) -> Result<String, crate::llm::LlmError> {
+            let i = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let item = self.script.get(i).cloned();
+            match item {
+                Some(Ok(text)) => {
+                    on_delta(&text);
+                    Ok(text)
+                }
+                Some(Err(e)) => {
+                    // 模拟「流到一半断了」：先吐一段再报错。
+                    if matches!(e, crate::llm::LlmError::Transport(_)) {
+                        on_delta("说到一半的");
+                    }
+                    Err(e)
+                }
+                None => Ok("兜底脚本".into()),
+            }
+        }
+        fn is_up(&self) -> bool {
+            true
+        }
+    }
+
+    fn backend(script: Vec<Result<String, crate::llm::LlmError>>) -> LocalBackend {
+        LocalBackend::with_client(
+            std::sync::Arc::new(FlakyClient::new(script)),
+            crate::llm::ClientKind::Ollama,
+        )
+    }
+
+    #[test]
+    fn a1_cloud_401_is_not_retried_and_hints_at_the_key() {
+        let mut b = backend(vec![Err(crate::llm::LlmError::Status(401, "invalid api key".into()))]);
+
+        let raw = b.reply("s", &[], "hi", 0.7);
+
+        assert_eq!(raw, "", "失败返回空，由轮层决定落库与兜底");
+        assert_eq!(b.attempts(), 1, "401 不许重试");
+        let f = b.take_failure().expect("失败必须留下名字");
+        assert_eq!(f.kind, crate::failure::FailureKind::Auth);
+        assert!(!f.retryable);
+        assert!(f.hint.contains("Key") || f.hint.contains("额度"), "{}", f.hint);
+        assert!(f.detail.contains("invalid api key"), "响应体要带进 detail：{}", f.detail);
+        assert!(b.take_failure().is_none(), "取走即清，失败不许串到下一轮");
+    }
+
+    #[test]
+    fn a2_rate_limit_retries_then_succeeds() {
+        let mut b = backend(vec![
+            Err(crate::llm::LlmError::Status(429, "rate limited".into())),
+            Ok(" recovered".into()),
+        ]);
+
+        let raw = b.reply("s", &[], "hi", 0.7);
+
+        assert_eq!(raw, " recovered");
+        assert_eq!(b.attempts(), 2, "429 允许一次自动重试");
+        assert!(b.take_failure().is_none(), "重试成功就没有失败可取");
+    }
+
+    #[test]
+    fn a2_rate_limit_exhaustion_keeps_the_kind() {
+        let mut b = backend(vec![
+            Err(crate::llm::LlmError::Status(429, "rate limited".into())),
+            Err(crate::llm::LlmError::Status(429, "rate limited".into())),
+            Err(crate::llm::LlmError::Status(429, "rate limited".into())),
+            Ok("不该走到这".into()),
+        ]);
+
+        let raw = b.reply("s", &[], "hi", 0.7);
+
+        assert_eq!(raw, "");
+        assert_eq!(b.attempts(), 3, "模型层预算：1 + 2 次重试，不许无限续命");
+        let f = b.take_failure().unwrap();
+        assert_eq!(f.kind, crate::failure::FailureKind::RateLimit);
+        assert_eq!(f.attempts, 3);
+    }
+
+    #[test]
+    fn a3_server_5xx_retries_once_then_reports_honestly() {
+        let mut b = backend(vec![
+            Err(crate::llm::LlmError::Status(502, "bad gateway".into())),
+            Err(crate::llm::LlmError::Status(502, "bad gateway".into())),
+            Err(crate::llm::LlmError::Status(502, "bad gateway".into())),
+        ]);
+
+        let raw = b.reply("s", &[], "hi", 0.7);
+
+        let f = b.take_failure().unwrap();
+        assert_eq!(f.kind, crate::failure::FailureKind::Server);
+        assert!(f.hint.contains("云端出故障"), "{}", f.hint);
+        let _ = raw;
+    }
+
+    #[test]
+    fn a4_interrupted_stream_keeps_the_emitted_text_and_cannot_retry() {
+        let mut b = backend(vec![Err(crate::llm::LlmError::Transport("connection reset".into()))]);
+
+        let mut shown = String::new();
+        let raw = b.reply_streaming("s", &[], "hi", 0.7, &mut |d| shown.push_str(d));
+
+        // 不变式 2：已流出的字只增不减——失败时正文必须原样保留。
+        assert_eq!(shown, "说到一半的");
+        assert_eq!(raw, "说到一半的", "部分正文要交回给轮层，不是空串");
+        let f = b.take_failure().unwrap();
+        assert_eq!(f.kind, crate::failure::FailureKind::Interrupted, "断流就是断流，别冒充 Transport");
+        assert!(!f.retryable, "断在半句上的轮不许自动重发（用户会看到重复半句）");
+        assert!(f.hint.contains("断了"), "{}", f.hint);
+    }
+
+    #[test]
+    fn a4_zero_delta_stream_failure_retries_once() {
+        let mut b = backend(vec![
+            Err(crate::llm::LlmError::Status(503, "overloaded".into())),
+            Ok("恢复了".into()),
+        ]);
+
+        let mut shown = String::new();
+        let raw = b.reply_streaming("s", &[], "hi", 0.7, &mut |d| shown.push_str(d));
+
+        assert_eq!(raw, "恢复了");
+        assert_eq!(shown, "恢复了");
+        assert_eq!(b.attempts(), 2, "零 delta 才允许重试一次");
+        assert!(b.take_failure().is_none());
+    }
+
+    #[test]
+    fn failure_does_not_leak_into_the_next_reply() {
+        let mut b = backend(vec![
+            Err(crate::llm::LlmError::Status(401, "bad key".into())),
+            Ok("第二轮正常".into()),
+        ]);
+        let _ = b.reply("s", &[], "hi", 0.7);
+        assert!(b.take_failure().is_some());
+
+        let raw = b.reply("s", &[], "hi", 0.7);
+        assert_eq!(raw, "第二轮正常");
+        assert!(b.take_failure().is_none(), "成功轮不许带出上一轮的失败");
+        assert_eq!(b.attempts(), 1);
     }
 }

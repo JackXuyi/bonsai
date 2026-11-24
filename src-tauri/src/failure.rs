@@ -118,6 +118,8 @@ pub struct Failure {
     pub retryable: bool,
     pub hint: &'static str,
     pub detail: String,
+    /// 这次失败一共发起过几次请求（含重试）；`trace.attempts` 的来源。
+    pub attempts: u32,
 }
 
 impl Failure {
@@ -127,7 +129,14 @@ impl Failure {
             retryable: kind.retryable(),
             hint: kind.hint(),
             detail: detail.into(),
+            attempts: 1,
         }
+    }
+
+    /// 重试循环里把真实尝试次数写回（trace 观测用）。
+    pub fn with_attempts(mut self, attempts: u32) -> Self {
+        self.attempts = attempts.max(1);
+        self
     }
 
     /// 调用点知道这次不能重试（流式已产出 / Write 档 / 已重试过一轮）。
@@ -149,7 +158,14 @@ impl Failure {
                     Failure::new(FailureKind::Transport, raw.clone())
                 }
             }
-            LlmError::Status(code) => Failure::new(status_kind(*code), format!("http {code}")),
+            LlmError::Status(code, body) => {
+                let mut detail = format!("http {code}");
+                if !body.trim().is_empty() {
+                    detail.push_str(": ");
+                    detail.push_str(body);
+                }
+                Failure::new(status_kind(*code), detail)
+            }
             LlmError::Decode(raw) => Failure::new(FailureKind::Decode, raw.clone()),
         }
     }
@@ -359,22 +375,22 @@ mod tests {
     #[test]
     fn llm_status_maps_to_four_distinct_kinds() {
         // A1：401 不许重试，且 hint 要指向 key/额度。
-        let auth = Failure::from_llm(&LlmError::Status(401));
+        let auth = Failure::from_llm(&LlmError::Status(401, "invalid api key".into()));
         assert_eq!(auth.kind, FailureKind::Auth);
         assert!(!auth.retryable);
         assert!(auth.hint.contains("Key") || auth.hint.contains("额度"), "{}", auth.hint);
 
         // A2 / A3：429 与 502 都可以重试，但用户看到的话必须不同。
-        let limited = Failure::from_llm(&LlmError::Status(429));
+        let limited = Failure::from_llm(&LlmError::Status(429, "rate limited".into()));
         assert_eq!(limited.kind, FailureKind::RateLimit);
         assert!(limited.retryable);
-        let down = Failure::from_llm(&LlmError::Status(502));
+        let down = Failure::from_llm(&LlmError::Status(502, "bad gateway".into()));
         assert_eq!(down.kind, FailureKind::Server);
         assert!(down.retryable);
         assert_ne!(limited.hint, down.hint);
 
         // 其它 4xx（如 400 上下文超限）重试没有意义。
-        let bad = Failure::from_llm(&LlmError::Status(400));
+        let bad = Failure::from_llm(&LlmError::Status(400, "context too long".into()));
         assert_eq!(bad.kind, FailureKind::BadRequest);
         assert!(!bad.retryable);
     }
@@ -442,7 +458,7 @@ mod tests {
 
     #[test]
     fn downgrade_keeps_the_kind_but_forbids_retry() {
-        let f = Failure::from_llm(&LlmError::Status(503)).downgrade();
+        let f = Failure::from_llm(&LlmError::Status(503, "maintenance".into())).downgrade();
         assert_eq!(f.kind, FailureKind::Server, "失败事实不许改写");
         assert!(!f.retryable, "调用点可以禁重试");
     }

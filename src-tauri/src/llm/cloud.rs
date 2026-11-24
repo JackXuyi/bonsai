@@ -69,7 +69,7 @@ impl CloudClient {
                 ureq::Error::Status(code, resp) => {
                     let raw = resp.into_string().unwrap_or_default();
                     log::warn!("cloud llm {} failed {code}: {}", self.endpoint(), error_message(&raw));
-                    LlmError::Status(code)
+                    LlmError::Status(code, error_message(&raw))
                 }
                 other => LlmError::Transport(other.to_string()),
             })

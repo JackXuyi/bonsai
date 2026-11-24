@@ -1465,6 +1465,40 @@ pub fn chat_turn_streaming_with_kit(
     )
 }
 
+/// 直答的唯一调用点（plan-retry §5.1）：调 `reply*`，把 `take_failure` 的
+/// 结果写进 trace。成功记 `answered`；流式中途断（正文非空 + 失败）记
+/// `interrupted`；全失败记 `error`，output 从空串变成
+/// `kind=… attempts=… detail…`——401 与 502 从此可区分。
+fn call_backend_with_trace(
+    backend: &mut dyn DialogueBackend,
+    system: &str,
+    history: &[crate::persona::eval::Turn],
+    user_text: &str,
+    temperature: f64,
+    mut on_delta: Option<&mut dyn FnMut(&str)>,
+    rec: &mut TraceRecorder,
+) -> String {
+    // 防御：规则路由 / 总结路径留下的失败不许串到这一轮（§11 风险矩阵）。
+    let _ = backend.take_failure();
+    let t = std::time::Instant::now();
+    let raw = match on_delta.as_deref_mut() {
+        Some(cb) => backend.reply_streaming(system, history, user_text, temperature, cb),
+        None => backend.reply(system, history, user_text, temperature),
+    };
+    let f = backend.take_failure();
+    let outcome = match &f {
+        Some(_) if !raw.trim().is_empty() => "interrupted",
+        Some(_) => "error",
+        None => "answered",
+    };
+    let output = match &f {
+        Some(x) => format!("kind={} attempts={} {}", x.kind.as_str(), x.attempts, x.detail),
+        None => raw.clone(),
+    };
+    rec.llm_round("直接对话", system, &output, outcome, t.elapsed());
+    raw
+}
+
 fn chat_turn_inner(
     store: &MemoryStore,
     backend: &mut dyn DialogueBackend,
@@ -1716,15 +1750,14 @@ fn chat_turn_inner(
                         )? {
                             Some(triple) => (triple.0, triple.1, None, triple.2),
                             None => {
-                                // 直答（原有单轮路径，人格全程在）。
-                                let raw = match on_delta.as_deref_mut() {
-                                    Some(cb) => backend.reply_streaming(
-                                        &system, &history, user_text, CHAT_TEMPERATURE, cb,
-                                    ),
-                                    None => {
-                                        backend.reply(&system, &history, user_text, CHAT_TEMPERATURE)
-                                    },
-                                };
+                                // 直答（原有单轮路径，人格全程在）。失败不再
+                                // 被抹平：分类后的 Failure 进 trace（T2）。
+                                let mut reborrow = on_delta.as_deref_mut();
+                                let raw = call_backend_with_trace(
+                                    backend, &system, &history, user_text, CHAT_TEMPERATURE,
+                                    reborrow.as_mut().map(|f| &mut **f as &mut dyn FnMut(&str)),
+                                    &mut rec,
+                                );
                                 (raw, None, None, true)
                             }
                         }
@@ -1779,20 +1812,12 @@ fn chat_turn_inner(
         });
     }
 
-    let raw = match on_delta.as_deref_mut() {
-        Some(cb) => {
-            let t = std::time::Instant::now();
-            let raw = backend.reply_streaming(&system, &history, user_text, CHAT_TEMPERATURE, cb);
-            rec.llm_round("直接对话", &system, &raw, "answered", t.elapsed());
-            raw
-        }
-        None => {
-            let t = std::time::Instant::now();
-            let raw = backend.reply(&system, &history, user_text, CHAT_TEMPERATURE);
-            rec.llm_round("直接对话", &system, &raw, "answered", t.elapsed());
-            raw
-        }
-    };
+    let mut reborrow = on_delta.as_deref_mut();
+    let raw = call_backend_with_trace(
+        backend, &system, &history, user_text, CHAT_TEMPERATURE,
+        reborrow.as_mut().map(|f| &mut **f as &mut dyn FnMut(&str)),
+        &mut rec,
+    );
     let model_used = !raw.trim().is_empty();
     let reply = if model_used {
         raw
@@ -4650,10 +4675,16 @@ mod tests {
         assert_eq!(trace.kind, "model");
         assert!(!trace.model_used);
         let steps = steps_of(&s, tid);
-        assert_eq!(steps[4].1, "answered"); // round ran, output empty
+        // plan-retry §5.1：失败不再被抹平成空串 + answered——round 照记，
+        // 但结论是 error，output 带 kind/attempts/detail。
+        assert_eq!(steps[4].1, "error");
         with_conn(&s, |conn| {
             let t = db::turn_trace_get(conn, tid).unwrap().unwrap();
-            assert_eq!(t.steps[4].output.as_deref(), Some(""));
+            let out = t.steps[4].output.as_deref().unwrap_or("");
+            assert!(
+                out.starts_with("kind=transport attempts="),
+                "output 要说清失败是什么：{out}"
+            );
         });
     }
 
