@@ -176,6 +176,8 @@ User Message
 
 ## 6. Phase 3 · Autonomy（在记忆闭环稳定后）
 
+> **详细方案**：[`plan-autonomy-phase3/v1`](../../plan-autonomy-phase3/v1/index.md)（Task Recovery、步骤幂等、IntentGate、Action Ranking、统一 job；裁决默认与开工闸）。
+
 | ID | 优先级 | 事项 | 交付物 | 说明 |
 |---|---|---|---|---|
 | **A1** | P2 | Task Recovery | 从最后安全步骤续跑；区分「工具成功」与「审计成功」 | 现仅 `interrupted` 标记 |
@@ -193,6 +195,14 @@ User Message
 - Plan 中 / 工具执行前中断；工具成功但审计失败；超时但外部已完成；
 - 用户取消、拒绝审批、预算耗尽、MCP 中途断开；
 - 写操作重复执行不产生双写（幂等或拒绝）。
+
+### 6.3 Phase 3 完成定义
+
+- [x] A1/A2：检查点纯函数 + `task_resume` / 重入裁决；启动不自动续跑（D1）；用户取消永不 resume（I7）。
+- [x] A3：`intent_gate` 模块化；分类器默认不上（D3）。
+- [x] A4：`action_rank` 与 Decision 分立；proactive tick 消费候选。
+- [x] A5：`jobs` 表 + consolidate 迁入闸；失败 ≤3。
+- [ ] L3 真机：杀进程半截计划 → 面板恢复；写文件不双写（见 plan §11.1）。
 
 ---
 
@@ -238,3 +248,4 @@ User Message
 | v1 | 2026-11-24 | 初稿：由第二轮架构 Review 收敛为三阶段可执行路线；代码锚点含 `forget_session`、`beyond_window`、`synonym::CLUSTERS`、`should_speak` UTC 日界 |
 | v1.1 | 2026-11-24 | Phase 1 详细方案落盘：`docs/zh/plan-reliability-phase1/v1` |
 | v1.2 | 2026-11-24 | Phase 2 详细方案落盘：`docs/zh/plan-intelligence-phase2/v1` |
+| v1.3 | 2026-11-24 | Phase 3 详细方案落盘：`docs/zh/plan-autonomy-phase3/v1` |

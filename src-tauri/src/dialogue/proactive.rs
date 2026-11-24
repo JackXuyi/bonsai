@@ -141,12 +141,28 @@ pub fn spawn_proactive(app: tauri::AppHandle) {
                     return;
                 };
                 if !matches!(decision, Decision::Speak) {
+                    // D6：Rank 有候选也不降级强行开口——Decision Silent 本 tick 结束。
                     return;
                 }
 
                 let Some(store) = app.try_state::<MemoryStore>() else {
                     return; // evaluate 已持有同一 store；此处失败极端罕见
                 };
+                // Phase 3 A4：CandidateGen + Rank（与 Decision 分立）。
+                // 日配额已由 should_speak 预留；此处无合格候选 → 释放配额沉默。
+                // D6：本 tick 不因 Silent 降级到第二名（此处仅 Ambient 一种）。
+                let day = chrono::Local::now().date_naive().format("%Y-%m-%d").to_string();
+                let has_candidate = store.inner().write_guard().ok().is_some_and(|c| {
+                    let obs = today_observations(&c);
+                    let cands = crate::action_rank::generate_ambient(&obs, &day);
+                    crate::action_rank::pick_top(cands, &[]).is_some()
+                });
+                if !has_candidate {
+                    let _ = store.inner().with_write(|conn| {
+                        crate::decision::release_reserve(conn)
+                    });
+                    return;
+                }
                 let Ok(mut backend) = crate::persona::backend() else {
                     let _ = store.inner().with_write(|conn| {
                         crate::decision::release_reserve(conn)

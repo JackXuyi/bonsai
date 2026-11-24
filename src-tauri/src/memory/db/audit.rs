@@ -205,6 +205,19 @@ pub fn log_agent_tool_call(
     Ok(())
 }
 
+/// Phase 3 A2：给刚写入的审计行打幂等键（调用方在 insert 后用 last_insert_rowid）。
+pub fn set_tool_call_idempotency_key(
+    conn: &Connection,
+    tool_call_id: i64,
+    key: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE tool_calls SET idempotency_key = ?2 WHERE id = ?1",
+        params![tool_call_id, key],
+    )?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------- tasks（任务卡外壳，v12）/ 计划（v14）
 
 /// 计划步骤（docs/zh/plan-planning.md §4.2）。字段保持 snake_case——
@@ -221,6 +234,12 @@ pub struct PlanStep {
     pub attempts: i32,
     #[serde(default)]
     pub tool_call_id: Option<i64>,
+    /// Phase 3 A2：跨进程重入幂等键（可选）。
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
+    /// Phase 3 A2：`read` | `write` | `ask` | `unknown`（可选）。
+    #[serde(default)]
+    pub effect_class: Option<String>,
 }
 
 /// 结构化计划：写入 tasks.plan_json，供 trace 与 D6 进度面板消费。
@@ -338,27 +357,41 @@ pub struct TaskRow {
     pub plan_mode: String,
     pub cancel_reason: Option<String>,
     pub confirm_mode: String,
+    /// Phase 3 A1：可恢复标记（面板「恢复」按钮）。
+    pub resume_cursor: Option<i32>,
+    pub interrupt_kind: Option<String>,
+    pub resumable: bool,
 }
 
 pub fn task_list(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<TaskRow>> {
     let mut stmt = conn.prepare(
         "SELECT id, created_at, goal, status, tool_calls, final_reply,
-                plan_json, plan_mode, cancel_reason, confirm_mode
+                plan_json, plan_mode, cancel_reason, confirm_mode,
+                resume_cursor, interrupt_kind
          FROM tasks ORDER BY rowid DESC LIMIT ?1",
     )?;
     let rows = stmt.query_map(params![limit], |r| {
         let raw_plan: Option<String> = r.get(6)?;
+        let status: String = r.get(3)?;
+        let cancel_reason: Option<String> = r.get(8)?;
+        let plan_mode: String = r.get::<_, Option<String>>(7)?.unwrap_or_else(|| "none".into());
+        let resumable = plan_mode == "planned"
+            && matches!(status.as_str(), "interrupted" | "failed" | "running")
+            && cancel_reason.as_deref() != Some("user");
         Ok(TaskRow {
             id: r.get(0)?,
             created_at: r.get(1)?,
             goal: r.get(2)?,
-            status: r.get(3)?,
+            status,
             tool_calls: r.get(4)?,
             final_reply: r.get(5)?,
             plan: raw_plan.and_then(|s| serde_json::from_str(&s).ok()),
-            plan_mode: r.get::<_, Option<String>>(7)?.unwrap_or_else(|| "none".into()),
-            cancel_reason: r.get(8)?,
+            plan_mode,
+            cancel_reason,
             confirm_mode: r.get::<_, Option<String>>(9)?.unwrap_or_else(|| "auto".into()),
+            resume_cursor: r.get(10)?,
+            interrupt_kind: r.get(11)?,
+            resumable,
         })
     })?;
     rows.collect()

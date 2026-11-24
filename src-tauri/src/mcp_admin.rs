@@ -1415,6 +1415,37 @@ pub fn plan_list(
     db::task_list(&conn, limit.unwrap_or(10).clamp(1, 50)).map_err(|e| e.to_string())
 }
 
+/// Phase 3 A1：显式准备恢复（D1：不自动执工具；写步骤可能 ask_user）。
+#[tauri::command]
+pub fn task_resume(
+    store: tauri::State<'_, crate::memory::MemoryStore>,
+    task_id: String,
+) -> Result<crate::task_recovery::ResumePrepareResult, String> {
+    let conn = now_conn(&store)?;
+    crate::task_recovery::prepare_resume(&conn, &task_id).map_err(|e| e.to_string())
+}
+
+/// Phase 3 A2：用户对 ask_user 步骤的选择（retry|skip|cancel）。
+#[tauri::command]
+pub fn task_reentry_choice(
+    store: tauri::State<'_, crate::memory::MemoryStore>,
+    task_id: String,
+    choice: String,
+) -> Result<crate::task_recovery::ResumePrepareResult, String> {
+    let conn = now_conn(&store)?;
+    crate::task_recovery::apply_reentry_choice(&conn, &task_id, &choice).map_err(|e| e.to_string())
+}
+
+/// Phase 3 A1：可恢复任务列表（启动/面板）。
+#[tauri::command]
+pub fn task_list_resumable(
+    store: tauri::State<'_, crate::memory::MemoryStore>,
+    limit: Option<i64>,
+) -> Result<Vec<crate::task_recovery::ResumableTask>, String> {
+    let conn = now_conn(&store)?;
+    crate::task_recovery::list_resumable(&conn, limit.unwrap_or(10)).map_err(|e| e.to_string())
+}
+
 /// Answer for the approval card (spec-s4/s6). Returns whether a turn was
 /// actually waiting — a stale card (timeout already fired) gets `false` and
 /// changes nothing. Deliberately touches no DB: the chat turn holds the store

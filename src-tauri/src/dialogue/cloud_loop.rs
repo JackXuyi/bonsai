@@ -33,65 +33,9 @@ pub(crate) const CLOUD_TOOL_CALL_CAP: usize = 8;
 /// 单轮对话 HTTP 请求次数上限（含最终作答轮）。网络往返比本地推理贵。
 pub(crate) const CLOUD_REQUEST_CAP: usize = 6;
 
-/// 规划意图判定（plan-planning v0.2 §5.1）：纯规则、零模型、零成本。
-///
-/// **只在云端分支调用**——本地路径永不规划（本地零工具调用硬约束，A9）。
-/// 保守判定：宁可漏规划，不可误规划——误规划会多花一次云端请求且打断
-/// 单步任务。三级信号（intent_router::Match）：
-///   1. 显式规划 cue（「规划一下/列步骤/分几步」）或成对序列词（先…再）→ 命中；
-///   2. ≥2 个不同动作动词 且 kit 有 ≥2 工具 → 命中；
-///   3. ≥2 个工具域关键词 且 kit 有 ≥2 工具 → 命中。
+/// 规划意图判定（Phase 3 A3：权威在 `intent_gate`；此处薄封装保持原调用点）。
 pub(crate) fn plan_intent(user_text: &str, kit: &crate::mcp_admin::AgentKit) -> bool {
-    use crate::intent_router::{normalise, Match};
-
-    let t = normalise(user_text);
-    // 强 cue：明确要求规划/分步/多件事一起做，单个即命中（不依赖 kit）。
-    pub(crate) const STRONG: &[&str] = &[
-        "规划一下", "帮我规划", "列个步骤", "列出步骤", "列步骤",
-        "分几步", "分步骤", "一步步", "一起做", "按顺序",
-    ];
-    if Match::Any(STRONG).hits(&t) {
-        return true;
-    }
-    // 序列 cue 必须成对（「先…再」「先…然后」）——单字「先/再」太易误伤
-    // （「再说」「先这样」）。
-    pub(crate) const SEQ: &[&str] = &["先", "再", "然后", "接着", "随后", "之后"];
-    if (Match::AtLeast {
-        lexicon: SEQ,
-        min: 2,
-    })
-    .hits(&t)
-    {
-        return true;
-    }
-    // 多动作 / 多域都要求 kit 有 ≥2 工具：单工具场景一步就做完，无需规划。
-    if kit.catalog_all().len() < 2 {
-        return false;
-    }
-    // 用「不同动作」去重：'查一下' 与 '查' 只算一个动作。
-    // 单字动词避免与域名子串冲突（「记」会命中「记忆」）——改用双字「记到/记录」。
-    pub(crate) const ACTIONS: &[&str] = &[
-        "查", "找", "读", "写", "搜", "发", "存", "记到", "记录",
-        "整理", "总结", "合并", "生成", "汇总", "对比", "列出",
-        "下载", "打开", "删除", "导出", "导入", "复制", "移动",
-    ];
-    if (Match::AtLeast {
-        lexicon: ACTIONS,
-        min: 2,
-    })
-    .hits(&t)
-    {
-        return true;
-    }
-    pub(crate) const DOMAINS: &[&str] = &[
-        "文件", "文档", "网页", "网址", "链接", "日程", "会议", "日历",
-        "邮件", "记忆", "笔记", "备忘录", "剪贴板", "目录", "文件夹",
-    ];
-    (Match::AtLeast {
-        lexicon: DOMAINS,
-        min: 2,
-    })
-    .hits(&t)
+    crate::intent_gate::wants_plan(user_text, kit, false)
 }
 
 /// 计划步数上限（plan-planning §7）：低于 CLOUD_TOOL_CALL_CAP=8，留 2 步
@@ -156,6 +100,8 @@ pub(crate) fn parse_submitted_plan(args: &serde_json::Value) -> Option<db::PlanJ
             status: "pending".into(),
             attempts: 0,
             tool_call_id: None,
+            idempotency_key: None,
+            effect_class: None,
         });
     }
     Some(db::PlanJson { version: 1, goal, steps, replans: 0 })
@@ -228,6 +174,23 @@ pub(crate) fn bridge_plan_step(
         step.status = status.to_string();
         step.attempts = attempts as i32;
         step.tool_call_id = tool_call_id;
+        // Phase 3 A2：成功审计时补幂等键（canonical = tool_hint + seq）。
+        if let Some(tcid) = tool_call_id {
+            if step.idempotency_key.is_none() {
+                let key = crate::task_recovery::make_idempotency_key(
+                    task_id,
+                    step.seq,
+                    call_name,
+                    &step.tool_hint,
+                );
+                step.idempotency_key = Some(key.clone());
+                let _ = db::set_tool_call_idempotency_key(&conn, tcid, &key);
+            }
+            if step.effect_class.is_none() {
+                // 未知工具保守 unknown；有 hint 时由后续 kit 回填，这里先占位。
+                step.effect_class = Some("unknown".into());
+            }
+        }
     } else {
         let seq = plan.steps.len() as i32;
         plan.steps.push(db::PlanStep {
@@ -237,6 +200,8 @@ pub(crate) fn bridge_plan_step(
             status: status.to_string(),
             attempts: attempts as i32,
             tool_call_id,
+            idempotency_key: None,
+            effect_class: None,
         });
     }
     db::plan_put(&conn, task_id, &plan).ok()?;

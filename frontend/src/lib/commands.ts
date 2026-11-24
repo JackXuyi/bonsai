@@ -26,6 +26,7 @@ import type {
   OnboardingSubmitResult,
   PersonaSnapshot,
   PlanTaskRow,
+  ResumePrepareResult,
   PerceptionConfig,
   PerceptionStatus,
   ProfileEntry,
@@ -312,6 +313,14 @@ export const toolCallRecords = (limit?: number) =>
 /** 计划历史（plan-planning §5.6）：进度面板首屏基线，含解析后的 plan_json。 */
 export const planList = (limit?: number) =>
   call<PlanTaskRow[]>("plan_list", { limit });
+
+/** Phase 3 A1：显式准备恢复（不自动烧工具）。 */
+export const taskResume = (taskId: string) =>
+  call<ResumePrepareResult>("task_resume", { taskId });
+
+/** Phase 3 A2：ask_user 步骤选择。 */
+export const taskReentryChoice = (taskId: string, choice: "retry" | "skip" | "cancel") =>
+  call<ResumePrepareResult>("task_reentry_choice", { taskId, choice });
 
 /** 审批回执：返回 false 表示该请求已过期（30s 超时已拒绝或已答复过）。 */
 export const mcpApprovalReply = (id: number, allow: boolean) =>

@@ -21,7 +21,10 @@ pub mod faceskins;
 pub mod failure;
 pub mod filetools;
 pub mod generation;
+pub mod intent_gate;
 pub mod intent_router;
+pub mod action_rank;
+pub mod task_recovery;
 pub mod llm;
 pub mod llm_admin;
 pub mod llm_cloud;
@@ -113,10 +116,20 @@ pub fn run() {
                 // interrupted（超 24h 才动，刚崩完的保守不动）。turn_trace
                 // 无 assistant_event_id 的失败轮过滤留给 T7（统计口径在
                 // 查询侧，本分支不动 memory/db.rs）。
-                match mark_stale_running_interrupted(&conn) {
+                // Phase 3 A1：标 interrupted + interrupt_kind；D1 不自动续跑。
+                match task_recovery::mark_stale_and_flag_resumable(&conn) {
                     Ok(0) => {}
                     Ok(n) => log::info!("startup cleanup: {n} stale 'running' task(s) marked interrupted"),
                     Err(e) => log::warn!("startup cleanup of stale running tasks failed: {e}"),
+                }
+                match task_recovery::list_resumable(&conn, 5) {
+                    Ok(list) if !list.is_empty() => {
+                        log::info!(
+                            "startup: {} resumable task(s) available (explicit resume only)",
+                            list.len()
+                        );
+                    }
+                    _ => {}
                 }
                 llm_admin::load_from_settings(&conn);
             }
@@ -354,6 +367,9 @@ pub fn run() {
             mcp_admin::skill_auto_set_enabled,
             mcp_admin::tool_call_records,
             mcp_admin::plan_list,
+            mcp_admin::task_resume,
+            mcp_admin::task_reentry_choice,
+            mcp_admin::task_list_resumable,
             mcp_admin::mcp_approval_reply,
             mcp_admin::agent_approval_get,
             mcp_admin::agent_approval_set,
@@ -482,17 +498,6 @@ fn backup_corrupt_db(path: &std::path::Path) -> std::io::Result<std::path::PathB
     Ok(backup)
 }
 
-/// 启动清残留（§5.6）：把 `created_at` 早于 24h 前且仍 `running` 的任务行
-/// 标 `interrupted`。`created_at` 与 cutoff 都是同一格式的 UTC RFC3339 串，
-/// 字典序即时间序。24h 内的不动——崩溃刚发生，保守。
-fn mark_stale_running_interrupted(conn: &rusqlite::Connection) -> rusqlite::Result<usize> {
-    let cutoff = (chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
-    conn.execute(
-        "UPDATE tasks SET status = 'interrupted'
-          WHERE status = 'running' AND created_at < ?1",
-        [cutoff],
-    )
-}
 
 #[cfg(test)]
 mod tests {
@@ -578,13 +583,21 @@ mod tests {
             .unwrap();
         }
 
-        let n = mark_stale_running_interrupted(&conn).unwrap();
+        let n = task_recovery::mark_stale_and_flag_resumable(&conn).unwrap();
         assert_eq!(n, 1, "只有超 24h 的 running 被动");
         let status_of = |id: &str| -> String {
             conn.query_row("SELECT status FROM tasks WHERE id = ?1", [id], |r| r.get(0))
                 .unwrap()
         };
         assert_eq!(status_of("old-running"), "interrupted");
+        let kind: String = conn
+            .query_row(
+                "SELECT interrupt_kind FROM tasks WHERE id = 'old-running'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kind, "crash");
         assert_eq!(status_of("fresh-running"), "running", "24h 内保守不动");
         assert_eq!(status_of("old-done"), "done", "非 running 不动");
         assert_eq!(status_of("fresh-failed"), "failed");

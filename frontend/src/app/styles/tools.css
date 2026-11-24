@@ -708,6 +708,37 @@
   color: var(--muted);
 }
 
+.plan-resume-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 4px 0 6px;
+}
+
+.plan-resume-btn {
+  padding: 2px 8px;
+  border: 1px solid var(--line, rgba(0, 0, 0, 0.12));
+  border-radius: 4px;
+  background: transparent;
+  font: inherit;
+  font-size: 10px;
+  color: var(--accent-ink, inherit);
+  cursor: pointer;
+}
+
+.plan-resume-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.plan-resume-btn:hover:not(:disabled) {
+  border-color: var(--accent, #5a7a5a);
+}
+
+.plan-task-interrupted {
+  color: var(--warn, #a67c52);
+}
+
 .plan-history-toggle {
   align-self: flex-start;
   padding: 0;

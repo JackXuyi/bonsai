@@ -140,6 +140,8 @@ use crate::memory::clock;
                     status: "done".into(),
                     attempts: 1,
                     tool_call_id: Some(12),
+                    idempotency_key: None,
+                    effect_class: Some("read".into()),
                 },
                 PlanStep {
                     seq: 1,
@@ -148,6 +150,8 @@ use crate::memory::clock;
                     status: "pending".into(),
                     attempts: 0,
                     tool_call_id: None,
+                    idempotency_key: None,
+                    effect_class: Some("write".into()),
                 },
             ],
             replans: 0,

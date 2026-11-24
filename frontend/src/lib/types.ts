@@ -605,11 +605,29 @@ export interface PlanTaskRow {
   planMode: string;
   cancelReason?: string | null;
   confirmMode: string;
+  /** Phase 3 A1 */
+  resumeCursor?: number | null;
+  interruptKind?: string | null;
+  resumable?: boolean;
+}
+
+/** `task_resume` / `task_reentry_choice` 返回。 */
+export interface ResumePrepareResult {
+  taskId: string;
+  outcome: string;
+  resumeCursor?: number | null;
+  message: string;
+  lastSafeSeq: number;
 }
 
 /** 步骤态：库/事件里是 `done|skipped|failed` 与 `ok|denied|error` 两套，
  *  统一收敛到这一组（store 里映射，组件只认这一份）。 */
-export type PlanStepStatus = "pending" | "running" | "done" | "failed" | "skipped";
+export type PlanStepStatus =
+  | "pending"
+  | "running"
+  | "done"
+  | "failed"
+  | "skipped";
 
 /** 面板视图模型：id/goal 来自 tasks，steps 由 plan_json + task_step 合并。 */
 export interface PlanStepView {
@@ -624,8 +642,12 @@ export interface PlanStepView {
 export interface PlanProgress {
   id: string;
   goal: string;
-  /** tasks.status：running / done / failed / canceled */
+  /** tasks.status：running / done / failed / canceled / interrupted */
   status: string;
   cancelReason?: string | null;
   steps: PlanStepView[];
+  /** Phase 3 A1：面板「恢复」 */
+  resumable?: boolean;
+  resumeCursor?: number | null;
+  interruptKind?: string | null;
 }

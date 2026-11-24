@@ -17,6 +17,7 @@ pub mod db;
 pub mod evidence;
 pub mod forget;
 pub mod implicit;
+pub mod job;
 /// S0 检索基线（2026-11-23）：只读量尺，进 release 包没有任何意义，
 /// 因此只在测试构建里编译。
 #[cfg(test)]
@@ -107,6 +108,8 @@ impl MemoryStore {
     pub fn open(path: &std::path::Path) -> rusqlite::Result<Self> {
         // writer 先开并 migrate；再开 readers（不再跑 migrate）。
         let write = db::open(path)?;
+        // Phase 3 A5：种子常驻 job（幂等；与 schema migrate 解耦避免循环依赖）。
+        job::seed_builtin_jobs(&write)?;
         let read = ReadPool::open(path, READER_COUNT)?;
         Ok(MemoryStore {
             write: Mutex::new(write),

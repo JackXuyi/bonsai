@@ -133,6 +133,16 @@ fn tick(app: &AppHandle) -> Result<(), String> {
         return Ok(());
     };
 
+    // Phase 3 A5：统一 jobs 表闸（enabled + 连续失败 ≤3）；与 failure JobGuard 叠加。
+    {
+        let conn = store.write_guard().map_err(|e| e.to_string())?;
+        if !crate::memory::job::job_allows_run(&conn, "consolidate").map_err(|e| e.to_string())? {
+            log::info!("consolidate: jobs table disabled or fail-capped, skipping");
+            let _ = crate::memory::job::record_job_skipped(&conn, "consolidate");
+            return Ok(());
+        }
+    }
+
     // T5 §5.5：退避门放在 decide_trigger **之后**——「该不该跑」（纯函数）
     // 与「能不能跑」（作业失败退避）是两件事。被退避挡住的夜归档下个
     // tick 再看，不消耗 trigger。
@@ -185,16 +195,18 @@ fn tick(app: &AppHandle) -> Result<(), String> {
                     &conn, &job_guard, now_local, opts.trigger, &opts.window_start, &opts.window_end,
                     &detail,
                 );
+                let _ = crate::memory::job::record_job_failed(&conn, "consolidate");
                 log::error!("consolidate 失败（fails={}，next_at={}）：{detail}", st.fails, st.next_at);
             }
             return Err(detail);
         }
     };
 
-    // 跑成了 → 清退避，明天从零算起。
+    // 跑成了 → 清退避，明天从零算起；jobs 表同步 ok。
     {
         let conn = store.write_guard().map_err(|e| e.to_string())?;
         job_guard.record_ok(&conn);
+        let _ = crate::memory::job::record_job_ok(&conn, "consolidate");
     }
 
     // L2 摘要重写（plan-context §6.5，默认关）：巩固跑完接着做，失败/关闭都

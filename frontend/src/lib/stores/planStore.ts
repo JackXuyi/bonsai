@@ -132,6 +132,9 @@ export function progressFromRow(row: PlanTaskRow): PlanProgress {
     status: row.status,
     cancelReason: row.cancelReason ?? null,
     steps: steps.sort((a, b) => a.seq - b.seq),
+    resumable: row.resumable ?? false,
+    resumeCursor: row.resumeCursor ?? null,
+    interruptKind: row.interruptKind ?? null,
   };
 }
 

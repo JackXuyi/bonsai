@@ -6,6 +6,10 @@ use rusqlite::{params, Connection};
 
 use crate::memory::clock;
 
+/// SCHEMA_VERSION = 20（2026-11-24）：Autonomy Phase 3
+/// （docs/zh/plan-autonomy-phase3/v1）——
+/// `tasks` 恢复列（resume_cursor / safe_checkpoint / interrupt_kind）；
+/// `tool_calls.idempotency_key`；统一 `jobs` 常驻任务表（P3-5）。
 /// SCHEMA_VERSION = 19（2026-11-24）：Intelligence Phase 2 I3
 /// （docs/zh/plan-intelligence-phase2/v1）——
 /// `memory_evidence.independence_group`：同会话重复提及不无限 bump 置信度。
@@ -52,7 +56,7 @@ use crate::memory::clock;
 /// EXISTS 不会给已有表加列；v9→v9 不触发 migrate，INSERT 带 user_text 直接
 /// 报 "table turn_trace has no column named user_text"。教训：改 SCHEMA 必
 /// 须同时 bump 此版本号。
-pub(crate) const SCHEMA_VERSION: i64 = 19;
+pub(crate) const SCHEMA_VERSION: i64 = 20;
 
 /// 不进会话列表的保留 session id：主动搭话（bubble 照旧实时显示，但不占
 /// 用户能切换的对话窗口）。sessions 里**永不建行**（plan-context D6）。
@@ -338,7 +342,9 @@ CREATE TABLE IF NOT EXISTS tool_calls (
     prompt_trace   TEXT,
     remote         INTEGER DEFAULT 0,
     -- 任务卡外壳（v12）：本行属于哪次云端工具循环（tasks.id，TEXT uuid）
-    task_id        TEXT
+    task_id        TEXT,
+    -- Phase 3 A2：跨进程重入幂等键（索引一律在 migrate 补列后建，避免老库炸）
+    idempotency_key TEXT
 );
 
 -- 任务卡外壳（plan-task-card v0.2 §8，v12）：一次云端工具循环一行；
@@ -347,7 +353,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     id            TEXT PRIMARY KEY,   -- uuid
     created_at    TEXT NOT NULL,      -- clock::now_iso()
     goal          TEXT NOT NULL,      -- 用户原话前 80 字（人工可读）
-    status        TEXT NOT NULL,      -- running / done / failed / canceled
+    status        TEXT NOT NULL,      -- running / done / failed / canceled / interrupted
     tool_calls    INTEGER NOT NULL DEFAULT 0,
     final_reply   TEXT,
     -- 规划能力（v14，docs/zh/plan-planning.md §4）：NULL = 单步任务，无额外开销
@@ -356,7 +362,24 @@ CREATE TABLE IF NOT EXISTS tasks (
     cancel_reason TEXT,                         -- 'user' | 'budget' | NULL
     confirm_mode  TEXT NOT NULL DEFAULT 'auto', -- D1: 'auto' 直放 | 'manual' 扩展位（本版不阻塞）
     -- 会话归属（v15）：forget_session 要按会话连带清掉任务行（goal 存的是用户原话）
-    session_id    TEXT
+    session_id    TEXT,
+    -- Phase 3 A1：恢复检查点（docs/zh/plan-autonomy-phase3/v1）
+    resume_cursor   INTEGER,          -- 下一待执行 seq；NULL = 未进入恢复语义
+    safe_checkpoint TEXT,             -- 上次检查点提交成功 ISO 时间
+    interrupt_kind  TEXT              -- 'crash' | 'timeout' | 'budget' | 'external' | NULL
+);
+
+-- Phase 3 A5 / P3-5：统一常驻 job（consolidate 等迁入；执行体仍在各模块）
+CREATE TABLE IF NOT EXISTS jobs (
+    id            TEXT PRIMARY KEY,
+    name          TEXT NOT NULL UNIQUE,
+    schedule_kind TEXT NOT NULL,         -- 'cron_like' | 'interval' | 'once'
+    schedule_expr TEXT NOT NULL,
+    enabled       INTEGER NOT NULL DEFAULT 1,
+    last_run_at   TEXT,
+    last_status   TEXT,                  -- 'ok' | 'failed' | 'skipped'
+    consecutive_fails INTEGER NOT NULL DEFAULT 0,
+    payload_json  TEXT NOT NULL DEFAULT '{}'
 );
 
 -- MCP servers (plan-agent-mcp-skill.md §3.2, spec-s2). Secrets in
@@ -549,6 +572,10 @@ pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
 
     if !has_events {
         conn.execute_batch(SCHEMA)?;
+        // 新库：tool_calls 已含 idempotency_key，在此建索引。
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_tool_calls_idem ON tool_calls(idempotency_key);",
+        )?;
         set_user_version(conn, SCHEMA_VERSION)?;
         return Ok(());
     }
@@ -607,6 +634,17 @@ pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     // v19：independence_group 列（老表 CREATE IF NOT EXISTS 不会加列）。
     add_column_if_missing(conn, "memory_evidence", "independence_group", "TEXT")?;
     backfill_independence_groups(conn)?;
+    // v20：Autonomy Phase 3 — 恢复列 / 幂等键；jobs 表由 SCHEMA IF NOT EXISTS 建出。
+    add_column_if_missing(conn, "tasks", "resume_cursor", "INTEGER")?;
+    add_column_if_missing(conn, "tasks", "safe_checkpoint", "TEXT")?;
+    add_column_if_missing(conn, "tasks", "interrupt_kind", "TEXT")?;
+    add_column_if_missing(conn, "tool_calls", "idempotency_key", "TEXT")?;
+    // 索引必须在补列之后：老库 CREATE TABLE IF NOT EXISTS 不会加列，
+    // 若索引写在 SCHEMA 里会先于 add_column 失败。
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_tool_calls_idem ON tool_calls(idempotency_key);",
+    )?;
+    // jobs 种子在 open 后由 `memory::job::seed_builtin_jobs` 调用（避免 schema↔job 循环依赖）。
 
     set_user_version_if_behind(conn)?;
     Ok(())
