@@ -361,9 +361,12 @@ fn clip(text: &str, n: usize) -> String {
 /// `&Connection` signature unchanged.
 fn lock_conn(store: &MemoryStore) -> rusqlite::Result<std::sync::MutexGuard<'_, Connection>> {
     store.0.lock().map_err(|_| {
+        // plan-retry §5.6：中毒不做 unsafe 恢复，但出口必须可辨识——
+        // 前缀 internal_poisoned 让前端/日志能把它与普通 sqlite 错误区分开
+        //（对应 FailureKind::Internal 的「内部出错，重启一下试试」）。
         rusqlite::Error::SqliteFailure(
             rusqlite::ffi::Error::new(1),
-            Some("memory store mutex poisoned".into()),
+            Some("internal_poisoned: memory store mutex poisoned — 内部状态已损坏，请重启应用".into()),
         )
     })
 }

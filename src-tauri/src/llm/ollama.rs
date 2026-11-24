@@ -169,7 +169,11 @@ impl OllamaClient {
 
 impl ChatClient for OllamaClient {
     fn chat(&self, messages: &[Msg], temperature: f64, timeout: u64) -> Result<String, LlmError> {
-        OllamaClient::chat(self, messages, temperature, timeout)
+        let r = OllamaClient::chat(self, messages, temperature, timeout);
+        // plan-retry §5.6：本地传输的每次请求都喂给看门狗（成功也报，
+        // 用于清「连续 down」计数）。未 init（单测）时是 no-op。
+        super::watchdog::record_request(r.is_ok());
+        r
     }
 
     fn chat_stream(
@@ -179,7 +183,9 @@ impl ChatClient for OllamaClient {
         timeout: u64,
         on_delta: &mut dyn FnMut(&str),
     ) -> Result<String, LlmError> {
-        OllamaClient::chat_stream(self, messages, temperature, timeout, |d: &str| on_delta(d))
+        let r = OllamaClient::chat_stream(self, messages, temperature, timeout, |d: &str| on_delta(d));
+        super::watchdog::record_request(r.is_ok());
+        r
     }
 
     fn is_up(&self) -> bool {
