@@ -92,10 +92,22 @@ fn hours_since_last_run(conn: &rusqlite::Connection) -> Option<f64> {
 /// Spawn the polling thread. Never blocks startup; errors are logged, the
 /// loop keeps running (a bad night must not kill the companion).
 pub fn spawn(app: AppHandle) {
-    std::thread::spawn(move || loop {
-        std::thread::sleep(std::time::Duration::from_secs(POLL_SECONDS));
-        if let Err(e) = tick(&app) {
-            log::warn!("consolidate tick failed: {e}");
+    // T5 §5.6/A9：线程与逐 tick 双层 panic 守卫——panic 不杀进程，也
+    // 不允许同一循环无限刷日志（连续 5 次即停）。
+    crate::failure::spawn_guarded("scheduler", move || {
+        let mut guard = crate::failure::PanicGuard::new("scheduler");
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(POLL_SECONDS));
+            let res = guard.tick(|| tick(&app));
+            match res {
+                None if guard.stopped() => {
+                    log::error!("scheduler 循环连续 panic 达上限，本线程退出");
+                    break;
+                }
+                Some(Ok(())) => {}
+                Some(Err(e)) => log::warn!("consolidate tick failed: {e}"),
+                None => {}
+            }
         }
     });
 }
@@ -117,6 +129,18 @@ fn tick(app: &AppHandle) -> Result<(), String> {
     let Some(trigger) = decide_trigger(now_local.hour(), today, last, age) else {
         return Ok(());
     };
+
+    // T5 §5.5：退避门放在 decide_trigger **之后**——「该不该跑」（纯函数）
+    // 与「能不能跑」（作业失败退避）是两件事。被退避挡住的夜归档下个
+    // tick 再看，不消耗 trigger。
+    let job_guard = crate::failure::JobGuard { name: "consolidate" };
+    {
+        let conn = store.0.lock().map_err(|e| e.to_string())?;
+        if !job_guard.should_run(&conn, now_local) {
+            log::info!("consolidate: job backoff active, skipping this tick");
+            return Ok(());
+        }
+    }
 
     // Window: everything before today's local midnight. Unconsumed events
     // before the last window_end stay pending and get swept here too, because
@@ -146,8 +170,29 @@ fn tick(app: &AppHandle) -> Result<(), String> {
     // Store-backed entry: the extraction's LLM round runs with ZERO locks
     // (2026-11-20 lock-narrowing) — no guard is held here, so a catchup
     // consolidation can never freeze chat turns racing for the store.
-    let report = consolidate::run_with_local_or_rules(&store, &opts)
-        .map_err(|e| format!("consolidate run failed: {e}"))?;
+    let report = match consolidate::run_with_local_or_rules(&store, &opts) {
+        Ok(r) => r,
+        Err(e) => {
+            // T5 §5.5/A8：失败要有名字——consolidate_runs 落一行 status='error'
+            // + 原因（v17 error 列），退避状态写 settings（60s 起步，5 次当天停）。
+            let detail = format!("consolidate run failed: {e}");
+            {
+                let conn = store.0.lock().map_err(|e2| e2.to_string())?;
+                let st = record_consolidate_failure(
+                    &conn, &job_guard, now_local, opts.trigger, &opts.window_start, &opts.window_end,
+                    &detail,
+                );
+                log::error!("consolidate 失败（fails={}，next_at={}）：{detail}", st.fails, st.next_at);
+            }
+            return Err(detail);
+        }
+    };
+
+    // 跑成了 → 清退避，明天从零算起。
+    {
+        let conn = store.0.lock().map_err(|e| e.to_string())?;
+        job_guard.record_ok(&conn);
+    }
 
     // L2 摘要重写（plan-context §6.5，默认关）：巩固跑完接着做，失败/关闭都
     // 不影响上面那份 report。走本地 client——即便当前对话在云端，摘要是
@@ -176,6 +221,31 @@ fn tick(app: &AppHandle) -> Result<(), String> {
         report.deleted
     );
     Ok(())
+}
+
+/// T5 §5.5/A8：巩固失败要有名字——`consolidate_runs` 落一行 `status='error'`
+/// + 原因（v17 `error` 列），退避状态写 settings。独立成函数以便单测。
+fn record_consolidate_failure(
+    conn: &rusqlite::Connection,
+    guard: &crate::failure::JobGuard,
+    now: chrono::DateTime<chrono::Local>,
+    trigger: &str,
+    window_start: &str,
+    window_end: &str,
+    detail: &str,
+) -> crate::failure::JobState {
+    let st = guard.record_fail(conn, now);
+    let ts = super::clock::now_iso();
+    conn.execute(
+        "INSERT INTO consolidate_runs
+             (started_at, finished_at, trigger, window_start, window_end,
+              extracted, merged, contradicted, promoted, deleted, consumed,
+              status, error)
+         VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, 0, 0, 0, 0, 'error', ?6)",
+        rusqlite::params![ts, ts, trigger, window_start, window_end, detail],
+    )
+    .ok();
+    st
 }
 
 #[cfg(test)]
@@ -216,3 +286,56 @@ mod tests {
         assert_eq!(decide_trigger(1, d("2026-11-18"), Some(d("2026-11-17")), Some(37.0)), Some(Trigger::Catchup));
     }
 }
+
+    #[test]
+    fn a8_consolidate_failure_leaves_a_row_and_a_backoff() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::memory::db::SCHEMA).unwrap();
+        let guard = crate::failure::JobGuard { name: "consolidate" };
+        let now = chrono::Local::now();
+
+        let st = record_consolidate_failure(
+            &conn, &guard, now, "nightly", "1970-01-01T00:00:00Z", "2026-11-24T00:00:00Z",
+            "consolidate run failed: model down",
+        );
+        assert_eq!(st.fails, 1);
+
+        // 审计行：status='error' + 原因进 error 列。
+        let (status, err): (String, String) = conn
+            .query_row(
+                "SELECT status, error FROM consolidate_runs WHERE status='error' ORDER BY id DESC LIMIT 1",
+                [], |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "error");
+        assert!(err.contains("model down"), "{err}");
+
+        // 退避生效：30s 后 tick 不再跑（base 60s），到 next_at 放行。
+        assert!(!guard.should_run(&conn, now + chrono::Duration::seconds(30)));
+        let next = chrono::DateTime::parse_from_rfc3339(&st.next_at)
+            .unwrap()
+            .with_timezone(&chrono::Local);
+        assert!(guard.should_run(&conn, next));
+    }
+
+    #[test]
+    fn a8_five_failures_stop_the_day() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::memory::db::SCHEMA).unwrap();
+        let guard = crate::failure::JobGuard { name: "consolidate" };
+        let now = chrono::Local::now();
+        for _ in 0..5 {
+            record_consolidate_failure(
+                &conn, &guard, now, "nightly", "1970", "2026", "boom",
+            );
+        }
+        // fails=5 → next_at 推到明天 03:00：当天 tick 不再跑。
+        assert!(
+            !guard.should_run(&conn, now + chrono::Duration::hours(4)),
+            "当天剩余时间都要被挡"
+        );
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM consolidate_runs WHERE status='error'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 5, "每次失败各留一行");
+    }

@@ -187,25 +187,34 @@ pub fn tick(
 /// catches up via the pending announcement queue on the next open.
 pub fn spawn(app: tauri::AppHandle) {
     use tauri::Manager;
-    std::thread::spawn(move || loop {
-        std::thread::sleep(std::time::Duration::from_secs(60));
-        let Some(store) = app.try_state::<crate::memory::MemoryStore>() else {
-            continue;
-        };
-        let Ok(conn) = store.inner().0.lock() else {
-            continue;
-        };
-        let now = chrono::Local::now();
-        match tick(&conn, now) {
-            Ok(out) => {
-                if out.unlocked.is_some() || out.dormant_changed.is_some() {
-                    let payload = status_payload(&conn);
-                    drop(conn);
-                    use tauri::Emitter;
-                    let _ = app.emit("growth:stage", payload);
+    // T5 §5.6/A9：逐 tick panic 守卫——panic 不杀线程（下个 tick 照跑），
+    // 连续 5 次才退出；外层 spawn_guarded 兜底记录线程级 panic。
+    crate::failure::spawn_guarded("growth", move || {
+        let mut pg = crate::failure::PanicGuard::new("growth");
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(60));
+            let Some(store) = app.try_state::<crate::memory::MemoryStore>() else {
+                continue;
+            };
+            let Ok(conn) = store.inner().0.lock() else {
+                continue;
+            };
+            let now = chrono::Local::now();
+            let _ = pg.tick(|| match tick(&conn, now) {
+                Ok(out) => {
+                    if out.unlocked.is_some() || out.dormant_changed.is_some() {
+                        let payload = status_payload(&conn);
+                        drop(conn);
+                        use tauri::Emitter;
+                        let _ = app.emit("growth:stage", payload);
+                    }
                 }
+                Err(_) => {}
+            });
+            if pg.stopped() {
+                log::error!("growth 循环连续 panic 达上限，本线程退出");
+                break;
             }
-            Err(_) => continue,
         }
     });
 }

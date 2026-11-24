@@ -17,6 +17,11 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use super::clock;
 
+/// SCHEMA_VERSION = 17（2026-11-24）：失败观测列（docs/zh/plan-retry.md §6）——
+/// turn_trace 加 `error_kind`（这一轮为什么失败，可 GROUP BY 出失败分布）
+/// 与 `attempts`（重试了几次，含成功前的失败次数）；consolidate_runs 加
+/// `error`（夜间作业失败原因，status='error' 从此有话可说）。
+/// settings 新 key `job_backoff:*` 存退避状态，不建表。
 /// SCHEMA_VERSION = 16（2026-11-23）：检索索引（S2，见 `memory/index.rs`）——
 /// `search_docs`（自建 2-gram 的检索文档）+ `search_fts`（FTS5 unicode61，
 /// 外部内容指向 search_docs）+ `search_sync`（增量水位线）+ 源表删除级联
@@ -50,7 +55,7 @@ use super::clock;
 /// EXISTS 不会给已有表加列；v9→v9 不触发 migrate，INSERT 带 user_text 直接
 /// 报 "table turn_trace has no column named user_text"。教训：改 SCHEMA 必
 /// 须同时 bump 此版本号。
-pub(crate) const SCHEMA_VERSION: i64 = 16;
+pub(crate) const SCHEMA_VERSION: i64 = 17;
 
 /// 不进会话列表的保留 session id：主动搭话（bubble 照旧实时显示，但不占
 /// 用户能切换的对话窗口）。sessions 里**永不建行**（plan-context D6）。
@@ -150,7 +155,8 @@ CREATE TABLE IF NOT EXISTS consolidate_runs (
     promoted      INTEGER NOT NULL DEFAULT 0,
     deleted       INTEGER NOT NULL DEFAULT 0,
     consumed      INTEGER NOT NULL DEFAULT 0,
-    status        TEXT NOT NULL DEFAULT 'running'  -- 'running' | 'done' | 'failed'
+    status        TEXT NOT NULL DEFAULT 'running',  -- 'running' | 'done' | 'failed' | 'error'
+    error         TEXT            -- v17：失败原因（plan-retry §6；成功行 NULL）
 );
 
 -- Predict-verify loop audit (plan-predict.md §3.4). One row per LOCAL day
@@ -374,6 +380,8 @@ CREATE TABLE IF NOT EXISTS turn_trace (
     prompt_tokens_est    INTEGER,      -- v15：本轮最后一次请求的估算输入 tokens
     prompt_tokens_actual INTEGER,      -- v15：provider usage.prompt_tokens（没有就 NULL）
     dropped_turns        INTEGER,      -- v15：L0 丢掉的历史轮数（0/未记为 NULL）
+    error_kind           TEXT,         -- v17：本轮失败类别（plan-retry §6；正常轮 NULL）
+    attempts             INTEGER,      -- v17：重试次数（含成功前的失败；正常轮 NULL）
     ts                 TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_turn_trace_user ON turn_trace(user_event_id);
@@ -547,6 +555,11 @@ pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     add_column_if_missing(conn, "turn_trace", "prompt_tokens_est", "INTEGER")?;
     add_column_if_missing(conn, "turn_trace", "prompt_tokens_actual", "INTEGER")?;
     add_column_if_missing(conn, "turn_trace", "dropped_turns", "INTEGER")?;
+    // v17: 失败观测列（docs/zh/plan-retry.md §6）。改 SCHEMA 必须同时 bump
+    // user_version——这条由 SCHEMA_VERSION=17 与 set_user_version_if_behind 共同保证。
+    add_column_if_missing(conn, "turn_trace", "error_kind", "TEXT")?;
+    add_column_if_missing(conn, "turn_trace", "attempts", "INTEGER")?;
+    add_column_if_missing(conn, "consolidate_runs", "error", "TEXT")?;
     backfill_default_session(conn)?;
 
     set_user_version_if_behind(conn)?;
@@ -2351,6 +2364,10 @@ pub struct TraceTurnDraft {
     pub duration_ms: Option<i64>,
     pub user_text: Option<String>,
     pub reply_text: Option<String>,
+    /// v17：本轮失败类别（正常轮 None）。来源：error llm_round 步的 output。
+    pub error_kind: Option<String>,
+    /// v17：重试次数（正常轮 None）。
+    pub attempts: Option<i64>,
     pub steps: Vec<TraceStepDraft>,
 }
 
@@ -2404,8 +2421,9 @@ pub fn trace_turn_persist(
     tx.execute(
         "INSERT INTO turn_trace
            (session_id, user_event_id, assistant_event_id, kind, model_used,
-            tool_label, filter_report, duration_ms, user_text, reply_text, ts)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            tool_label, filter_report, duration_ms, user_text, reply_text,
+            error_kind, attempts, ts)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             turn.session_id,
             user_event_id,
@@ -2417,6 +2435,8 @@ pub fn trace_turn_persist(
             turn.duration_ms,
             turn.user_text,
             turn.reply_text,
+            turn.error_kind,
+            turn.attempts,
             clock::now_iso(),
         ],
     )?;
@@ -3736,6 +3756,8 @@ mod tests {
             session_id: "s1".into(),
             kind: "model".into(),
             model_used: true,
+            error_kind: None,
+            attempts: None,
             tool_label: Some("builtin:memory_search".into()),
             filter_report: Some(r#"{"explicit":false,"hedged":false}"#.into()),
             duration_ms: Some(1234),

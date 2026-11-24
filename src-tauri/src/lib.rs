@@ -169,7 +169,8 @@ pub fn run() {
             // block boot; failures are logged, never fatal.
             {
                 let handle = app.handle().clone();
-                std::thread::spawn(move || {
+                // T5 §5.6：一次性后台线程也走守卫——panic 记日志，不炸进程。
+                crate::failure::spawn_guarded("mcp_reconnect", move || {
                     let store = handle.state::<MemoryStore>();
                     let agent = handle.state::<mcp_admin::AgentState>();
                     let n = mcp_admin::reconnect_enabled_servers(&agent, &store);

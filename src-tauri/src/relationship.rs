@@ -414,8 +414,10 @@ pub fn maybe_first_refusal(
 /// boot so a long absence is recomputed honestly.
 pub fn spawn(app: tauri::AppHandle) {
     use tauri::Manager;
-    std::thread::spawn(move || {
+    // T5 §5.6/A9：逐 tick panic 守卫（同 growth 循环）。
+    crate::failure::spawn_guarded("relationship", move || {
         let mut booted = false;
+        let mut pg = crate::failure::PanicGuard::new("relationship");
         loop {
             std::thread::sleep(std::time::Duration::from_secs(60));
             let Some(store) = app.try_state::<crate::memory::MemoryStore>() else {
@@ -429,7 +431,7 @@ pub fn spawn(app: tauri::AppHandle) {
                 booted = true;
                 let _ = backfill(&conn, now, EVIDENCE_WINDOW_DAYS);
             }
-            match tick(&conn, now) {
+            let _ = pg.tick(|| match tick(&conn, now) {
                 Ok(out) => {
                     if out.unlocked.is_some() || out.cold_changed.is_some() {
                         let payload = status_payload(&conn);
@@ -438,7 +440,11 @@ pub fn spawn(app: tauri::AppHandle) {
                         let _ = app.emit("relationship:stage", payload);
                     }
                 }
-                Err(_) => continue,
+                Err(_) => {}
+            });
+            if pg.stopped() {
+                log::error!("relationship 循环连续 panic 达上限，本线程退出");
+                break;
             }
         }
     });

@@ -95,16 +95,32 @@ pub(crate) struct TraceRecorder {
     /// the system prompt), so without this field every trace step hides what
     /// the user actually asked (2026-11-21 /trace 盲点).
     user_text: Option<String>,
+    /// T5 v17：本轮失败类别与重试次数（来自 error llm_round 步，落 turn_trace
+    /// 两列——诊断页「最近一周失败分布」的数据源，plan-retry §6）。
+    error_kind: Option<String>,
+    attempts: Option<i64>,
 }
 
 impl TraceRecorder {
     fn new() -> Self {
-        Self { started: std::time::Instant::now(), steps: Vec::new(), user_text: None }
+        Self {
+            started: std::time::Instant::now(),
+            steps: Vec::new(),
+            user_text: None,
+            error_kind: None,
+            attempts: None,
+        }
     }
 
     /// Recorder that stamps the current user message onto every step.
     fn with_user(user: &str) -> Self {
-        Self { started: std::time::Instant::now(), steps: Vec::new(), user_text: Some(user.into()) }
+        Self {
+            started: std::time::Instant::now(),
+            steps: Vec::new(),
+            user_text: Some(user.into()),
+            error_kind: None,
+            attempts: None,
+        }
     }
 
     /// One model round: title, full prompt, raw output, outcome label.
@@ -116,6 +132,18 @@ impl TraceRecorder {
         outcome: &str,
         dur: std::time::Duration,
     ) {
+        if outcome == "error" {
+            // v17：error 轮的 output 形如 "kind=… attempts=… detail…"——
+            // 解析出来落 turn_trace 两列（解析失败只丢观测，不丢正文）。
+            for part in output.split_whitespace() {
+                if let Some(k) = part.strip_prefix("kind=") {
+                    self.error_kind = Some(k.to_string());
+                }
+                if let Some(a) = part.strip_prefix("attempts=").and_then(|v| v.parse().ok()) {
+                    self.attempts = Some(a);
+                }
+            }
+        }
         self.steps.push(db::TraceStepDraft {
             step_kind: "llm_round".into(),
             title: title.into(),
@@ -240,6 +268,8 @@ impl TraceRecorder {
                 duration_ms: Some(self.started.elapsed().as_millis() as i64),
                 user_text: user.map(Into::into),
                 reply_text: reply.map(Into::into),
+                error_kind: self.error_kind.clone(),
+                attempts: self.attempts,
                 steps: self.steps.clone(),
             },
             user_event_id,

@@ -164,7 +164,8 @@ enum Outcome {
 /// orphaned by a force-killed dev run keeps the port busy for a moment after
 /// it is killed, and `tauri dev` restarts the app faster than that.
 pub fn start(app: tauri::AppHandle) {
-    std::thread::spawn(move || {
+    // T5 §5.6：启动重试线程也走守卫——panic 记日志，不炸进程。
+    crate::failure::spawn_guarded("llm_sidecar_start", move || {
         // Base URL stays fixed at the app-owned port (a user-wide OLLAMA_HOST
         // must not redirect the probe), but the model name follows the UI
         // override so `llm:ready` reports what actually answers (spec-m1).

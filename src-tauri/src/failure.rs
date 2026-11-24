@@ -549,3 +549,204 @@ mod tests {
         assert!(!is_corrupt_db(&rusqlite::Error::QueryReturnedNoRows));
     }
 }
+
+// --------------------------------------------------------------- job guard（T5 §5.5）
+
+/// 作业守门（plan-retry §5.5）：退避状态存 `settings` KV（不建新表）。
+/// 「该不该跑」是 `decide_trigger` 的纯函数职责；「能不能跑」在这里——
+/// 两件事分开，谁也不污染谁的签名。
+pub struct JobGuard {
+    pub name: &'static str,
+}
+
+impl JobGuard {
+    fn key(&self) -> String {
+        format!("job_backoff:{}", self.name)
+    }
+
+    fn read(&self, conn: &rusqlite::Connection) -> Option<JobState> {
+        crate::memory::db::get_setting(conn, &self.key())
+            .ok()
+            .flatten()
+            .and_then(|raw| JobState::parse(&raw))
+    }
+
+    /// 现在能不能跑。没有退避记录 / 脏数据 → 能跑（宁可多跑一次）。
+    pub fn should_run(&self, conn: &rusqlite::Connection, now: chrono::DateTime<chrono::Local>) -> bool {
+        self.read(conn).map(|s| s.allows(now)).unwrap_or(true)
+    }
+
+    /// 累计失败次数（作业层写审计 / 诊断用）。
+    pub fn fails(&self, conn: &rusqlite::Connection) -> u32 {
+        self.read(conn).map(|s| s.fails).unwrap_or(0)
+    }
+
+    /// 成功 → 清 key，明天从零算起。
+    pub fn record_ok(&self, conn: &rusqlite::Connection) {
+        let _ = crate::memory::db::remove_setting(conn, &self.key());
+    }
+
+    /// 失败 → 按 `Backoff{60s, 30min}` 写退避状态，返回新状态
+    /// （`next_at` 给审计行；第 5 次起直接推到明天 03:00）。
+    pub fn record_fail(
+        &self,
+        conn: &rusqlite::Connection,
+        now: chrono::DateTime<chrono::Local>,
+    ) -> JobState {
+        let state = JobState::after_fail(self.fails(conn), now);
+        let _ = crate::memory::db::set_setting(conn, &self.key(), &state.encode());
+        state
+    }
+}
+
+// --------------------------------------------------------------- panic guard（T5 §5.6）
+
+/// 后台循环的 panic 守卫：每 tick 包一层 `catch_unwind`，panic 记 `error`
+/// 日志并计连续次数；同一线程连续 5 次 panic 后 [`PanicGuard::stopped`]
+/// 为真，循环体据此自己退出——防 panic 风暴刷日志（A9）。
+pub struct PanicGuard {
+    name: &'static str,
+    consecutive: u32,
+}
+
+impl PanicGuard {
+    pub const CAP: u32 = 5;
+
+    pub fn new(name: &'static str) -> Self {
+        PanicGuard { name, consecutive: 0 }
+    }
+
+    pub fn stopped(&self) -> bool {
+        self.consecutive >= Self::CAP
+    }
+
+    pub fn consecutive(&self) -> u32 {
+        self.consecutive
+    }
+
+    /// 跑一轮。panic → `None`（日志已记）；cap 已到 → `None`（先查
+    /// [`Self::stopped`]）。正常 → `Some(返回值)`，连续计数清零。
+    pub fn tick<T>(&mut self, f: impl FnOnce() -> T) -> Option<T> {
+        if self.stopped() {
+            return None;
+        }
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+            Ok(v) => {
+                self.consecutive = 0;
+                Some(v)
+            }
+            Err(payload) => {
+                self.consecutive += 1;
+                log::error!(
+                    "后台循环 {} panic（连续 {}/{}）：{}",
+                    self.name,
+                    self.consecutive,
+                    Self::CAP,
+                    panic_summary(&payload)
+                );
+                None
+            }
+        }
+    }
+}
+
+/// 后台线程的外层兜底：整个闭包 panic 时记 error 日志（带 payload 摘要），
+/// 线程沉默退出而不是把整个进程炸掉。循环内的逐 tick 守卫由 [`PanicGuard`] 负责。
+pub fn spawn_guarded(name: &'static str, f: impl FnOnce() + Send + 'static) {
+    let _ = std::thread::Builder::new()
+        .name(format!("guarded:{name}"))
+        .spawn(move || {
+            if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+                log::error!("后台线程 {name} panic 退出：{}", panic_summary(&payload));
+            }
+        });
+}
+
+fn panic_summary(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "（非字符串 panic 载荷）".into()
+    }
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::*;
+
+    #[test]
+    fn panic_counts_and_a_success_resets_the_streak() {
+        let mut g = PanicGuard::new("test-loop");
+        assert!(g.tick(|| 1).is_some());
+        assert_eq!(g.consecutive(), 0, "成功清零");
+        assert!(g.tick(|| panic!("boom")).is_none());
+        assert_eq!(g.consecutive(), 1);
+        assert!(g.tick(|| panic!("boom")).is_none());
+        assert_eq!(g.consecutive(), 2, "连续计数只增不清");
+        assert!(g.tick(|| 2).is_some());
+        assert_eq!(g.consecutive(), 0, "恢复即清零");
+    }
+
+    #[test]
+    fn five_consecutive_panics_stop_the_loop() {
+        let mut g = PanicGuard::new("test-loop");
+        for _ in 0..PanicGuard::CAP {
+            assert!(g.tick(|| panic!("boom")).is_none());
+        }
+        assert!(g.stopped(), "连续 5 次 panic 后必须停");
+        assert!(g.tick(|| 1).is_none(), "停了就不许再跑");
+        // 恢复不了的循环就该退出——这是调用点的契约。
+    }
+
+    #[test]
+    fn job_guard_backoff_and_recovery() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::memory::db::SCHEMA).unwrap();
+        let g = JobGuard { name: "consolidate" };
+        let now = chrono::Local::now();
+
+        // 没记录 → 能跑。
+        assert!(g.should_run(&conn, now));
+
+        // 失败 1 次：60s 内不能跑，过了 next_at 能跑。
+        let st = g.record_fail(&conn, now);
+        assert_eq!(st.fails, 1);
+        assert!(!g.should_run(&conn, now), "刚失败，立刻再跑必须被挡");
+        assert!(
+            !g.should_run(&conn, now + chrono::Duration::seconds(30)),
+            "退避 base 60s：30s 后仍挡"
+        );
+        let next = chrono::DateTime::parse_from_rfc3339(&st.next_at).unwrap();
+        assert!(
+            g.should_run(&conn, next.with_timezone(&chrono::Local)),
+            "到 next_at 就放行"
+        );
+
+        // 成功 → 清零。
+        g.record_ok(&conn);
+        assert_eq!(g.fails(&conn), 0);
+        assert!(g.should_run(&conn, now));
+    }
+
+    #[test]
+    fn fifth_failure_pushes_to_tomorrow_three() {
+        use chrono::Timelike;
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::memory::db::SCHEMA).unwrap();
+        let g = JobGuard { name: "consolidate" };
+        let now = chrono::Local::now();
+        for _ in 0..5 {
+            g.record_fail(&conn, now);
+        }
+        let st = g.read(&conn).unwrap();
+        assert_eq!(st.fails, 5);
+        let next = chrono::DateTime::parse_from_rfc3339(&st.next_at)
+            .unwrap()
+            .with_timezone(&chrono::Local);
+        assert_eq!(next.hour(), 3, "第 5 次失败推到明天 03:00");
+        assert_eq!(next.date_naive(), now.date_naive() + chrono::Duration::days(1));
+        assert!(!g.should_run(&conn, now + chrono::Duration::hours(1)));
+    }
+}

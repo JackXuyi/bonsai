@@ -346,13 +346,18 @@ fn last_shut_up(conn: &Connection) -> rusqlite::Result<Option<chrono::NaiveDate>
 /// 48h feedback windows. Delivery emits `prediction:asked` for the frontend.
 pub fn spawn(app: tauri::AppHandle) {
     use tauri::Manager;
-    std::thread::spawn(move || loop {
+    // T5 §5.6/A9：逐 tick panic 守卫——整个迭代包进 catch_unwind，
+    // panic 不杀线程；连续 5 次退出（防 panic 风暴）。
+    crate::failure::spawn_guarded("predict", move || {
+        let mut pg = crate::failure::PanicGuard::new("predict");
+        loop {
         std::thread::sleep(std::time::Duration::from_secs(60));
+        let _ = pg.tick(|| {
         let Some(store) = app.try_state::<crate::memory::MemoryStore>() else {
-            continue;
+            return;
         };
         let Ok(conn) = store.inner().0.lock() else {
-            continue;
+            return;
         };
         let _ = db::resolve_stale_predictions(&conn);
 
@@ -385,7 +390,7 @@ pub fn spawn(app: tauri::AppHandle) {
 
         let digest = match build_digest(&conn) {
             Ok(d) => d,
-            Err(_) => continue,
+            Err(_) => return,
         };
         let now = chrono::Local::now();
         match schedule_iteration(&conn, &digest, now, busy) {
@@ -403,6 +408,12 @@ pub fn spawn(app: tauri::AppHandle) {
                 );
             }
             _ => {}
+        }
+        });
+        if pg.stopped() {
+            log::error!("predict 循环连续 panic 达上限，本线程退出");
+            break;
+        }
         }
     });
 }
