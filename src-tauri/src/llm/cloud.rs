@@ -41,7 +41,7 @@ impl CloudClient {
     /// the endpoint accepts our base URL, key and model name — the three
     /// things a user can typo.
     pub fn ping(&self, timeout: u64) -> Result<(), LlmError> {
-        let body = chat_body(&self.model, &[Msg::user("ping")], 0.0, false, 1);
+        let body = chat_body(&self.model, &[Msg::user("ping")], 0.0, false, 1, None);
         self.post(&body, timeout, false).map(|_| ())
     }
 
@@ -90,20 +90,26 @@ pub fn error_message(body: &str) -> String {
 }
 
 /// Request body for `/chat/completions`. Pure so the shape has tests.
+/// `response_format` 仅结构化输出传入（plan-structured-routing）；普通 chat / ping 传 `None`。
 pub fn chat_body(
     model: &str,
     messages: &[Msg],
     temperature: f64,
     stream: bool,
     max_tokens: u32,
+    response_format: Option<&serde_json::Value>,
 ) -> serde_json::Value {
-    serde_json::json!({
+    let mut body = serde_json::json!({
         "model": model,
         "messages": messages,
         "stream": stream,
         "temperature": temperature,
         "max_tokens": max_tokens,
-    })
+    });
+    if let Some(fmt) = response_format {
+        body["response_format"] = fmt.clone();
+    }
+    body
 }
 
 /// 工具轮请求体（plan-task-card v0.2 §1.1）。与 `chat_body` 分开：
@@ -199,7 +205,7 @@ struct CloudMessage {
 
 impl ChatClient for CloudClient {
     fn chat(&self, messages: &[Msg], temperature: f64, timeout: u64) -> Result<String, LlmError> {
-        let body = chat_body(&self.model, messages, temperature, false, CLOUD_MAX_TOKENS);
+        let body = chat_body(&self.model, messages, temperature, false, CLOUD_MAX_TOKENS, None);
         let resp = self.post(&body, timeout, false)?;
         let parsed: CloudResponse = resp.into_json().map_err(|e| LlmError::Decode(e.to_string()))?;
         Ok(parsed
@@ -218,7 +224,7 @@ impl ChatClient for CloudClient {
         timeout: u64,
         on_delta: &mut dyn FnMut(&str),
     ) -> Result<String, LlmError> {
-        let body = chat_body(&self.model, messages, temperature, true, CLOUD_MAX_TOKENS);
+        let body = chat_body(&self.model, messages, temperature, true, CLOUD_MAX_TOKENS, None);
         let resp = self.post(&body, timeout, true)?;
         let reader = std::io::BufReader::new(resp.into_reader());
         use std::io::BufRead;
@@ -262,6 +268,35 @@ impl ChatClient for CloudClient {
         let parsed: serde_json::Value =
             resp.into_json().map_err(|e| LlmError::Decode(e.to_string()))?;
         parse_tool_response(&parsed)
+    }
+
+    /// 结构化输出：`response_format: json_object`（DeepSeek 等）。schema
+    /// 语义仍由提示词 + Rust 校验；条目不支持 → Status → 调用点兜底。
+    fn chat_structured(
+        &self,
+        messages: &[Msg],
+        _schema: &serde_json::Value,
+        temperature: f64,
+        timeout: u64,
+    ) -> Result<String, LlmError> {
+        let fmt = serde_json::json!({ "type": "json_object" });
+        let body = chat_body(
+            &self.model,
+            messages,
+            temperature,
+            false,
+            CLOUD_MAX_TOKENS,
+            Some(&fmt),
+        );
+        let resp = self.post(&body, timeout, false)?;
+        let parsed: CloudResponse = resp.into_json().map_err(|e| LlmError::Decode(e.to_string()))?;
+        Ok(parsed
+            .choices
+            .into_iter()
+            .next()
+            .and_then(|c| c.message)
+            .and_then(|m| m.content)
+            .unwrap_or_default())
     }
 }
 
@@ -369,17 +404,30 @@ mod tests {
     #[test]
     fn cloud_body_carries_model_messages_and_flags() {
         let msgs = vec![Msg::system("s"), Msg::user("u")];
-        let body = chat_body("deepseek-chat", &msgs, 0.6, true, CLOUD_MAX_TOKENS);
+        let body = chat_body("deepseek-chat", &msgs, 0.6, true, CLOUD_MAX_TOKENS, None);
         assert_eq!(body["model"], serde_json::json!("deepseek-chat"));
         assert_eq!(body["stream"], serde_json::json!(true));
         assert_eq!(body["temperature"], serde_json::json!(0.6));
         assert_eq!(body["max_tokens"], serde_json::json!(4096));
         assert_eq!(body["messages"][0]["role"], serde_json::json!("system"));
         assert_eq!(body["messages"][1]["content"], serde_json::json!("u"));
+        assert!(body.get("response_format").is_none());
         // One-token probe reuses the same shape with a smaller cap.
-        let probe = chat_body("m", &msgs, 0.0, false, 1);
+        let probe = chat_body("m", &msgs, 0.0, false, 1, None);
         assert_eq!(probe["max_tokens"], serde_json::json!(1));
         assert_eq!(probe["stream"], serde_json::json!(false));
+        let structured = chat_body(
+            "m",
+            &msgs,
+            0.2,
+            false,
+            CLOUD_MAX_TOKENS,
+            Some(&serde_json::json!({ "type": "json_object" })),
+        );
+        assert_eq!(
+            structured["response_format"],
+            serde_json::json!({ "type": "json_object" })
+        );
     }
 
     #[test]

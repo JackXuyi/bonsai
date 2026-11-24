@@ -291,8 +291,8 @@ pub fn daily_report(
     };
 
     let conn = store.inner().write_guard().map_err(|e| e.to_string())?;
-    // spec-m2: 日报跟随当前 provider（本地 sidecar 或已启用的云端条目）。
-    let client = crate::llm::current_client();
+    // plan-structured-routing：日报走后台腿（Auto 钉本地；Manual 跟主配置）。
+    let client = crate::llm::client_for(crate::llm::TaskLeg::Background);
     let tomorrow = tomorrow_agenda(&conn, calendar.inner().source(), day);
     let markdown = build_with_calendar(&conn, Some(client.as_ref()), day, tomorrow.as_ref());
 

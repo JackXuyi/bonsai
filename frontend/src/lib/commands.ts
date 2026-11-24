@@ -201,6 +201,9 @@ export const llmConfigGet = () => call<LlmConfigView>("llm_config_get");
 /** 切换模型含 1-token 探测（冷加载可达数十秒），超时放宽到 90s。 */
 export const llmConfigSetActive = (id: string) =>
   invokeWithTimeout<LlmConfigView>("llm_config_set_active", { id }, 90000);
+/** 后台任务只用本地模型（Auto / Manual，plan-structured-routing）。 */
+export const llmRoutingSet = (backgroundLocalOnly: boolean) =>
+  call<LlmConfigView>("llm_routing_set", { backgroundLocalOnly });
 export const llmModelListInstalled = () =>
   invokeWithTimeout<OllamaModelRow[]>("llm_model_list_installed", undefined, 8000);
 export const llmCatalog = () => call<CatalogRow[]>("llm_catalog");

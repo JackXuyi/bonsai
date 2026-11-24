@@ -317,6 +317,7 @@ pub fn run() {
             report::daily_report,
             summary::weekly_report,
             llm_admin::llm_config_get,
+            llm_admin::llm_routing_set,
             llm_admin::llm_config_set_active,
             llm_models::llm_model_list_installed,
             llm_models::llm_catalog,

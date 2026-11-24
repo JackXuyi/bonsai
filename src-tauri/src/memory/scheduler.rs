@@ -200,7 +200,8 @@ fn tick(app: &AppHandle) -> Result<(), String> {
     // L2 摘要重写（plan-context §6.5，默认关）：巩固跑完接着做，失败/关闭都
     // 不影响上面那份 report。走本地 client——即便当前对话在云端，摘要是
     // 离线整理的活，不该为此把用户原文发出去。
-    let digest = consolidate::digest_pass(&store, &crate::llm::OllamaClient::from_env());
+    let digest_client = crate::llm::client_for(crate::llm::TaskLeg::Background);
+    let digest = consolidate::digest_pass(&store, digest_client.as_ref());
     if digest.enabled {
         log::info!(
             "digest pass: rewritten {} skipped {}",

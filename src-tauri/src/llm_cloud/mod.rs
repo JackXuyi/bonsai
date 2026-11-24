@@ -214,6 +214,7 @@ pub fn remove_entry(conn: &Connection, id: &str) -> Result<(), String> {
             provider: crate::llm_admin::Provider::Ollama,
             active_id: format!("ollama:{}", cfg.local_model),
             local_model: cfg.local_model,
+            routing: cfg.routing,
         };
         crate::llm_admin::persist(conn, &next).map_err(|e| e.to_string())?;
         crate::llm_admin::apply(next);
@@ -413,6 +414,7 @@ mod tests {
             provider: Provider::Cloud,
             local_model: "qwen3.5:2b".into(),
             active_id: format!("cloud:{}", view.id),
+            routing: crate::llm_admin::RouteMode::FollowConfig,
         };
         llm_admin::persist(&conn, &cfg).unwrap();
         llm_admin::apply(cfg);
@@ -437,6 +439,7 @@ mod tests {
             provider: Provider::Ollama,
             local_model: "gemma3:4b".into(),
             active_id: "ollama:gemma3:4b".into(),
+            routing: crate::llm_admin::RouteMode::FollowConfig,
         };
         llm_admin::persist(&conn, &cfg).unwrap();
         llm_admin::apply(cfg.clone());

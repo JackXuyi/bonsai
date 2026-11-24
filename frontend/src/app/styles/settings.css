@@ -681,6 +681,16 @@ dialog.skill-dialog:not([open]) {
   font-size: 12px;
 }
 
+/* 模型区 · 后台钉本地（plan-structured-routing T5） */
+.routing-row {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(60, 50, 30, 0.08);
+}
+.routing-hint {
+  margin: 6px 0 0;
+}
+
 /* 后台循环卡（plan-loop-supervisor D4） */
 .loops-hint {
   margin: 0 0 8px;

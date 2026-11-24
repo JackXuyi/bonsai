@@ -34,6 +34,10 @@ struct ChatRequest<'a> {
     /// want direct output — dialogue for latency, extraction for clean JSON.
     think: bool,
     options: Options,
+    /// 结构化输出（Ollama ≥0.5 / plan-structured-routing）：`Some(schema)`
+    /// 时 grammar 约束。普通 chat 保持 `None`，请求体与现状字节等价。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    format: Option<&'a serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -93,7 +97,25 @@ impl OllamaClient {
     /// One chat completion. `messages` must already carry the system prompt
     /// (persona card for dialogue, extraction instructions for memory).
     pub fn chat(&self, messages: &[Msg], temperature: f64, timeout: u64) -> Result<String, LlmError> {
-        let req = self.request(messages, temperature, false);
+        self.post_chat(self.request(messages, temperature, false, None), timeout)
+    }
+
+    /// 结构化输出：`format` = JSON Schema 对象（grammar）。失败（含 sidecar
+    /// 过旧不认 format）原样上抛，调用点走 RuleExtractor——不做版本探测。
+    pub fn chat_structured(
+        &self,
+        messages: &[Msg],
+        schema: &serde_json::Value,
+        temperature: f64,
+        timeout: u64,
+    ) -> Result<String, LlmError> {
+        self.post_chat(
+            self.request(messages, temperature, false, Some(schema)),
+            timeout,
+        )
+    }
+
+    fn post_chat(&self, req: ChatRequest<'_>, timeout: u64) -> Result<String, LlmError> {
         let resp = ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(timeout))
             .build()
@@ -114,13 +136,23 @@ impl OllamaClient {
         Ok(body.message.content)
     }
 
-    fn request<'a>(&'a self, messages: &'a [Msg], temperature: f64, stream: bool) -> ChatRequest<'a> {
+    fn request<'a>(
+        &'a self,
+        messages: &'a [Msg],
+        temperature: f64,
+        stream: bool,
+        format: Option<&'a serde_json::Value>,
+    ) -> ChatRequest<'a> {
         ChatRequest {
             model: &self.model,
             messages,
             stream,
             think: false,
-            options: Options { temperature, num_ctx: NUM_CTX },
+            options: Options {
+                temperature,
+                num_ctx: NUM_CTX,
+            },
+            format,
         }
     }
 
@@ -134,7 +166,7 @@ impl OllamaClient {
         timeout: u64,
         mut on_delta: impl FnMut(&str),
     ) -> Result<String, LlmError> {
-        let req = self.request(messages, temperature, true);
+        let req = self.request(messages, temperature, true, None);
         let resp = ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(timeout))
             .build()
@@ -195,6 +227,18 @@ impl ChatClient for OllamaClient {
     fn label(&self) -> String {
         format!("ollama:{}", self.model)
     }
+
+    fn chat_structured(
+        &self,
+        messages: &[Msg],
+        schema: &serde_json::Value,
+        temperature: f64,
+        timeout: u64,
+    ) -> Result<String, LlmError> {
+        let r = OllamaClient::chat_structured(self, messages, schema, temperature, timeout);
+        super::watchdog::record_request(r.is_ok());
+        r
+    }
 }
 
 /// Parse one NDJSON line of the streaming chat API into the content delta.
@@ -242,10 +286,15 @@ mod tests {
             messages: &msgs,
             stream: false,
             think: false,
-            options: Options { temperature: 0.7, num_ctx: 0 },
+            options: Options {
+                temperature: 0.7,
+                num_ctx: 0,
+            },
+            format: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["think"], serde_json::json!(false));
+        assert!(json.get("format").is_none(), "无 schema 时不得出现 format 键");
     }
 
     #[test]
@@ -253,9 +302,20 @@ mod tests {
         // D5：不再留 0（= Ollama 默认 2k/4k，超窗丢开头=丢人格宪法）。
         let client = OllamaClient::from_env();
         let msgs = vec![Msg::user("hi")];
-        let json = serde_json::to_value(client.request(&msgs, 0.7, false)).unwrap();
+        let json = serde_json::to_value(client.request(&msgs, 0.7, false, None)).unwrap();
         assert_eq!(json["options"]["num_ctx"], serde_json::json!(NUM_CTX));
         assert!(NUM_CTX >= 8192, "低于 8192 装不下宪法 + 最近几轮");
+        assert!(json.get("format").is_none());
+    }
+
+    #[test]
+    fn structured_request_embeds_format_schema() {
+        let client = OllamaClient::from_env();
+        let msgs = vec![Msg::user("hi")];
+        let schema = serde_json::json!({"type": "array"});
+        let json =
+            serde_json::to_value(client.request(&msgs, 0.2, false, Some(&schema))).unwrap();
+        assert_eq!(json["format"], schema);
     }
 
     #[test]

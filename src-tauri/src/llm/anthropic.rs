@@ -125,6 +125,10 @@ struct Block {
 }
 
 impl ChatClient for AnthropicClient {
+    // chat_structured：刻意不覆写。`/v1/messages` 无原生 schema /
+    // response_format；用 tool-use 硬抠 JSON 属于协议 hack，违反
+    // plan-structured-routing §2.2。Claude 条目下抽取走 RuleExtractor。
+
     fn chat(&self, messages: &[Msg], temperature: f64, timeout: u64) -> Result<String, LlmError> {
         let body = anthropic_body(&self.model, messages, temperature, false, CLOUD_MAX_TOKENS);
         let resp = self.post(&body, timeout, false)?;

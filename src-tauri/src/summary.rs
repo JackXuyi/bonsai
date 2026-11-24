@@ -642,7 +642,7 @@ pub fn weekly_report(
     let text = if digest.is_empty() {
         empty_text(SummaryKind::Weekly)
     } else {
-        let client = crate::llm::current_client();
+        let client = crate::llm::client_for(crate::llm::TaskLeg::Background);
         client
             .chat(
                 &[crate::llm::Msg::system(system), crate::llm::Msg::user(user)],

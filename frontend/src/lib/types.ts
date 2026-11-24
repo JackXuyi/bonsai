@@ -299,6 +299,8 @@ export interface LlmConfigView {
   provider: LlmProvider;
   localModel: string;
   activeId: string;
+  /** true = Auto：后台任务只用本地模型（plan-structured-routing） */
+  backgroundLocalOnly?: boolean;
   sidecarUp: boolean;
   maskedKey?: string;
 }

@@ -12,6 +12,7 @@ import {
   llmCloudTest,
   llmConfigGet,
   llmConfigSetActive,
+  llmRoutingSet,
   llmModelCancel,
   llmModelDownload,
   llmModelListInstalled,
@@ -72,6 +73,8 @@ interface LlmState {
   provider: LlmProvider;
   activeId: string;
   localModel: string;
+  /** Auto：后台钉本地（plan-structured-routing） */
+  backgroundLocalOnly: boolean;
   sidecarUp: boolean;
   installed: OllamaModelRow[];
   catalog: CatalogRow[];
@@ -88,6 +91,7 @@ interface LlmState {
   refreshInstalled: () => Promise<void>;
   setModelTab: (tab: ModelTab) => void;
   loadCloud: () => Promise<void>;
+  setBackgroundLocalOnly: (on: boolean) => Promise<void>;
   /** 本地 / 云端共用的切换链路（`ollama:<tag>` / `cloud:<id>`）。 */
   activateId: (id: string) => Promise<boolean>;
   activate: (tag: string) => Promise<boolean>;
@@ -107,6 +111,7 @@ export const useLlmStore = create<LlmState>((set, get) => ({
   provider: "ollama",
   activeId: "ollama:qwen3.5:2b",
   localModel: "qwen3.5:2b",
+  backgroundLocalOnly: false,
   sidecarUp: false,
   installed: [],
   catalog: [],
@@ -125,6 +130,7 @@ export const useLlmStore = create<LlmState>((set, get) => ({
         provider: "ollama",
         activeId: "ollama:qwen3.5:2b",
         localModel: "qwen3.5:2b",
+        backgroundLocalOnly: false,
         sidecarUp: true,
         installed: PREVIEW_INSTALLED,
         catalog: PREVIEW_CATALOG,
@@ -144,6 +150,7 @@ export const useLlmStore = create<LlmState>((set, get) => ({
         provider: cfg.provider,
         activeId: cfg.activeId,
         localModel: cfg.localModel,
+        backgroundLocalOnly: !!cfg.backgroundLocalOnly,
         sidecarUp: cfg.sidecarUp && installed !== null,
         installed: installed ?? [],
         catalog,
@@ -166,6 +173,31 @@ export const useLlmStore = create<LlmState>((set, get) => ({
   },
 
   setModelTab: (tab) => set({ modelTab: tab }),
+
+  setBackgroundLocalOnly: async (on) => {
+    const prev = get().backgroundLocalOnly;
+    set({ backgroundLocalOnly: on });
+    if (!inTauri) {
+      toast(
+        on
+          ? "已开：后台任务只用本地（预览）"
+          : "已关：后台跟随主配置（预览）"
+      );
+      return;
+    }
+    try {
+      const view = await llmRoutingSet(on);
+      set({ backgroundLocalOnly: !!view.backgroundLocalOnly });
+      toast(
+        view.backgroundLocalOnly
+          ? "已开：夜间整理 / 总结 / 周报只在本机跑"
+          : "已关：后台任务跟随上方模型选择"
+      );
+    } catch (err) {
+      set({ backgroundLocalOnly: prev, lastError: humanizeLlmError(err) });
+      toast("开关没存上");
+    }
+  },
 
   loadCloud: async () => {
     if (!inTauri) return;

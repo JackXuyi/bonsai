@@ -306,18 +306,23 @@ pub struct LocalExtractor {
 
 impl LocalExtractor {
     pub fn new() -> Self {
-        LocalExtractor { client: crate::llm::current_client() }
+        // 后台腿：Auto 钉本地；Manual 跟随主配置（plan-structured-routing §3.6）。
+        LocalExtractor {
+            client: crate::llm::client_for(crate::llm::TaskLeg::Background),
+        }
     }
 
     /// The model call, isolated so `extract` can fall back on any error.
+    /// 传输层 `chat_structured` 约束 JSON；失败 → `None` → RuleExtractor。
     fn extract_via_llm(&self, digest: &SessionDigest) -> Option<Vec<CandidateFact>> {
         let reply = self
             .client
-            .chat(
+            .chat_structured(
                 &[
                     crate::llm::Msg::system(EXTRACTION_SYSTEM_PROMPT),
                     crate::llm::Msg::user(extraction_user_prompt(digest)),
                 ],
+                crate::llm::schema::extraction_facts(),
                 0.2, // extraction wants determinism, not creativity
                 EXTRACT_TIMEOUT_SECS,
             )
@@ -338,17 +343,16 @@ impl FactExtractor for LocalExtractor {
     }
 }
 
+/// 语义规则权威；JSON 形状权威在 `llm::schema::extraction_facts`
+/// （plan-structured-routing T3：删提示词里的格式祈祷句）。
 const EXTRACTION_SYSTEM_PROMPT: &str = r#"你是记忆抽取模块。输入是一天的用户发言（带编号）和当前已知事实。你的任务：从发言中提炼出值得长期记住的候选事实。
-
-只输出一个 JSON 数组，不要输出任何其他文字、解释或 markdown。每条候选的格式：
-{"idx": <发言编号>, "fact": "<一句话事实，第三人称>", "category": "like|habit|context|boundary", "confidence": <0.0-1.0>, "correction": <true|false>, "profile": {"key": "<画像字段>", "value": "<画像值>"} 或 null}
 
 规则：
 - fact 必须是可断言的单一事实，改写为第三人称（如用户说"我喜欢雨天"→"用户喜欢雨天"）。
 - category：like=显式喜好/厌恶；habit=行为规律；context=稳定背景；boundary=用户明确说"别/不要再做X"。
 - correction=true 表示该发言在更正一个已有事实（"说错了，其实是…"）。
 - profile（可省略）：当发言透露了用户的固定身份信息时填写，key 只允许 name（用户姓名/怎么称呼）、occupation（职业/角色）、tools（常用工具）、city（所在城市）、projects（正在做的事）、schedule（作息规律）；value 是第一人称原值的简短形式（如"我叫许一"→ value "许一"）。key 不在上面的清单里就一律填 null。拿不准就填 null。
-- 只抽有把握的。宁漏勿误：拿不准就不要输出。没有可抽取的内容时输出 []。"#;
+- 只抽有把握的。宁漏勿误：拿不准就不要输出。没有可抽取的内容时输出空数组。"#;
 
 /// Build the user-side prompt: numbered utterances + the active facts (so the
 /// model can mark corrections and avoid re-stating what is already known).
@@ -659,6 +663,14 @@ mod tests {
     }
 
     // ---- LocalExtractor pure-logic tests (no network) ----
+
+    #[test]
+    fn extraction_prompt_has_no_format_prayer() {
+        // plan-structured-routing T3：形状权威在 schema，提示词禁止再写格式行。
+        assert!(!EXTRACTION_SYSTEM_PROMPT.contains("只输出一个 JSON 数组"));
+        assert!(!EXTRACTION_SYSTEM_PROMPT.contains("每条候选的格式"));
+        assert!(!EXTRACTION_SYSTEM_PROMPT.contains(r#"{"idx""#));
+    }
 
     #[test]
     fn parses_plain_and_fenced_arrays() {

@@ -45,12 +45,39 @@ impl Provider {
     }
 }
 
+/// 后台任务路由（plan-structured-routing §3.5）。默认 FollowConfig = 现状。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteMode {
+    /// Manual：后台与对话同源（逐字节等价现状）。
+    FollowConfig,
+    /// Auto：后台恒走本地小模型（隐私默认不出机器）。
+    AutoLocal,
+}
+
+impl RouteMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RouteMode::FollowConfig => "follow",
+            RouteMode::AutoLocal => "auto_local",
+        }
+    }
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "follow" | "manual" => Some(RouteMode::FollowConfig),
+            "auto_local" | "auto" => Some(RouteMode::AutoLocal),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct LlmConfig {
     pub provider: Provider,
     pub local_model: String,
     /// 本地形如 `ollama:<tag>`；云形如 `cloud:<entry-id>`。
     pub active_id: String,
+    /// 后台腿路由；缺省 FollowConfig。
+    pub routing: RouteMode,
 }
 
 static LLM_OVERRIDE: OnceLock<RwLock<Option<LlmConfig>>> = OnceLock::new();
@@ -98,7 +125,22 @@ fn default_config() -> LlmConfig {
         provider: Provider::Ollama,
         local_model: DEFAULT_MODEL.into(),
         active_id: format!("{LOCAL_PREFIX}{DEFAULT_MODEL}"),
+        routing: RouteMode::FollowConfig,
     }
+}
+
+/// 覆盖层 / settings 是否 Auto（后台钉本地）。无配置 → false（Manual）。
+pub fn routing_auto() -> bool {
+    current()
+        .map(|c| c.routing == RouteMode::AutoLocal)
+        .unwrap_or(false)
+}
+
+/// 切换模型时保留当前 routing，避免被默认 Follow 冲掉。
+fn current_routing() -> RouteMode {
+    current()
+        .map(|c| c.routing)
+        .unwrap_or(RouteMode::FollowConfig)
 }
 
 // ---------- settings 往返（spec §A3：llm_ 前缀，不升 schema）
@@ -106,11 +148,13 @@ fn default_config() -> LlmConfig {
 const KEY_PROVIDER: &str = "llm_provider";
 const KEY_LOCAL_MODEL: &str = "llm_local_model";
 const KEY_ACTIVE_ID: &str = "llm_active_id";
+const KEY_ROUTING: &str = "llm_routing_mode";
 
 pub fn persist(conn: &Connection, cfg: &LlmConfig) -> rusqlite::Result<()> {
     set_setting(conn, KEY_PROVIDER, cfg.provider.as_str())?;
     set_setting(conn, KEY_LOCAL_MODEL, &cfg.local_model)?;
     set_setting(conn, KEY_ACTIVE_ID, &cfg.active_id)?;
+    set_setting(conn, KEY_ROUTING, cfg.routing.as_str())?;
     Ok(())
 }
 
@@ -133,7 +177,18 @@ pub fn read_settings(conn: &Connection) -> LlmConfig {
         .flatten()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| format!("{LOCAL_PREFIX}{local_model}"));
-    LlmConfig { provider, local_model, active_id }
+    let routing = get_setting(conn, KEY_ROUTING)
+        .ok()
+        .flatten()
+        .as_deref()
+        .and_then(RouteMode::parse)
+        .unwrap_or(dflt.routing);
+    LlmConfig {
+        provider,
+        local_model,
+        active_id,
+        routing,
+    }
 }
 
 /// 当前生效配置：覆盖层优先，否则读 settings（命令层/回落逻辑共用）。
@@ -173,6 +228,7 @@ pub fn set_active_with(
         provider: Provider::Ollama,
         local_model: tag.to_string(),
         active_id: format!("{LOCAL_PREFIX}{tag}"),
+        routing: current_routing(),
     };
     persist(&cfg)?;
     apply(cfg.clone());
@@ -201,6 +257,7 @@ pub fn set_active_cloud_with(
         provider: Provider::Cloud,
         // 保留本地选择：删条目/切回来时立刻可用，不用用户再挑一次。
         local_model: local_model.to_string(),
+        routing: current_routing(),
         active_id: format!("{CLOUD_PREFIX}{entry_id}"),
     };
     persist(&cfg)?;
@@ -216,6 +273,8 @@ pub struct LlmConfigView {
     pub provider: String,
     pub local_model: String,
     pub active_id: String,
+    /// true = Auto：后台任务只用本地模型。
+    pub background_local_only: bool,
     pub sidecar_up: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub masked_key: Option<String>,
@@ -232,6 +291,7 @@ fn view_of(cfg: LlmConfig, sidecar_up: bool) -> LlmConfigView {
         provider: cfg.provider.as_str().into(),
         local_model: cfg.local_model,
         active_id: cfg.active_id,
+        background_local_only: cfg.routing == RouteMode::AutoLocal,
         sidecar_up,
         masked_key,
     }
@@ -243,6 +303,25 @@ pub fn llm_config_get(store: tauri::State<'_, MemoryStore>) -> Result<LlmConfigV
         let conn = store.inner().write_guard().map_err(|e| e.to_string())?;
         effective(&conn)
     };
+    let up = crate::llm::OllamaClient::new(llm_models::base_url(), DEFAULT_MODEL).is_up();
+    Ok(view_of(cfg, up))
+}
+
+/// 设置页「后台任务只用本地模型」开关（plan-structured-routing T5）。
+#[tauri::command]
+pub fn llm_routing_set(
+    store: tauri::State<'_, MemoryStore>,
+    background_local_only: bool,
+) -> Result<LlmConfigView, String> {
+    let conn = store.inner().write_guard().map_err(|e| e.to_string())?;
+    let mut cfg = effective(&conn);
+    cfg.routing = if background_local_only {
+        RouteMode::AutoLocal
+    } else {
+        RouteMode::FollowConfig
+    };
+    persist(&conn, &cfg).map_err(|e| e.to_string())?;
+    apply(cfg.clone());
     let up = crate::llm::OllamaClient::new(llm_models::base_url(), DEFAULT_MODEL).is_up();
     Ok(view_of(cfg, up))
 }
@@ -320,6 +399,7 @@ mod tests {
             provider: Provider::Ollama,
             local_model: "gemma3:4b".into(),
             active_id: "ollama:gemma3:4b".into(),
+            routing: RouteMode::FollowConfig,
         });
         // from_env：覆盖层 > env（测试环境未设 BONSAI_LLM_MODEL）> 默认
         assert_eq!(crate::llm::OllamaClient::from_env().model(), "gemma3:4b");
@@ -338,6 +418,7 @@ mod tests {
             provider: Provider::Cloud,
             local_model: "qwen3.5:2b".into(),
             active_id: "cloud:c1".into(),
+            routing: RouteMode::FollowConfig,
         });
         // 云端激活时本地腿回落到 env/默认，不能被云端条目污染。
         assert_eq!(override_model(), None);
@@ -358,6 +439,7 @@ mod tests {
             provider: Provider::Ollama,
             local_model: "llama3.2:3b".into(),
             active_id: "ollama:llama3.2:3b".into(),
+            routing: RouteMode::FollowConfig,
         };
         persist(&conn, &cfg).unwrap();
         assert_eq!(load_from_settings(&conn), Some(cfg.clone()));
@@ -374,6 +456,7 @@ mod tests {
             provider: Provider::Ollama,
             local_model: "qwen3.5:4b".into(),
             active_id: "ollama:qwen3.5:4b".into(),
+            routing: RouteMode::FollowConfig,
         };
         persist(&conn, &cfg).unwrap();
         assert_eq!(get_setting(&conn, KEY_PROVIDER).unwrap().as_deref(), Some("ollama"));
@@ -398,6 +481,7 @@ mod tests {
             provider: Provider::Cloud,
             local_model: "qwen3.5:2b".into(),
             active_id: "cloud:c1".into(),
+            routing: RouteMode::FollowConfig,
         };
         persist(&conn, &cfg).unwrap();
         assert_eq!(read_settings(&conn), cfg);
@@ -536,6 +620,7 @@ mod tests {
                 provider: Provider::Cloud,
                 local_model: "qwen3.5:2b".into(),
                 active_id: "cloud:c1".into(),
+                routing: RouteMode::FollowConfig,
             },
             true,
         );
@@ -549,6 +634,7 @@ mod tests {
                 provider: Provider::Ollama,
                 local_model: "qwen3.5:2b".into(),
                 active_id: "ollama:qwen3.5:2b".into(),
+                routing: RouteMode::FollowConfig,
             },
             true,
         );

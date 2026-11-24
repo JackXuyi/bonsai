@@ -28,6 +28,7 @@ use std::sync::Arc;
 pub mod anthropic;
 pub mod cloud;
 pub mod ollama;
+pub mod schema;
 pub mod serve;
 pub mod watchdog;
 
@@ -249,6 +250,26 @@ pub trait ChatClient: Send + Sync {
     ) -> Result<ToolReply, LlmError> {
         Err(LlmError::Decode("tool_unsupported".into()))
     }
+
+    /// 结构化输出（plan-structured-routing §3.1）：传输层用原生机制约束
+    /// 输出为合法 JSON。返回原始字符串，解析与语义校验留给调用点。
+    /// 默认不支持（Anthropic 等无原生字段的腿走兜底，不做协议 hack）。
+    fn chat_structured(
+        &self,
+        _messages: &[Msg],
+        _schema: &serde_json::Value,
+        _temperature: f64,
+        _timeout: u64,
+    ) -> Result<String, LlmError> {
+        Err(LlmError::Decode("structured_unsupported".into()))
+    }
+}
+
+/// 两条腿（plan-structured-routing §3.5）：对话跟随主配置；后台任务可钉本地。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskLeg {
+    Chat,
+    Background,
 }
 
 /// Which transport a client came from — used by logs and by tests that must
@@ -334,6 +355,7 @@ pub(crate) fn choose(
 
 /// The one factory the model legs use (spec-m2 §1.1). Read per call, so a
 /// provider/model switch takes effect on the next message.
+/// 等价于 `client_for(TaskLeg::Chat)`。
 pub fn current_client() -> Arc<dyn ChatClient> {
     current_client_with_kind().0
 }
@@ -343,6 +365,28 @@ pub fn current_client() -> Arc<dyn ChatClient> {
 pub fn current_client_with_kind() -> (Arc<dyn ChatClient>, ClientKind) {
     let cfg = crate::llm_admin::current();
     choose(cfg.as_ref(), &crate::llm_cloud::entries())
+}
+
+/// 按任务腿取客户端（plan-structured-routing §3.5）。
+/// - Chat：始终跟随主配置（= `current_client`）。
+/// - Background：Manual（默认）与 Chat 同源；Auto 恒走本地小模型。
+pub fn client_for(leg: TaskLeg) -> Arc<dyn ChatClient> {
+    match leg {
+        TaskLeg::Chat => current_client(),
+        TaskLeg::Background => background_client(),
+    }
+}
+
+fn background_client() -> Arc<dyn ChatClient> {
+    if crate::llm_admin::routing_auto() {
+        let client = Arc::new(OllamaClient::from_env()) as Arc<dyn ChatClient>;
+        log::info!("background leg -> {}", client.label());
+        client
+    } else {
+        let client = current_client();
+        log::info!("background leg -> {} (follow config)", client.label());
+        client
+    }
 }
 
 #[cfg(test)]
@@ -356,7 +400,72 @@ mod tests {
             provider: Provider::Cloud,
             local_model: DEFAULT_MODEL.into(),
             active_id: active.into(),
+            routing: crate::llm_admin::RouteMode::FollowConfig,
         }
+    }
+
+    #[test]
+    fn default_chat_structured_is_unsupported() {
+        struct Stub;
+        impl ChatClient for Stub {
+            fn chat(&self, _: &[Msg], _: f64, _: u64) -> Result<String, LlmError> {
+                Ok(String::new())
+            }
+            fn chat_stream(
+                &self,
+                _: &[Msg],
+                _: f64,
+                _: u64,
+                _: &mut dyn FnMut(&str),
+            ) -> Result<String, LlmError> {
+                Ok(String::new())
+            }
+            fn is_up(&self) -> bool {
+                true
+            }
+        }
+        let err = Stub
+            .chat_structured(&[], &serde_json::json!({}), 0.2, 1)
+            .unwrap_err();
+        match err {
+            LlmError::Decode(m) => assert_eq!(m, "structured_unsupported"),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn background_leg_pins_local_when_auto() {
+        use crate::llm_admin::{self, RouteMode};
+        let _g = llm_admin::test_lock();
+        llm_admin::clear_for_test();
+        crate::llm_cloud::set_cache_for_test(vec![entry(
+            EntryKind::Custom,
+            "https://api.deepseek.com/v1",
+        )]);
+
+        let mut cfg = cloud_cfg("cloud:c1");
+        cfg.routing = RouteMode::FollowConfig;
+        llm_admin::apply(cfg.clone());
+        // Manual：后台与 Chat 同源 → 云
+        assert!(client_for(TaskLeg::Chat).label().starts_with("cloud:"));
+        assert_eq!(
+            client_for(TaskLeg::Chat).label(),
+            client_for(TaskLeg::Background).label()
+        );
+
+        cfg.routing = RouteMode::AutoLocal;
+        llm_admin::apply(cfg);
+        assert!(
+            client_for(TaskLeg::Chat).label().starts_with("cloud:"),
+            "Chat 仍跟主配置"
+        );
+        assert!(
+            client_for(TaskLeg::Background).label().starts_with("ollama:"),
+            "Auto 后台钉本地"
+        );
+
+        llm_admin::clear_for_test();
+        crate::llm_cloud::set_cache_for_test(Vec::new());
     }
 
     fn entry(kind: EntryKind, url: &str) -> CloudEntry {
