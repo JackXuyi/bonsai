@@ -1,22 +1,42 @@
 "use client";
 
-// Skill 管理卡（spec-s6 §2）：目录扫描 + 启停 + 拒载标红 + 预算提示 + 预览 + 添加外部技能。
+// Skill 管理卡（spec-s6 §2）+ 自动提取草稿（plan-skill-auto-extract M2）。
 import { useCallback, useEffect, useState } from "react";
-import { humanizeAgentError, skillList, skillRemove, skillToggle } from "@/lib/commands";
-import type { SkillView } from "@/lib/types";
+import {
+  humanizeAgentError,
+  skillAutoCandidates,
+  skillAutoDismiss,
+  skillAutoGetEnabled,
+  skillAutoSetEnabled,
+  skillExtractNow,
+  skillList,
+  skillRemove,
+  skillToggle,
+} from "@/lib/commands";
+import type { SkillAutoCandidate, SkillView } from "@/lib/types";
 import { SkillAddDialog } from "./SkillAddDialog";
 import { SkillPreviewDialog } from "./SkillPreviewDialog";
 
 export function SkillSection() {
   const [rows, setRows] = useState<SkillView[]>([]);
+  const [cands, setCands] = useState<SkillAutoCandidate[]>([]);
+  const [autoOn, setAutoOn] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [extracting, setExtracting] = useState<string | null>(null);
   const [previewId, setPreviewId] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
-      setRows(await skillList());
+      const [list, enabled, pending] = await Promise.all([
+        skillList(),
+        skillAutoGetEnabled(),
+        skillAutoCandidates(),
+      ]);
+      setRows(list);
+      setAutoOn(enabled);
+      setCands(pending);
       setError(null);
     } catch (e) {
       setError(humanizeAgentError(e));
@@ -40,6 +60,29 @@ export function SkillSection() {
     }
   }
 
+  async function setAuto(next: boolean) {
+    try {
+      await skillAutoSetEnabled(next);
+      setAutoOn(next);
+      setError(null);
+    } catch (e) {
+      setError(humanizeAgentError(e));
+    }
+  }
+
+  async function extract(taskId: string) {
+    setExtracting(taskId);
+    try {
+      await skillExtractNow(taskId);
+      setError(null);
+      await refresh();
+    } catch (e) {
+      setError(humanizeAgentError(e));
+    } finally {
+      setExtracting(null);
+    }
+  }
+
   const enabledCount = rows.filter((r) => r.enabled).length;
 
   return (
@@ -56,6 +99,68 @@ export function SkillSection() {
         </button>
       </div>
       {error && <p className="model-error">{error}</p>}
+
+      <div className="agent-row" data-testid="skill-auto-toggle">
+        <div className="agent-row-main">
+          <span className="agent-name">自动提取</span>
+          <span className="hint-line">
+            夜间从成功任务生成草稿（默认禁用）；启用后需云端对话才会注入技能
+          </span>
+        </div>
+        <div className="agent-row-actions">
+          <button
+            type="button"
+            className={autoOn ? "btn-danger" : "btn"}
+            data-testid="skill-auto-enabled"
+            onClick={() => void setAuto(!autoOn)}
+          >
+            {autoOn ? "关闭自动" : "开启自动"}
+          </button>
+        </div>
+      </div>
+
+      {cands.length > 0 && (
+        <div className="agent-list" data-testid="skill-auto-candidates">
+          <p className="hint-line">待提取候选</p>
+          {cands.map((c) => (
+            <div key={c.taskId} className="agent-row">
+              <div className="agent-row-main">
+                <span className="agent-name">{c.goal || c.taskId}</span>
+                <span className="hint-line">
+                  {c.explicit ? "显式固化 · " : ""}
+                  {c.okTools} 次工具 · {c.chainKey || "—"}
+                </span>
+              </div>
+              <div className="agent-row-actions">
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={extracting === c.taskId}
+                  data-testid={`skill-extract-${c.taskId}`}
+                  onClick={() => void extract(c.taskId)}
+                >
+                  {extracting === c.taskId ? "生成中…" : "立即提取"}
+                </button>
+                <button
+                  type="button"
+                  className="btn-ghost"
+                  onClick={async () => {
+                    try {
+                      await skillAutoDismiss(c.taskId);
+                      await refresh();
+                    } catch (e) {
+                      setError(humanizeAgentError(e));
+                    }
+                  }}
+                >
+                  丢弃
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       {rows.length === 0 ? (
         <p className="hint-line">
           把技能包放进应用数据目录的 skills/&lt;id&gt;/（SKILL.md ≤16KB + references/*.md ≤4KB×5），
@@ -67,7 +172,13 @@ export function SkillSection() {
             <div key={s.id} className="agent-row" data-valid={s.valid}>
               <div className="agent-row-main">
                 <span className="agent-name">{s.name}</span>
-                <span className="hint-line">{s.valid ? s.description : "拒载"}</span>
+                <span className="hint-line">
+                  {s.valid
+                    ? s.autoExtracted && !s.enabled
+                      ? `自动提取 · 未启用${s.autoSource ? ` · ${s.autoSource}` : ""}`
+                      : s.description
+                    : "拒载"}
+                </span>
               </div>
               <div className="agent-row-actions">
                 {s.valid ? (
@@ -121,7 +232,7 @@ export function SkillSection() {
       )}
       <p className="hint-line" style={{ marginTop: 8 }}>
         已启用 {enabledCount} 个 · 启用即注入提示段（标注 untrusted，与人格宪法冲突时以宪法为准）；
-        全文合计超预算会拖慢 2B 模型，按需启停。
+        全文合计超预算会拖慢 2B 模型，按需启停。本地模式不会注入技能，需开启云端。
       </p>
       <SkillPreviewDialog
         open={previewId !== null}

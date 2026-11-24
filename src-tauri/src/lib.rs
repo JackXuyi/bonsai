@@ -42,6 +42,7 @@ pub mod relationship;
 pub mod report;
 pub mod session;
 pub mod skill;
+pub mod skill_auto;
 pub mod skill_remote;
 pub mod webtools;
 pub mod summary;
@@ -344,7 +345,13 @@ pub fn run() {
             mcp_admin::skill_read,
             mcp_admin::skill_import,
             mcp_admin::skill_create,
+            mcp_admin::skill_update,
             mcp_admin::skill_load_remote,
+            mcp_admin::skill_extract_now,
+            mcp_admin::skill_auto_candidates,
+            mcp_admin::skill_auto_dismiss,
+            mcp_admin::skill_auto_get_enabled,
+            mcp_admin::skill_auto_set_enabled,
             mcp_admin::tool_call_records,
             mcp_admin::plan_list,
             mcp_admin::mcp_approval_reply,

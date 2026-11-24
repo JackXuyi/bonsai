@@ -490,6 +490,19 @@ export interface SkillView {
   enabled: boolean;
   valid: boolean;
   errorCode?: string | null;
+  /** 自动提取草稿（plan-skill-auto-extract）。 */
+  autoExtracted?: boolean | null;
+  autoSource?: string | null;
+  autoConfidence?: number | null;
+}
+
+export interface SkillAutoCandidate {
+  taskId: string;
+  goal: string;
+  status: string;
+  okTools: number;
+  explicit: boolean;
+  chainKey: string;
 }
 
 /** 技能预览：全文 + 已加载引用（skill_read）。 */

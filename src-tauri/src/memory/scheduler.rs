@@ -224,6 +224,27 @@ fn tick(app: &AppHandle) -> Result<(), String> {
         report.promoted,
         report.deleted
     );
+
+    // plan-skill-auto-extract M1：巩固之后尝试自动成包；失败只 warn，不影响 consolidate。
+    let skills_dir = app
+        .try_state::<crate::mcp_admin::AgentState>()
+        .map(|s| s.skills_dir.clone());
+    if let Some(dir) = skills_dir {
+        match crate::skill_auto::run_if_due(&store, &dir, false) {
+            Ok(created) if !created.is_empty() => {
+                for r in &created {
+                    let _ = app.emit(
+                        "skill:auto_extracted",
+                        serde_json::json!({ "id": r.id, "name": r.name }),
+                    );
+                }
+                log::info!("skill_auto: created {} pack(s)", created.len());
+            }
+            Ok(_) => {}
+            Err(e) => log::warn!("skill_auto run_if_due failed: {e}"),
+        }
+    }
+
     Ok(())
 }
 

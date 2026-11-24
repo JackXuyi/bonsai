@@ -33,6 +33,7 @@ import type {
   SessionRow,
   SkillCreateInput,
   SkillDetail,
+  SkillAutoCandidate,
   SkillView,
   ToolCallRecord,
   ToolDescriptor,
@@ -284,10 +285,28 @@ export const skillImport = (source: string) =>
 /** 手写创建技能包（四项必填，后端走同一套校验）。 */
 export const skillCreate = (input: SkillCreateInput) =>
   call<void>("skill_create", input as unknown as Record<string, unknown>);
+/** 覆盖写已有包（plan-skill-auto-extract）。 */
+export const skillUpdate = (input: SkillCreateInput) =>
+  call<void>("skill_update", input as unknown as Record<string, unknown>);
 /** 从远端加载技能包（GitHub repo/tree/raw、GitLab blob、任意 https SKILL.md）。
  *  联网只发生在这次显式点击；id 留空则从链接推导。返回最终 id。 */
 export const skillLoadRemote = (url: string, id?: string) =>
   invokeWithTimeout<string>("skill_load_remote", { url, id: id ?? null }, 60000);
+
+/** 自动提取：立即从 task 成包（可无视总开关，便于审核）。 */
+export const skillExtractNow = (taskId: string) =>
+  invokeWithTimeout<{ id: string; name: string }>(
+    "skill_extract_now",
+    { taskId },
+    90000,
+  );
+export const skillAutoCandidates = () =>
+  call<SkillAutoCandidate[]>("skill_auto_candidates");
+export const skillAutoDismiss = (taskId: string) =>
+  call<void>("skill_auto_dismiss", { taskId });
+export const skillAutoGetEnabled = () => call<boolean>("skill_auto_get_enabled");
+export const skillAutoSetEnabled = (enabled: boolean) =>
+  call<void>("skill_auto_set_enabled", { enabled });
 export const toolCallRecords = (limit?: number) =>
   call<ToolCallRecord[]>("tool_call_records", { limit });
 /** 计划历史（plan-planning §5.6）：进度面板首屏基线，含解析后的 plan_json。 */

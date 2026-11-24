@@ -866,6 +866,10 @@ pub(crate) fn cloud_tool_loop(
         let task_id = t.id.clone();
         let conn = store.write_guard()?;
         let _ = db::task_finish(&conn, &task_id, status, executed as i64, Some(&reply));
+        // plan-skill-auto-extract T1：成功任务入候选池（只写 KV，不调模型）。
+        if status == "done" {
+            let _ = crate::skill_auto::enqueue_candidate(&conn, &task_id);
+        }
         // 无计划取消（skip_remaining_steps 未走到）也要写 cancel_reason。
         if let Some(reason) = cancel_reason {
             let _ = db::task_set_cancel_reason(&conn, &task_id, reason);

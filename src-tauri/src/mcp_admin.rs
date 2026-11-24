@@ -1133,6 +1133,13 @@ pub struct SkillView {
     pub enabled: bool,
     pub valid: bool,
     pub error_code: Option<&'static str>,
+    /// plan-skill-auto-extract：来自自动提取的草稿元信息。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_extracted: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_confidence: Option<f64>,
 }
 
 #[tauri::command]
@@ -1142,17 +1149,30 @@ pub fn skill_list(
 ) -> Result<Vec<SkillView>, String> {
     let conn = now_conn(&store)?;
     let enabled = crate::skill::enabled_ids(db::get_setting(&conn, "skill_enabled").ok().flatten());
+    let meta = crate::skill_auto::load_meta(&conn);
     Ok(crate::skill::scan_skills(&agent.skills_dir)
         .into_iter()
         .map(|r| match r {
-            Ok(p) => SkillView {
-                enabled: enabled.iter().any(|id| id == &p.id),
-                valid: true,
-                error_code: None,
-                id: p.id,
-                name: p.name,
-                description: p.description,
-            },
+            Ok(p) => {
+                let m = meta.get(&p.id);
+                SkillView {
+                    enabled: enabled.iter().any(|id| id == &p.id),
+                    valid: true,
+                    error_code: None,
+                    auto_extracted: m.map(|_| true),
+                    auto_source: m.map(|e| {
+                        format!(
+                            "来源任务 {} · {}",
+                            e.source_task_ids.join(","),
+                            e.created_at
+                        )
+                    }),
+                    auto_confidence: m.map(|e| e.confidence),
+                    id: p.id,
+                    name: p.name,
+                    description: p.description,
+                }
+            }
             Err((id, e)) => {
                 let err_code = e.code();
                 SkillView {
@@ -1162,6 +1182,9 @@ pub fn skill_list(
                     enabled: false,
                     valid: false,
                     error_code: Some(err_code),
+                    auto_extracted: None,
+                    auto_source: None,
+                    auto_confidence: None,
                 }
             }
         })
@@ -1201,6 +1224,14 @@ pub fn skill_remove(
 ) -> Result<(), String> {
     // Guard + delete live in skill.rs so the traversal rule is unit-tested.
     crate::skill::remove_skill_dir(&agent.skills_dir, &id).map_err(|e| e.code().to_string())?;
+    // 清自动提取溯源元信息（若有）。
+    {
+        let conn = now_conn(&store)?;
+        let mut meta = crate::skill_auto::load_meta(&conn);
+        if meta.remove(&id).is_some() {
+            let _ = crate::skill_auto::save_meta(&conn, &meta);
+        }
+    }
     let removed = id.clone();
     skill_toggle(store, agent, removed, false)
 }
@@ -1277,6 +1308,63 @@ pub fn skill_create(
 ) -> Result<(), String> {
     crate::skill::create_skill_pack(&agent.skills_dir, &id, &name, &description, &body)
         .map_err(|e| e.map_key())
+}
+
+/// 覆盖写已有包（plan-skill-auto-extract M2）。
+#[tauri::command]
+pub fn skill_update(
+    agent: tauri::State<'_, AgentState>,
+    id: String,
+    name: String,
+    description: String,
+    body: String,
+) -> Result<(), String> {
+    crate::skill::update_skill_pack(&agent.skills_dir, &id, &name, &description, &body)
+        .map_err(|e| e.map_key())
+}
+
+#[tauri::command]
+pub fn skill_extract_now(
+    store: tauri::State<'_, crate::memory::MemoryStore>,
+    agent: tauri::State<'_, AgentState>,
+    task_id: String,
+) -> Result<serde_json::Value, String> {
+    let r = crate::skill_auto::extract_now(&store, &agent.skills_dir, &task_id, true)?;
+    Ok(serde_json::json!({ "id": r.id, "name": r.name }))
+}
+
+#[tauri::command]
+pub fn skill_auto_candidates(
+    store: tauri::State<'_, crate::memory::MemoryStore>,
+) -> Result<Vec<crate::skill_auto::CandidateView>, String> {
+    let conn = now_conn(&store)?;
+    crate::skill_auto::list_pending_views(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn skill_auto_dismiss(
+    store: tauri::State<'_, crate::memory::MemoryStore>,
+    task_id: String,
+) -> Result<(), String> {
+    let conn = now_conn(&store)?;
+    crate::skill_auto::dismiss_candidate(&conn, &task_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn skill_auto_get_enabled(
+    store: tauri::State<'_, crate::memory::MemoryStore>,
+) -> Result<bool, String> {
+    let conn = now_conn(&store)?;
+    Ok(crate::skill_auto::is_feature_enabled(&conn))
+}
+
+#[tauri::command]
+pub fn skill_auto_set_enabled(
+    store: tauri::State<'_, crate::memory::MemoryStore>,
+    enabled: bool,
+) -> Result<(), String> {
+    let conn = now_conn(&store)?;
+    crate::skill_auto::set_feature_enabled(&conn, enabled).map_err(|e| e.to_string())
 }
 
 /// Load a pack from a remote URL (GitHub repo/tree/raw, GitLab blob, or any

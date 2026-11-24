@@ -188,7 +188,7 @@ fn parse_frontmatter(text: &str) -> Result<(String, String, &str), SkillError> {
     Ok((name, description, body))
 }
 
-fn check_injection(body: &str) -> Result<(), SkillError> {
+pub(crate) fn check_injection(body: &str) -> Result<(), SkillError> {
     let lower = body.to_lowercase();
     for p in INJECTION_PATTERNS {
         if lower.contains(&p.to_lowercase()) {
@@ -374,13 +374,46 @@ pub fn install_pack_files(
 /// Charset rule shared by import/create: an id is a flat directory name of
 /// lowercase ascii letters, digits and hyphens (same shape `load_skill`
 /// enforces, checked up front so failures happen before any disk write).
-fn validate_id(id: &str) -> Result<(), SkillError> {
+pub(crate) fn validate_id(id: &str) -> Result<(), SkillError> {
     if id.is_empty()
         || !id
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
     {
         return Err(SkillError::Invalid("bad skill id"));
+    }
+    Ok(())
+}
+
+/// 覆盖写已有包（plan-skill-auto-extract M2 `skill_update`）。校验失败回滚到旧正文。
+pub fn update_skill_pack(
+    root: &Path,
+    id: &str,
+    name: &str,
+    description: &str,
+    body: &str,
+) -> Result<(), SkillError> {
+    validate_id(id)?;
+    if is_engine_pack(id) {
+        return Err(SkillError::Reserved("engine pack id"));
+    }
+    let dest = root.join(id);
+    let md_path = dest.join("SKILL.md");
+    if !md_path.is_file() {
+        return Err(SkillError::Invalid("skill not found"));
+    }
+    if name.trim().is_empty() || description.trim().is_empty() || body.trim().is_empty() {
+        return Err(SkillError::Invalid("missing fields"));
+    }
+    if name.contains('\n') || description.contains('\n') {
+        return Err(SkillError::Invalid("newline in frontmatter field"));
+    }
+    let backup = std::fs::read_to_string(&md_path).map_err(SkillError::Io)?;
+    let md = format!("---\nname: {name}\ndescription: {description}\n---\n{body}\n");
+    std::fs::write(&md_path, &md).map_err(SkillError::Io)?;
+    if let Err(e) = load_skill(&dest) {
+        let _ = std::fs::write(&md_path, backup);
+        return Err(e);
     }
     Ok(())
 }
