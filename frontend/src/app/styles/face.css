@@ -1,5 +1,4 @@
-/* 脸与形态线（旧 styles.css hero/face/stage 段平移；M0b 起 hero 取消，
-   脸由侧栏 52px / 表情页 150px 两处使用，尺寸走 .face-sm/.face-lg） */
+/* 脸与形态线：xs=顶栏圆头像 28px / sm=52px / lg=预览 150px（plan-chat-first-ui v3） */
 
 .face {
   position: relative;
@@ -14,6 +13,31 @@
   transition: width 0.26s ease, height 0.26s ease,
     transform 0.22s cubic-bezier(0.34, 1.4, 0.64, 1);
   -webkit-tap-highlight-color: transparent;
+}
+
+/* 顶栏常见头像：正圆裁切、轻描边、无光晕、无上浮 */
+.face-xs {
+  width: 28px;
+  height: 28px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  box-sizing: content-box;
+}
+
+.face-xs::before {
+  content: none;
+}
+
+.face-xs svg {
+  overflow: hidden;
+}
+
+.face-xs img {
+  object-fit: cover;
+}
+
+.face-xs img[data-frame="1"] {
+  transform: none;
 }
 
 .face-sm {
@@ -36,6 +60,10 @@
 
 .face:hover {
   transform: translateY(-2px);
+}
+
+.face-xs:hover {
+  transform: scale(1.04);
 }
 
 .face:active {

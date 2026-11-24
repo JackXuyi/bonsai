@@ -21,6 +21,15 @@
   padding: 0 2px;
 }
 
+/* 右侧簇：设置紧挨头像左侧，头像贴右缘 */
+.chat-chrome-end {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  margin-left: auto;
+}
+
 .chrome-icon-btn {
   flex: none;
   width: 32px;
@@ -56,15 +65,16 @@
   align-items: center;
   gap: 8px;
   min-width: 0;
-  flex: 1;
-  justify-content: center;
+  flex: none;
 }
 
 .presence-meta {
   display: flex;
   flex-direction: column;
+  align-items: flex-end;
   gap: 1px;
   min-width: 0;
+  text-align: right;
 }
 
 .presence-name {

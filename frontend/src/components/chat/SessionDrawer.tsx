@@ -44,13 +44,16 @@ export function SessionDrawer({ open, onClose, busy }: SessionDrawerProps) {
     if (open) void load();
   }, [open, load]);
 
+  // 关闭时重置局部 UI；只依赖 open，避免父级重渲（onClose 新引用）反复 setState。
   useEffect(() => {
-    if (!open) {
-      setMenuId(null);
-      setEditingId(null);
-      setConfirming(null);
-      return;
-    }
+    if (open) return;
+    setMenuId(null);
+    setEditingId(null);
+    setConfirming(null);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape" && !confirming) onClose();
     };

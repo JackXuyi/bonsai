@@ -31,12 +31,21 @@ beforeEach(() => {
 });
 
 describe("ChatChrome", () => {
-  it("三槽：会话按钮翻抽屉、设置链到 /settings、存在感可见", () => {
-    render(<ChatChrome />);
+  it("左会话、右设置再头像：设置链到 /settings，会话可翻抽屉", () => {
+    const { container } = render(<ChatChrome />);
 
     expect(screen.getByLabelText("会话")).toBeTruthy();
     expect(screen.getByLabelText("设置").getAttribute("href")).toBe("/settings");
     expect(screen.getByText("阿盆")).toBeTruthy();
+
+    const end = container.querySelector(".chat-chrome-end");
+    expect(end).toBeTruthy();
+    const endKids = Array.from(end!.children);
+    expect(endKids[0].getAttribute("aria-label")).toBe("设置");
+    expect(endKids[1].classList.contains("presence-badge")).toBe(true);
+    // v3：顶栏用 xs 圆头像，不是 sm 立绘尺度
+    expect(container.querySelector(".face-xs")).toBeTruthy();
+    expect(container.querySelector(".face-sm")).toBeNull();
 
     fireEvent.click(screen.getByLabelText("会话"));
     expect(useUiStore.getState().sessionDrawerOpen).toBe(true);

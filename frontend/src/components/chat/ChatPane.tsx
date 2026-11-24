@@ -20,6 +20,16 @@ function nearBottom(el: HTMLElement) {
   return el.scrollHeight - el.scrollTop - el.clientHeight < 56;
 }
 
+/** 空态大脸：单独挂 useFaceFrame，避免有消息时整页 600ms 重渲。 */
+function EmptyStateFace() {
+  const frame = useFaceFrame();
+  return (
+    <div className="empty-face">
+      <PokeFace size="lg" frame={frame} />
+    </div>
+  );
+}
+
 /** 把 DB 里的最近消息流映射成气泡：assistant 行若无前导 user 行即主动搭话。
  *  时间不进气泡体（2026-11-23 用户裁决）：日期只在操作条的 msg-time 里。
  *  eventId / ts 透传（spec-s8）：操作条的时间显示与「查看详情」反查入口。 */
@@ -47,7 +57,7 @@ export function ChatPane() {
   const currentId = useSessionStore((s) => s.currentId);
   const drawerOpen = useUiStore((s) => s.sessionDrawerOpen);
   const setDrawerOpen = useUiStore((s) => s.setSessionDrawerOpen);
-  const faceFrame = useFaceFrame();
+  const closeDrawer = useCallback(() => setDrawerOpen(false), [setDrawerOpen]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [showToBottom, setShowToBottom] = useState(false);
 
@@ -61,31 +71,45 @@ export function ChatPane() {
   const restoreRef = useRef<{ prevHeight: number; prevTop: number } | null>(null);
   /** 首次有内容时直接跳到底部（prefill 后 nearBottom 条件会误判停在顶部）。 */
   const jumpedRef = useRef(false);
-  /** 用户是否贴底：贴底时流式增量涨多少都跟着滚（2026-11-23 用户裁决：
-   *  流式内容要自动出现在可见区，不能因为一次增量超过 56px 就脱底）；
-   *  用户往上翻就看别打扰。onScroll 里维护，渲染 effect 里消费。 */
+  /** 用户是否贴底：贴底时流式增量涨多少都跟着滚；用户往上翻就别打扰。 */
   const pinnedRef = useRef(true);
+  /**
+   * 程序化改 scrollTop 期间忽略 onScroll 里的 setShowToBottom。
+   * WebKit 可在 effect/rAF 写 scrollTop 时同步派发 scroll；若立刻 setState，
+   * 会与 messages 更新叠成 Maximum update depth exceeded。
+   */
+  const programmaticScrollRef = useRef(false);
+
+  const syncToBottom = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const next = !nearBottom(el) && el.scrollHeight > el.clientHeight;
+    setShowToBottom((prev) => (prev === next ? prev : next));
+  }, []);
+
+  /** 写 scrollTop 并短时屏蔽 scroll→setState；随后再同步按钮显隐。 */
+  const setScrollTopSafe = useCallback(
+    (top: number) => {
+      const el = scrollRef.current;
+      if (!el) return;
+      programmaticScrollRef.current = true;
+      el.scrollTop = top;
+      requestAnimationFrame(() => {
+        programmaticScrollRef.current = false;
+        syncToBottom();
+      });
+    },
+    [syncToBottom]
+  );
 
   const stick = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
-    el.scrollTop = el.scrollHeight;
-    syncToBottom();
-  }, []);
+    setScrollTopSafe(el.scrollHeight);
+  }, [setScrollTopSafe]);
 
-  function syncToBottom() {
-    const el = scrollRef.current;
-    if (!el) return;
-    setShowToBottom(!nearBottom(el) && el.scrollHeight > el.clientHeight);
-  }
-
-  // 消息变化时的滚动策略：前插历史页 → 按差值复位（用户在顶部翻旧消息，
-  // 不贴底）；首次有内容 → 跳到最新；贴底（含流式增量）→ 始终跟到最新；
-  // 不贴底 → 只同步「回到底部」按钮显隐，不打扰用户阅读。
-  // 贴底写入放进 rAF：DOM 滚动写在 passive effect 的 flush 阶段内会与
-  // scroll 事件回调交错（WebKit 真机可同步派发），onScroll 里的 setState
-  // 就可能滚进嵌套更新链 → Maximum update depth exceeded。rAF 把写入挪到
-  // flush 之外，事件回调变成普通任务，链路必断。
+  // 消息变化时的滚动策略：前插历史 → 差值复位；首次 → 跳底；贴底 → 跟最新。
+  // 所有 scrollTop 写入都走 setScrollTopSafe（rAF 外的写 + 屏蔽 onScroll setState）。
   useEffect(() => {
     const el = scrollRef.current;
     if (!el || messages.length === 0) return;
@@ -93,24 +117,29 @@ export function ChatPane() {
       const { prevHeight, prevTop } = restoreRef.current;
       restoreRef.current = null;
       pinnedRef.current = false;
-      el.scrollTop = el.scrollHeight - prevHeight + prevTop;
-      syncToBottom();
+      requestAnimationFrame(() => {
+        const cur = scrollRef.current;
+        if (!cur) return;
+        setScrollTopSafe(cur.scrollHeight - prevHeight + prevTop);
+      });
     } else if (!jumpedRef.current) {
       jumpedRef.current = true;
       pinnedRef.current = true;
-      el.scrollTop = el.scrollHeight;
-      syncToBottom();
+      requestAnimationFrame(() => {
+        const cur = scrollRef.current;
+        if (!cur) return;
+        setScrollTopSafe(cur.scrollHeight);
+      });
     } else if (pinnedRef.current) {
       requestAnimationFrame(() => {
         const cur = scrollRef.current;
         if (!cur || !pinnedRef.current) return;
-        cur.scrollTop = cur.scrollHeight;
-        syncToBottom();
+        setScrollTopSafe(cur.scrollHeight);
       });
     } else {
       syncToBottom();
     }
-  }, [messages]);
+  }, [messages, setScrollTopSafe, syncToBottom]);
 
   // 向上分页：滚近顶部时拉更早的一页（游标 = 已加载最旧的 db id）。
   const loadOlder = useCallback(async () => {
@@ -138,22 +167,23 @@ export function ChatPane() {
 
   function onMessagesScroll() {
     const el = scrollRef.current;
-    if (el) pinnedRef.current = nearBottom(el);
-    syncToBottom();
-    if (el && el.scrollTop <= SCROLL_TOP_TRIGGER) void loadOlder();
+    if (!el) return;
+    if (!programmaticScrollRef.current) {
+      pinnedRef.current = nearBottom(el);
+      syncToBottom();
+    }
+    if (el.scrollTop <= SCROLL_TOP_TRIGGER) void loadOlder();
   }
 
-  // 进入对话页时聚焦输入框（旧 selectTab("chat")）
+  // 进入对话页时聚焦输入框
   useEffect(() => {
-    scrollRef.current?.querySelector("textarea")?.focus({ preventScroll: true });
+    document.querySelector<HTMLTextAreaElement>(".composer textarea")?.focus({
+      preventScroll: true,
+    });
   }, []);
 
   // 会话载入（首次挂载 + 每次切换共用一条路）：只拉第一页（30 条），其余
   // 滚到顶部再分页加载。
-  // - 切换：先把旧会话的气泡整条清掉、游标归零（A12 旧气泡不残留），
-  //   再按新会话回放；`jumpedRef` 复位让视图落到底部。
-  // - 首次挂载：本次启动若已聊过（先发消息 / proactive 先到）就以消息流
-  //   为准，不覆盖；否则按 DB 回放。跨启动一律以 DB 为准，不做本地缓存。
   const loadedSessionRef = useRef<string | null>(null);
   useEffect(() => {
     const switching =
@@ -206,9 +236,7 @@ export function ChatPane() {
         <div className="messages" ref={scrollRef} onScroll={onMessagesScroll}>
           {empty && (
             <div className="empty">
-              <div className="empty-face">
-                <PokeFace size="lg" frame={faceFrame} />
-              </div>
+              <EmptyStateFace />
               <p className="empty-title">还没聊过</p>
               <p className="empty-sub">
                 说句话，或者等它自己开口。
@@ -247,7 +275,13 @@ export function ChatPane() {
             aria-label="回到最新"
             onClick={() => {
               const el = scrollRef.current;
-              el?.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+              if (!el) return;
+              programmaticScrollRef.current = true;
+              el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+              requestAnimationFrame(() => {
+                programmaticScrollRef.current = false;
+                syncToBottom();
+              });
             }}
           >
             ↓
@@ -256,7 +290,7 @@ export function ChatPane() {
       </div>
 
       <Composer onSend={send} onCancel={cancel} chatBusy={chatting} />
-      <SessionDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} busy={chatting} />
+      <SessionDrawer open={drawerOpen} onClose={closeDrawer} busy={chatting} />
     </>
   );
 }

@@ -18,8 +18,8 @@ import { useUiStore } from "@/lib/stores/uiStore";
 import type { FaceState } from "@/lib/types";
 
 interface PokeFaceProps {
-  /** 尺寸类：sm=侧栏 52px / lg=表情页 150px（.face-sm/.face-lg） */
-  size: "sm" | "lg";
+  /** 尺寸类：xs=顶栏头像 28px / sm=52px / lg=预览 150px */
+  size: "xs" | "sm" | "lg";
   frame: number;
 }
 

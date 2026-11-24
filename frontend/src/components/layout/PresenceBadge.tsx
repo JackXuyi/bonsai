@@ -1,6 +1,6 @@
 "use client";
 
-// 存在感：迷你脸 + 短名 + 情绪点（plan-chat-first-ui v2 ChatChrome）。
+// 存在感：短名 + 情绪点 + 迷你脸（脸在最右，贴顶栏右缘）。
 import { PokeFace } from "@/components/face/PokeFace";
 import { MOODS, MOOD_COLORS } from "@/components/face/frames";
 import { useFaceFrame } from "@/hooks/useFaceFrame";
@@ -12,7 +12,6 @@ export function PresenceBadge() {
 
   return (
     <div className="presence-badge">
-      <PokeFace size="sm" frame={frame} />
       <div className="presence-meta">
         <span className="presence-name">阿盆</span>
         <span className="presence-mood">
@@ -24,6 +23,7 @@ export function PresenceBadge() {
           {MOODS[faceState] ?? MOODS.calm}
         </span>
       </div>
+      <PokeFace size="xs" frame={frame} />
     </div>
   );
 }
