@@ -19,8 +19,38 @@
 .agent-card { margin-top: 12px; }
 .agent-card-head { display: flex; align-items: center; justify-content: space-between; }
 /* 审批模式开关（spec-s4/s6）：auto = 直接执行，ask = 每次弹卡 */
-.agent-approval { display: flex; align-items: center; gap: 8px; margin: 6px 0 2px; }
-.agent-approval .hint-line { margin: 0 auto 0 0; }
+.agent-approval {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  margin: 10px 0 2px;
+}
+.agent-approval .hint-line { margin: 0; }
+.agent-approval-note { flex: 1 1 100%; margin: 0; }
+/* 权限三档徽标（roadmap G-10） */
+.agent-access {
+  font-size: 10px; padding: 1px 6px; border-radius: 999px; flex: none;
+  background: rgba(123,199,60,.16); color: #4d7d22; white-space: nowrap;
+}
+.agent-access[data-access="ask"] { background: rgba(240,146,34,.16); color: #b3660f; }
+.agent-access[data-access="forbidden"] { background: rgba(192,57,43,.14); color: #a93226; }
+.agent-tier-legend { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; }
+.agent-tier-legend-row { display: flex; align-items: center; gap: 8px; }
+/* 审计筛选条（P4-2 完整审计页） */
+.agent-audit-filters {
+  display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: flex-end;
+  margin: 8px 0 4px;
+}
+.agent-audit-filter {
+  display: flex; flex-direction: column; gap: 2px; font-size: 12px;
+}
+.agent-audit-filter select,
+.agent-audit-filter input[type="search"] {
+  padding: 4px 8px; border: 1px solid var(--line, rgba(0,0,0,.12));
+  border-radius: 8px; font: inherit; min-width: 0; background: var(--bg, #fff);
+}
+.agent-audit-check {
+  flex-direction: row; align-items: center; gap: 6px; padding-bottom: 4px;
+}
+.agent-audit-search { flex: 1 1 140px; min-width: 120px; }
 .agent-list { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
 .agent-row {
   display: flex; flex-direction: column; gap: 4px;

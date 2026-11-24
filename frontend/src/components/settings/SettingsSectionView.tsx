@@ -21,6 +21,8 @@ import { WebCard } from "@/components/tools/WebCard";
 import { PerceptionCard } from "@/components/tools/PerceptionCard";
 import { BoundaryCard } from "@/components/tools/BoundaryCard";
 import { PlanProgressCard } from "@/components/tools/PlanProgressCard";
+import { AuditTimeline } from "@/components/agent/AuditTimeline";
+import { PermissionTiersCard } from "@/components/agent/PermissionTiersCard";
 import { ToolCallRecords } from "@/components/agent/ToolCallRecords";
 import { ToolResult } from "@/components/tools/ToolResult";
 import { ReportDialog } from "@/components/tools/ReportDialog";
@@ -78,6 +80,8 @@ function SectionBody({ id }: { id: SettingsSectionId }) {
     case "access":
       return (
         <>
+          <PermissionTiersCard />
+          <AuditTimeline variant="full" />
           <CalendarCard active />
           <FileCard active />
           <WebCard active />

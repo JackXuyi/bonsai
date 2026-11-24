@@ -69,11 +69,26 @@ beforeEach(() => {
   scanMock.mockClear().mockResolvedValue<DiscoveredServer[]>([]);
   importMock.mockClear().mockResolvedValue({ inserted: 0, skipped: 0 });
   toolsMock.mockClear().mockResolvedValue([
-    { name: "read_file", summary: "读文件", detail: "{}", kind: "mcp", remote: false },
-    { name: "list_dir", summary: "列目录", detail: "{}", kind: "mcp", remote: false },
+    { name: "read_file", summary: "读文件", detail: "{}", kind: "mcp", remote: false, access: "read" },
+    { name: "list_dir", summary: "列目录", detail: "{}", kind: "mcp", remote: false, access: "read" },
   ]);
   builtinMock.mockClear().mockResolvedValue([
-    { name: "memory_search", summary: "按日期或关键词翻找过往聊天记录与记忆（本地）", detail: "{}", kind: "builtin", remote: false },
+    {
+      name: "memory_search",
+      summary: "按日期或关键词翻找过往聊天记录与记忆（本地）",
+      detail: "{}",
+      kind: "builtin",
+      remote: false,
+      access: "read",
+    },
+    {
+      name: "fs_write",
+      summary: "在授权目录内新建文本文件",
+      detail: "{}",
+      kind: "builtin",
+      remote: false,
+      access: "ask",
+    },
   ]);
 });
 
@@ -90,20 +105,6 @@ describe("McpSection", () => {
     await waitFor(() => screen.getByText("启用"));
     fireEvent.click(screen.getByText("启用"));
     await waitFor(() => expect(toggleMock).toHaveBeenCalledWith("srv1", true));
-  });
-
-  it("approval mode switch persists the choice", async () => {
-    render(<McpSection />);
-    await waitFor(() => expect(approvalGetMock).toHaveBeenCalled());
-    // 默认 auto：提示语说明调用直接执行
-    await waitFor(() => expect(screen.getByTestId("approval-mode-row")).toBeTruthy());
-    fireEvent.click(screen.getByText("每次询问"));
-    await waitFor(() => expect(approvalSetMock).toHaveBeenCalledWith("ask"));
-    await waitFor(() =>
-      expect(screen.getByTestId("approval-mode-row").parentElement?.textContent).toContain(
-        "30 秒不回应视为拒绝"
-      )
-    );
   });
 
   it("form shows the privacy hint for http transport", async () => {
@@ -172,7 +173,7 @@ describe("McpSection", () => {
     expect(screen.getByText(/已导入 1 条/)).toBeTruthy();
   });
 
-  it("expanding a server row lists its cached tools", async () => {
+  it("expanding a server row lists its cached tools with access badges", async () => {
     render(<McpSection />);
     await waitFor(() => screen.getByText("文件检索"));
     // 收起态不显示工具
@@ -183,6 +184,9 @@ describe("McpSection", () => {
     expect(toolsMock).toHaveBeenCalledWith("srv1");
     expect(screen.getByText("read_file")).toBeTruthy();
     expect(screen.getByText("读文件")).toBeTruthy();
+    const badges = screen.getAllByTestId("tool-access-badge");
+    expect(badges.length).toBeGreaterThanOrEqual(2);
+    expect(badges[0].getAttribute("data-access")).toBe("read");
     // 再点一次收起
     fireEvent.click(screen.getByText("文件检索"));
     await waitFor(() => expect(screen.queryByTestId("tools-of-srv1")).toBeNull());
@@ -190,15 +194,6 @@ describe("McpSection", () => {
     fireEvent.click(screen.getByText("文件检索"));
     await waitFor(() => expect(screen.getByTestId("tools-of-srv1")).toBeTruthy());
     expect(toolsMock).toHaveBeenCalledTimes(1);
-  });
-
-  it("renders the built-in tools card from the registry", async () => {
-    render(<McpSection />);
-    await waitFor(() => expect(screen.getByTestId("builtin-tools-card")).toBeTruthy());
-    expect(screen.getByTestId("builtin-row")).toBeTruthy();
-    expect(screen.getByText("memory_search")).toBeTruthy();
-    expect(screen.getByText(/自动挂载/)).toBeTruthy();
-    expect(builtinMock).toHaveBeenCalled();
   });
 });
 
@@ -234,9 +229,83 @@ describe("SkillSection + ToolCallRecords (light checks)", () => {
     };
     recordsMock.mockResolvedValue([rec]);
     render(<ToolCallRecords />);
-    await waitFor(() => expect(screen.getByText("mcp:weather")).toBeTruthy());
-    fireEvent.click(screen.getByText("mcp:weather"));
+    await waitFor(() => expect(screen.getByText("weather")).toBeTruthy());
+    fireEvent.click(screen.getByText("weather"));
     expect(screen.getByText(/auto_allowed/)).toBeTruthy();
     expect(screen.getByText(/level0:weather/)).toBeTruthy();
+  });
+});
+
+describe("PermissionTiersCard + AuditTimeline", () => {
+  it("shows tier legend, approval switch, and builtin access rows", async () => {
+    const { PermissionTiersCard } = await import("@/components/agent/PermissionTiersCard");
+    render(<PermissionTiersCard />);
+    await waitFor(() => expect(screen.getByTestId("permission-tiers-card")).toBeTruthy());
+    expect(screen.getByTestId("access-tier-legend")).toBeTruthy();
+    await waitFor(() => expect(builtinMock).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByText("fs_write")).toBeTruthy());
+    const askRow = screen.getByText("fs_write").closest("[data-testid=builtin-access-row]");
+    expect(askRow?.querySelector('[data-access="ask"]')).toBeTruthy();
+
+    await waitFor(() => expect(approvalGetMock).toHaveBeenCalled());
+    fireEvent.click(screen.getByText("每次询问"));
+    await waitFor(() => expect(approvalSetMock).toHaveBeenCalledWith("ask"));
+    await waitFor(() =>
+      expect(screen.getByTestId("approval-mode-hint").textContent).toContain("30 秒不回应视为拒绝")
+    );
+  });
+
+  it("full audit timeline filters by outcome and search", async () => {
+    const { AuditTimeline } = await import("@/components/agent/AuditTimeline");
+    const rows: ToolCallRecord[] = [
+      {
+        id: 1,
+        ts: "2026-11-20T10:30:00Z",
+        tool: "mcp",
+        action: "weather",
+        outcome: "ok",
+        resultStatus: "auto_allowed",
+        paramsSummary: '{"city":"杭州"}',
+        remote: false,
+        durationMs: 42,
+      },
+      {
+        id: 2,
+        ts: "2026-11-20T11:00:00Z",
+        tool: "builtin",
+        action: "fs_write",
+        outcome: "denied",
+        resultStatus: "denied_by_gate",
+        paramsSummary: '{"path":"/tmp/a"}',
+        remote: false,
+        durationMs: 5,
+      },
+      {
+        id: 3,
+        ts: "2026-11-20T11:05:00Z",
+        tool: "mcp",
+        action: "remote_fetch",
+        outcome: "ok",
+        resultStatus: "auto_allowed_remote",
+        paramsSummary: "{}",
+        remote: true,
+        durationMs: 120,
+      },
+    ];
+    recordsMock.mockResolvedValue(rows);
+    render(<AuditTimeline variant="full" />);
+    await waitFor(() => expect(screen.getByTestId("audit-timeline")).toBeTruthy());
+    expect(recordsMock).toHaveBeenCalledWith(200);
+    expect(screen.getByTestId("audit-count").textContent).toContain("3 / 3");
+
+    fireEvent.change(screen.getByLabelText("按结果筛选"), { target: { value: "denied" } });
+    expect(screen.getByTestId("audit-count").textContent).toContain("1 / 3");
+    expect(screen.getByText("fs_write")).toBeTruthy();
+    expect(screen.queryByText("weather")).toBeNull();
+
+    fireEvent.change(screen.getByLabelText("按结果筛选"), { target: { value: "all" } });
+    fireEvent.change(screen.getByLabelText("搜索审计记录"), { target: { value: "remote_fetch" } });
+    expect(screen.getByTestId("audit-count").textContent).toContain("1 / 3");
+    expect(screen.getByText("remote_fetch")).toBeTruthy();
   });
 });

@@ -467,6 +467,8 @@ export interface ToolDescriptor {
   detail: string;
   kind: "mcp" | "skill" | "builtin";
   remote: boolean;
+  /** 权限档：read | ask | forbidden（缺省按 read）。 */
+  access?: "read" | "ask" | "forbidden";
 }
 
 export interface McpServerRow {

@@ -3,10 +3,8 @@
 // MCP server 管理卡（spec-s6 §1）：列表 + 添加/编辑弹窗 + 启停 + 测试连接。
 // http 传输强制显示隐私提示（plan v0.4 D12）。
 import { useCallback, useEffect, useState } from "react";
+import { ToolAccessBadge } from "@/components/agent/ToolAccessBadge";
 import {
-  agentApprovalGet,
-  agentApprovalSet,
-  builtinToolsList,
   humanizeAgentError,
   mcpDiscoverImport,
   mcpDiscoverScan,
@@ -32,9 +30,6 @@ export function McpSection() {
   /** 展开时懒加载的工具清单缓存（id → descriptors），一次拉取终身复用。 */
   const [tools, setTools] = useState<Record<string, ToolDescriptor[]>>({});
   const [toolsLoading, setToolsLoading] = useState(false);
-  /** 内置工具（随版本内置，无启停）。 */
-  const [builtins, setBuiltins] = useState<ToolDescriptor[]>([]);
-  const [approval, setApproval] = useState<"auto" | "ask">("auto");
   // 本机扫描（spec-s2 §6）
   const [scanOpen, setScanOpen] = useState(false);
   const [scanRows, setScanRows] = useState<DiscoveredServer[]>([]);
@@ -54,12 +49,6 @@ export function McpSection() {
 
   useEffect(() => {
     void refresh();
-    void agentApprovalGet()
-      .then(setApproval)
-      .catch(() => setApproval("auto"));
-    void builtinToolsList()
-      .then(setBuiltins)
-      .catch(() => setBuiltins([]));
   }, [refresh]);
 
   // 展开 server 行时懒拉工具清单（测试连接成功也会展开 → 这里统一兜住）。
@@ -74,17 +63,6 @@ export function McpSection() {
       .catch(() => setTools((prev) => ({ ...prev, [expanded]: [] })))
       .finally(() => setToolsLoading(false));
   }, [expanded, tools, toolsLoading]);
-
-  async function switchApproval(next: "auto" | "ask") {
-    setApproval(next);
-    try {
-      await agentApprovalSet(next);
-      setError(null);
-    } catch (e) {
-      setApproval(next === "ask" ? "auto" : "ask"); // 回滚到实际值
-      setError(humanizeAgentError(e));
-    }
-  }
 
   async function toggle(id: string, enable: boolean) {
     setBusyId(id);
@@ -165,23 +143,6 @@ export function McpSection() {
     <div className="card agent-card">
       <p className="card-title">MCP 工具</p>
       {error && <p className="model-error">{error}</p>}
-      <div className="agent-approval" data-testid="approval-mode-row">
-        <span className="hint-line">调用确认</span>
-        <button
-          type="button"
-          className={approval === "auto" ? "btn" : "btn-ghost"}
-          onClick={() => void switchApproval("auto")}
-        >
-          自动放行
-        </button>
-        <button
-          type="button"
-          className={approval === "ask" ? "btn" : "btn-ghost"}
-          onClick={() => void switchApproval("ask")}
-        >
-          每次询问
-        </button>
-      </div>
       {rows.length === 0 ? (
         <p className="hint-line">还没有接 MCP server。接上后盆栽可以在对话里调用它的工具。</p>
       ) : (
@@ -237,6 +198,7 @@ export function McpSection() {
                   {toolsLoading && !tools[r.id] && <p className="hint-line">拉取工具清单…</p>}
                   {tools[r.id]?.map((t) => (
                     <div key={t.name} className="agent-tool-line">
+                      <ToolAccessBadge access={t.access} compact />
                       <span className="agent-tool-name">{t.name}</span>
                       <span className="agent-tool-summary">{t.summary || "—"}</span>
                     </div>
@@ -259,10 +221,8 @@ export function McpSection() {
         </button>
       </div>
       <p className="hint-line" style={{ marginTop: 8 }}>
-        支持 stdio（本机子进程）与 Streamable HTTP（远程）两种传输。新接入一律默认停用，手动启用后生效；
-        {approval === "ask"
-          ? "当前每次调用都会先弹确认卡，30 秒不回应视为拒绝。"
-          : "当前调用直接执行（可在上方切到「每次询问」）。"}
+        支持 stdio（本机子进程）与 Streamable HTTP（远程）两种传输。新接入一律默认停用，手动启用后生效。
+        权限分级与调用确认在「设置 · 权限与工具」。
       </p>
 
       {form !== null && (
@@ -361,31 +321,6 @@ export function McpSection() {
           </div>
         </div>
       )}
-    </div>
-
-    <div className="card agent-card" data-testid="builtin-tools-card">
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-        <p className="card-title" style={{ marginBottom: 0 }}>内置工具</p>
-        <span className="hint-line">{builtins.length} 个 · 随版本内置</span>
-      </div>
-      {builtins.length === 0 ? (
-        <p className="hint-line" style={{ marginTop: 8 }}>没有内置工具。</p>
-      ) : (
-        <div className="agent-list" style={{ marginTop: 8 }}>
-          {builtins.map((t) => (
-            <div key={t.name} className="agent-row" data-testid="builtin-row">
-              <div className="agent-row-main">
-                <span className="agent-transport" data-transport="builtin">内置</span>
-                <span className="agent-name" style={{ fontFamily: "var(--font-mono, monospace)" }}>{t.name}</span>
-                <span className="hint-line">{t.summary}</span>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-      <p className="hint-line" style={{ marginTop: 8 }}>
-        内置工具随 app 版本发布，不走 MCP 连接、不可停用；对话中出现召回信号（如「总结一下我 18 号说了啥」）时自动挂载，数据不出设备。
-      </p>
     </div>
     </>
   );
