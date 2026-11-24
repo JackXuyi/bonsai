@@ -113,7 +113,7 @@ export function FileCard({ active }: { active: boolean }) {
       <div className="card-head">
         <div className="card-titles">
           <p className="card-title">文件</p>
-          <p className="card-sub">只在授权目录内找/读/写 · 删除永远不做</p>
+          <p className="card-sub">只在授权目录内找/读/写 · 可读 PDF 文本层 · 删除永远不做</p>
         </div>
         <label className="tgl tgl-master" title="总开关">
           <span className="master-label">总开关</span>
@@ -176,7 +176,8 @@ export function FileCard({ active }: { active: boolean }) {
           </span>
         </label>
         <p className="row-label">
-          关闭后：模型只知道文件存在，正文只在界面里看，不出这台电脑
+          关闭后：模型只知道文件存在，正文只在界面里看，不出这台电脑。可读文本与
+          PDF 文本层；扫描件不支持 OCR
         </p>
       </div>
 

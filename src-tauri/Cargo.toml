@@ -44,6 +44,8 @@ rfd = "0.15"
 # 重定向控制走 redirects(0) 手动逐跳校验（plan §3.2 不变量 4）。
 url = "2"
 scraper = "0.29"
+# G-05 增量：PDF 文本层抽取（docs/zh/plan-pdf-read/v1）。纯 Rust，无 pdfium。
+pdf-extract = "0.12"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 active-win-pos-rs = "0.9"

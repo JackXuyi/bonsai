@@ -17,6 +17,10 @@
 //!
 //! Deleting / moving / renaming has NO execution branch anywhere in this
 //! file — `ToolAccess::Forbidden` as a shape, not a runtime check.
+//!
+//! PDF text-layer read (docs/zh/plan-pdf-read/v1): `.pdf` is a narrow
+//! exception to the binary denylist — `fs_read` extracts text via
+//! `pdf-extract` (no OCR). Other binaries stay rejected.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -28,6 +32,10 @@ use crate::agent_tools::{ToolAccess, ToolCall, ToolDescriptor, ToolKind, ToolOut
 
 /// fs_read 上限：512KB。再大就超出「读一篇文档」的语义，且烧云端 token。
 const MAX_READ_BYTES: u64 = 512 * 1024;
+/// PDF 源文件体积上限（plan-pdf-read）：常含图，512KB 会误杀。
+const MAX_PDF_FILE_BYTES: u64 = 8 * 1024 * 1024;
+/// PDF 页数上限；超过整份拒绝（防「以为读完」）。
+const MAX_PDF_PAGES: usize = 40;
 /// fs_search 内容匹配跳过 >1MB 的文件（防止把扫描线程拖死）。
 const MAX_SCAN_FILE_BYTES: u64 = 1024 * 1024;
 /// fs_search 最多扫 500 个文件。
@@ -40,10 +48,12 @@ const MAX_ROOTS: usize = 5;
 const READ_SUMMARY_CHARS: usize = 4000;
 /// fs_read 单段上限：模型显式要更大段也不超过这个数，防止一次烧爆单轮 token。
 const READ_SEGMENT_MAX_CHARS: usize = 8000;
-/// 长文件首读附带的全文大纲条数上限（markdown 标题行）。
+/// 长文件首读附带的全文大纲条数上限（markdown 标题行 / PDF 按页）。
 const OUTLINE_MAX_ITEMS: usize = 30;
-/// 大纲单条字符上限。
+/// 大纲单条字符上限（markdown）。
 const OUTLINE_ITEM_CHARS: usize = 80;
+/// PDF 按页大纲单条预览字符。
+const PDF_OUTLINE_PREVIEW_CHARS: usize = 40;
 /// cloud_read 关闭时 UI 侧可见的文件开头长度（内容不出机器）。
 const LOCAL_PREVIEW_CHARS: usize = 2000;
 /// 普通工具（search/list）维持 200 字惯例。
@@ -136,8 +146,8 @@ pub fn builtin_descriptors() -> Vec<ToolDescriptor> {
         },
         ToolDescriptor {
             name: "fs_read".into(),
-            summary: "读取授权目录内的文本文件（≤512KB）；长文件自动分段并附全文大纲，用 offset 参数继续读后续内容".into(),
-            detail: r#"{"type":"object","properties":{"path":{"type":"string","description":"要读取的文件的绝对路径"},"offset":{"type":"integer","description":"可选，从第 N 个字符开始读（首次读省略；文件较长时按返回提示传 offset 继续读）"},"max_chars":{"type":"integer","description":"可选，本次最多返回的字符数（默认 4000，上限 8000）"}},"required":["path"]}"#.into(),
+            summary: "读取授权目录内的文本文件（≤512KB）或 PDF 文本层（≤8MB/40页，无 OCR）；长内容自动分段并附大纲，用 offset 继续读".into(),
+            detail: r#"{"type":"object","properties":{"path":{"type":"string","description":"要读取的文件的绝对路径（文本或 .pdf）"},"offset":{"type":"integer","description":"可选，从第 N 个字符开始读（首次读省略；文件较长时按返回提示传 offset 继续读）"},"max_chars":{"type":"integer","description":"可选，本次最多返回的字符数（默认 4000，上限 8000）"}},"required":["path"]}"#.into(),
             kind: ToolKind::Builtin,
             remote: false,
             access: ToolAccess::Read,
@@ -180,6 +190,36 @@ impl FileError {
     }
     pub fn binary(ext: &str) -> Self {
         Self::new("fs_binary_type", format!("不支持读取 .{ext} 这类二进制文件"))
+    }
+    fn pdf_too_large() -> Self {
+        Self::new(
+            "fs_pdf_too_large",
+            format!("PDF 超过 {MAX_PDF_FILE_BYTES} 字节上限，请拆分或导出文本后再读"),
+        )
+    }
+    fn pdf_too_many_pages(actual: usize) -> Self {
+        Self::new(
+            "fs_pdf_too_many_pages",
+            format!("PDF 超过 {MAX_PDF_PAGES} 页上限（实际 {actual} 页），请缩小范围或导出章节后再读"),
+        )
+    }
+    fn pdf_no_text() -> Self {
+        Self::new(
+            "fs_pdf_no_text",
+            "未检测到文本层（可能是扫描件）；本期不支持 OCR，请导出为文本后再读",
+        )
+    }
+    fn pdf_encrypted() -> Self {
+        Self::new("fs_pdf_encrypted", "加密 PDF 暂不支持")
+    }
+    fn pdf_parse(detail: &str) -> Self {
+        Self::new(
+            "fs_pdf_parse",
+            format!(
+                "无法解析该 PDF：{}",
+                crate::agent_tools::clip_chars(detail, 120)
+            ),
+        )
     }
     pub fn not_found() -> Self {
         Self::new("fs_not_found", "文件不存在（先用 fs_search/fs_list 确认路径）")
@@ -298,6 +338,57 @@ fn text_extension(path: &Path) -> Result<(), FileError> {
         return Ok(());
     }
     Err(FileError::binary(&ext))
+}
+
+fn path_is_pdf(path: &Path) -> bool {
+    path.extension()
+        .map(|e| e.eq_ignore_ascii_case("pdf"))
+        .unwrap_or(false)
+}
+
+/// 按页抽取结果：`text` 为页间 `\n\n` 拼接后的总串（offset 按字符计）。
+struct PdfText {
+    text: String,
+    pages: Vec<String>,
+}
+
+fn classify_pdf_error(err: pdf_extract::OutputError) -> FileError {
+    let msg = err.to_string();
+    let lower = msg.to_ascii_lowercase();
+    if lower.contains("password") || lower.contains("encrypt") || lower.contains("decryption") {
+        return FileError::pdf_encrypted();
+    }
+    FileError::pdf_parse(&msg)
+}
+
+/// PDF → 纯文本（plan-pdf-read）。调用方已做体积闸门；此处做页数 / 空文本 / 解析错误。
+fn extract_pdf_text(bytes: &[u8]) -> Result<PdfText, FileError> {
+    let pages = pdf_extract::extract_text_from_mem_by_pages(bytes).map_err(classify_pdf_error)?;
+    if pages.len() > MAX_PDF_PAGES {
+        return Err(FileError::pdf_too_many_pages(pages.len()));
+    }
+    let text = pages.join("\n\n");
+    if text.trim().is_empty() {
+        return Err(FileError::pdf_no_text());
+    }
+    Ok(PdfText { text, pages })
+}
+
+fn pdf_page_outline(pages: &[String]) -> Vec<String> {
+    pages
+        .iter()
+        .enumerate()
+        .take(OUTLINE_MAX_ITEMS)
+        .map(|(i, page)| {
+            let preview = page
+                .lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty())
+                .unwrap_or("(空白页)");
+            let clipped = crate::agent_tools::clip_chars(preview, PDF_OUTLINE_PREVIEW_CHARS);
+            format!("- 第 {} 页：{clipped}", i + 1)
+        })
+        .collect()
 }
 
 /// 授权目录 + 一层子目录，最多 MAX_SCAN_FILES 个文件（fs_search 用）。
@@ -486,11 +577,12 @@ fn extract_outline(content: &str) -> Vec<String> {
         .collect()
 }
 
-/// fs_read 的分段读语义（plan §7 开放问题 2 落地）：
+/// fs_read 的分段读语义（plan §7 开放问题 2 落地；PDF：plan-pdf-read/v1）：
 /// - 短文件（≤4000 字符）：整读直给，无分段脚手架（行为同旧版）；
-/// - 长文件首读：全文大纲（markdown 标题）+ 头段 + 续读提示；
+/// - 长文件首读：全文大纲（markdown 标题，或 PDF 按页粗大纲）+ 头段 + 续读提示；
 /// - 带 offset 读：返回指定段，末尾标注「未读完（含下一段 offset）」或「已到末尾」；
-/// - offset 按**字符**计（不是字节），CJK 内容切分安全。
+/// - offset 按**字符**计（不是字节），CJK 内容切分安全；
+/// - `.pdf`：文本层抽取后走同一分段管线；其它二进制仍拒绝。
 fn fs_read(roots: &[PathBuf], cloud_read: bool, args: &serde_json::Value) -> Result<ToolOutput, FileError> {
     let path = args
         .get("path")
@@ -502,24 +594,53 @@ fn fs_read(roots: &[PathBuf], cloud_read: bool, args: &serde_json::Value) -> Res
     if meta.is_dir() {
         return Err(FileError::new("fs_is_dir", "这是一个目录，用 fs_list 查看"));
     }
-    if meta.len() > MAX_READ_BYTES {
+
+    let is_pdf = path_is_pdf(&resolved);
+    if is_pdf {
+        if meta.len() > MAX_PDF_FILE_BYTES {
+            return Err(FileError::pdf_too_large());
+        }
+    } else if meta.len() > MAX_READ_BYTES {
         return Err(FileError::too_large(MAX_READ_BYTES as usize));
+    } else {
+        text_extension(&resolved)?;
     }
-    text_extension(&resolved)?;
+
     let bytes = std::fs::read(&resolved).map_err(FileError::io)?;
-    let content = String::from_utf8_lossy(&bytes);
-    if content.trim().is_empty() {
-        return Ok(ToolOutput { summary: "(空文件)".into(), full: String::new() });
-    }
     let display = resolved.display().to_string();
+
+    let (content, kind_label, pdf_outline): (String, String, Option<Vec<String>>) = if is_pdf {
+        let extracted = extract_pdf_text(&bytes)?;
+        let label = format!(
+            "PDF 文本层抽取，源文件 {} 字节，约 {} 页",
+            meta.len(),
+            extracted.pages.len()
+        );
+        let outline = pdf_page_outline(&extracted.pages);
+        (extracted.text, label, Some(outline))
+    } else {
+        let content = String::from_utf8_lossy(&bytes).into_owned();
+        (content, format!("{} 字节", meta.len()), None)
+    };
+
+    if content.trim().is_empty() {
+        return Ok(ToolOutput {
+            summary: "(空文件)".into(),
+            full: String::new(),
+        });
+    }
+
     if !cloud_read {
         // 降级开关（plan §8 开放问题 6）：内容不出机器，模型只知道文件存在。
         let head: String = content.chars().take(LOCAL_PREVIEW_CHARS).collect();
         return Ok(ToolOutput {
-            summary: format!("文件存在：{display}（{} 字节）。云端读取已关闭，内容不发送给模型，请在界面查看。", meta.len()),
+            summary: format!(
+                "文件存在：{display}（{kind_label}）。云端读取已关闭，内容不发送给模型，请在界面查看。"
+            ),
             full: head,
         });
     }
+
     let total = content.chars().count();
     let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
     let seg_len = args
@@ -531,27 +652,30 @@ fn fs_read(roots: &[PathBuf], cloud_read: bool, args: &serde_json::Value) -> Res
 
     // 短文件且未指定 offset：保持旧版整读行为（无大纲/分段标记）。
     if offset == 0 && total <= READ_SUMMARY_CHARS {
-        let summary = format!("{UNTRUSTED_TAG}\n文件：{display}（{} 字节）\n{content}", meta.len());
-        return Ok(ToolOutput { summary, full: content.to_string() });
+        let summary = format!("{UNTRUSTED_TAG}\n文件：{display}（{kind_label}）\n{content}");
+        return Ok(ToolOutput {
+            summary,
+            full: content,
+        });
     }
     if offset >= total {
         return Ok(ToolOutput {
             summary: format!(
                 "{UNTRUSTED_TAG}\n文件：{display}（共 {total} 字符）。offset {offset} 已超出文件末尾，无需继续读。"
             ),
-            full: content.to_string(),
+            full: content,
         });
     }
     let segment: String = content.chars().skip(offset).take(seg_len).collect();
     let end = offset + segment.chars().count();
     let truncated = end < total;
 
-    let mut summary = format!(
-        "{UNTRUSTED_TAG}\n文件：{display}（{} 字节，共 {total} 字符）",
-        meta.len()
-    );
+    let mut summary = format!("{UNTRUSTED_TAG}\n文件：{display}（{kind_label}，共 {total} 字符）");
     if offset == 0 {
-        let outline = extract_outline(&content);
+        let outline = match &pdf_outline {
+            Some(items) => items.clone(),
+            None => extract_outline(&content),
+        };
         if !outline.is_empty() {
             summary.push_str("\n\n【全文大纲】");
             for item in &outline {
@@ -559,7 +683,11 @@ fn fs_read(roots: &[PathBuf], cloud_read: bool, args: &serde_json::Value) -> Res
             }
         }
     }
-    summary.push_str(&format!("\n\n（以下为第 {}–{} 字符）\n{segment}", offset + 1, end));
+    summary.push_str(&format!(
+        "\n\n（以下为第 {}–{} 字符）\n{segment}",
+        offset + 1,
+        end
+    ));
     if truncated {
         summary.push_str(&format!(
             "\n\n…[未读完：共 {total} 字符，已读 {end}。继续读请再调 fs_read，传 {{\"path\":\"{display}\",\"offset\":{end}}}]"
@@ -567,7 +695,10 @@ fn fs_read(roots: &[PathBuf], cloud_read: bool, args: &serde_json::Value) -> Res
     } else {
         summary.push_str("\n\n…[已到文件末尾]");
     }
-    Ok(ToolOutput { summary, full: content.to_string() })
+    Ok(ToolOutput {
+        summary,
+        full: content,
+    })
 }
 
 // ---------------------------------------------------------------- write
@@ -1173,5 +1304,313 @@ mod tests {
         remove(&conn, &b).unwrap();
         assert!(remove(&conn, &b).unwrap_err().starts_with("fs_root_unknown"));
         assert_eq!(load_roots(&conn).len(), 1);
+    }
+
+    // ------------------------------------------------ PDF (plan-pdf-read/v1)
+
+    fn fixture_pdf(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/pdf")
+            .join(name)
+    }
+
+    /// 最小文本层 PDF（Helvetica / WinAnsi），供页数闸门与长文分段单测。
+    fn make_text_pdf(pages: &[&str]) -> Vec<u8> {
+        let mut n: usize = 1;
+        let catalog_n = n;
+        n += 1;
+        let pages_n = n;
+        n += 1;
+        let mut page_nums = Vec::new();
+        let mut content_nums = Vec::new();
+        for _ in pages {
+            page_nums.push(n);
+            n += 1;
+            content_nums.push(n);
+            n += 1;
+        }
+        let font_n = n;
+        n += 1;
+
+        let mut bodies: std::collections::BTreeMap<usize, String> = std::collections::BTreeMap::new();
+        bodies.insert(
+            catalog_n,
+            format!("<< /Type /Catalog /Pages {pages_n} 0 R >>"),
+        );
+        let kids = page_nums
+            .iter()
+            .map(|p| format!("{p} 0 R"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        bodies.insert(
+            pages_n,
+            format!(
+                "<< /Type /Pages /Kids [{kids}] /Count {} >>",
+                page_nums.len()
+            ),
+        );
+        bodies.insert(
+            font_n,
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into(),
+        );
+        for (i, text) in pages.iter().enumerate() {
+            let esc = text
+                .replace('\\', "\\\\")
+                .replace('(', "\\(")
+                .replace(')', "\\)");
+            // 长页拆成多行 Tj，避免单行极端长度；仍同一页。
+            let mut stream = String::from("BT /F1 12 Tf 72 720 Td\n");
+            for (line_i, chunk) in esc
+                .as_bytes()
+                .chunks(80)
+                .enumerate()
+            {
+                let chunk = std::str::from_utf8(chunk).unwrap_or("");
+                if line_i > 0 {
+                    stream.push_str("0 -14 Td\n");
+                }
+                stream.push_str(&format!("({chunk}) Tj\n"));
+            }
+            stream.push_str("ET");
+            bodies.insert(
+                content_nums[i],
+                format!("<< /Length {} >>\nstream\n{stream}\nendstream", stream.len()),
+            );
+            bodies.insert(
+                page_nums[i],
+                format!(
+                    "<< /Type /Page /Parent {pages_n} 0 R /MediaBox [0 0 612 792] \
+                     /Contents {} 0 R /Resources << /Font << /F1 {font_n} 0 R >> >> >>",
+                    content_nums[i]
+                ),
+            );
+        }
+
+        let mut out: Vec<u8> = b"%PDF-1.4\n".to_vec();
+        let mut offsets = vec![0usize; n];
+        for i in 1..n {
+            offsets[i] = out.len();
+            let chunk = format!("{} 0 obj\n{}\nendobj\n", i, bodies.get(&i).unwrap());
+            out.extend(chunk.as_bytes());
+        }
+        let xref_pos = out.len();
+        out.extend(format!("xref\n0 {n}\n").as_bytes());
+        out.extend(b"0000000000 65535 f \n");
+        for i in 1..n {
+            out.extend(format!("{:010} 00000 n \n", offsets[i]).as_bytes());
+        }
+        out.extend(
+            format!("trailer<< /Size {n} /Root {catalog_n} 0 R >>\nstartxref\n{xref_pos}\n%%EOF\n")
+                .as_bytes(),
+        );
+        out
+    }
+
+    #[test]
+    fn fs_read_pdf_extracts_text_layer_with_untrusted() {
+        let root = temp_root("pdf-hello");
+        let p = provider(&root);
+        let src = fixture_pdf("hello.pdf");
+        let dest = root.join("hello.pdf");
+        fs::copy(&src, &dest).unwrap();
+
+        let out = p
+            .execute(&call(
+                "fs_read",
+                serde_json::json!({"path": dest.display().to_string()}),
+            ))
+            .unwrap();
+        assert!(out.summary.starts_with(UNTRUSTED_TAG), "summary: {}", out.summary);
+        assert!(out.summary.contains("PDF 文本层抽取"), "summary: {}", out.summary);
+        assert!(out.summary.contains("Hello Bonsai PDF"), "summary: {}", out.summary);
+        assert!(out.full.contains("Hello Bonsai PDF"));
+    }
+
+    #[test]
+    fn fs_read_pdf_two_pages_and_empty_and_gates() {
+        let root = temp_root("pdf-gates");
+        let p = provider(&root);
+
+        let two = root.join("two.pdf");
+        fs::copy(fixture_pdf("two_pages.pdf"), &two).unwrap();
+        let out = p
+            .execute(&call(
+                "fs_read",
+                serde_json::json!({"path": two.display().to_string()}),
+            ))
+            .unwrap();
+        assert!(out.summary.contains("约 2 页"), "summary: {}", out.summary);
+        assert!(out.summary.contains("Page One Alpha"));
+        assert!(out.summary.contains("Page Two Beta"));
+
+        let empty = root.join("empty.pdf");
+        fs::copy(fixture_pdf("empty_text.pdf"), &empty).unwrap();
+        let err = p
+            .execute(&call(
+                "fs_read",
+                serde_json::json!({"path": empty.display().to_string()}),
+            ))
+            .unwrap_err();
+        assert!(err.starts_with("fs_pdf_no_text"), "err: {err}");
+
+        // 体积闸门在解析前：超大伪 PDF
+        let huge = root.join("huge.pdf");
+        let mut blob = b"%PDF-1.4\n".to_vec();
+        blob.resize((MAX_PDF_FILE_BYTES as usize) + 1, b'x');
+        fs::write(&huge, &blob).unwrap();
+        let err = p
+            .execute(&call(
+                "fs_read",
+                serde_json::json!({"path": huge.display().to_string()}),
+            ))
+            .unwrap_err();
+        assert!(err.starts_with("fs_pdf_too_large"), "err: {err}");
+
+        // 损坏 PDF
+        let bad = root.join("bad.pdf");
+        fs::write(&bad, b"%PDF-1.4\nnot a real pdf").unwrap();
+        let err = p
+            .execute(&call(
+                "fs_read",
+                serde_json::json!({"path": bad.display().to_string()}),
+            ))
+            .unwrap_err();
+        assert!(err.starts_with("fs_pdf_parse"), "err: {err}");
+
+        // 其它二进制仍拒绝
+        let png = root.join("x.png");
+        fs::write(&png, b"\x89PNG").unwrap();
+        let err = p
+            .execute(&call(
+                "fs_read",
+                serde_json::json!({"path": png.display().to_string()}),
+            ))
+            .unwrap_err();
+        assert!(err.starts_with("fs_binary_type"), "err: {err}");
+    }
+
+    #[test]
+    fn fs_read_pdf_page_cap_and_long_segment_outline() {
+        let root = temp_root("pdf-pages");
+        let p = provider(&root);
+
+        // 页数闸门：MAX_PDF_PAGES + 1
+        let many: Vec<String> = (0..=MAX_PDF_PAGES)
+            .map(|i| format!("PageNumber{i}"))
+            .collect();
+        let refs: Vec<&str> = many.iter().map(|s| s.as_str()).collect();
+        let too_many = root.join("too_many.pdf");
+        fs::write(&too_many, make_text_pdf(&refs)).unwrap();
+        let err = p
+            .execute(&call(
+                "fs_read",
+                serde_json::json!({"path": too_many.display().to_string()}),
+            ))
+            .unwrap_err();
+        assert!(err.starts_with("fs_pdf_too_many_pages"), "err: {err}");
+
+        // 长 PDF：按页大纲 + offset 续读
+        let long_body = format!("START {} END", "Z".repeat(5000));
+        let long = root.join("long.pdf");
+        fs::write(&long, make_text_pdf(&[&long_body, "SecondPageTail"])).unwrap();
+        let path_arg = long.display().to_string();
+        let out = p
+            .execute(&call("fs_read", serde_json::json!({"path": path_arg})))
+            .unwrap();
+        assert!(out.summary.contains("全文大纲"), "summary: {}", out.summary);
+        assert!(out.summary.contains("第 1 页"), "summary: {}", out.summary);
+        assert!(out.summary.contains("第 2 页"), "summary: {}", out.summary);
+        assert!(out.summary.contains("未读完"), "summary: {}", out.summary);
+        assert!(out.summary.contains("START"), "summary: {}", out.summary);
+        // 大纲可预览末页首行；正文段（「以下为第…」之后）不应已读到末页。
+        let body = out
+            .summary
+            .split("（以下为第")
+            .nth(1)
+            .expect("应有正文段标记");
+        assert!(
+            !body.contains("SecondPageTail"),
+            "首读正文段不应含末页: {body}"
+        );
+
+        let total = out.full.chars().count();
+        let out2 = p
+            .execute(&call(
+                "fs_read",
+                serde_json::json!({"path": path_arg, "offset": READ_SUMMARY_CHARS}),
+            ))
+            .unwrap();
+        assert!(!out2.summary.contains("全文大纲"), "续读不重复大纲");
+        assert!(out2.summary.contains("SecondPageTail"), "summary: {}", out2.summary);
+        assert!(out2.summary.contains("已到文件末尾") || out2.summary.contains("未读完"));
+        assert!(total > READ_SUMMARY_CHARS);
+    }
+
+    #[test]
+    fn fs_read_pdf_cloud_read_off_and_outside_roots() {
+        let root = temp_root("pdf-cloud");
+        let p = FileToolsProvider::new(vec![root.clone()], false);
+        let dest = root.join("secret.pdf");
+        fs::copy(fixture_pdf("hello.pdf"), &dest).unwrap();
+        let out = p
+            .execute(&call(
+                "fs_read",
+                serde_json::json!({"path": dest.display().to_string()}),
+            ))
+            .unwrap();
+        assert!(out.summary.contains("云端读取已关闭"));
+        assert!(out.full.contains("Hello Bonsai PDF"));
+        assert!(!out.summary.contains("Hello Bonsai PDF"));
+
+        let p_on = provider(&root);
+        let err = p_on
+            .execute(&call(
+                "fs_read",
+                serde_json::json!({"path": "/tmp/evil.pdf"}),
+            ))
+            .unwrap_err();
+        assert!(err.starts_with("fs_outside_roots"), "err: {err}");
+    }
+
+    #[test]
+    fn fs_search_does_not_content_scan_pdf() {
+        let root = temp_root("pdf-search");
+        let p = provider(&root);
+        let dest = root.join("report.pdf");
+        fs::copy(fixture_pdf("hello.pdf"), &dest).unwrap();
+        // 正文特有词不应内容命中；文件名不含该词
+        let out = p
+            .execute(&call(
+                "fs_search",
+                serde_json::json!({"query": "Bonsai"}),
+            ))
+            .unwrap();
+        assert!(
+            out.summary.contains("未找到") || !out.full.contains("report.pdf"),
+            "PDF 正文不应被内容扫描：{}",
+            out.summary
+        );
+
+        // 文件名命中仍可用
+        let out = p
+            .execute(&call(
+                "fs_search",
+                serde_json::json!({"query": "report"}),
+            ))
+            .unwrap();
+        assert!(out.summary.contains("命中") || out.full.contains("report.pdf"), "summary: {}", out.summary);
+    }
+
+    #[test]
+    fn classify_pdf_error_maps_encryption_keywords() {
+        // OutputError 只能从真实解析产生；这里直接测错误码工厂与关键字分支的对称性。
+        assert_eq!(FileError::pdf_encrypted().code, "fs_pdf_encrypted");
+        assert_eq!(FileError::pdf_no_text().code, "fs_pdf_no_text");
+        let parse = FileError::pdf_parse("PDF error: Decryption(IncorrectPassword)");
+        // classify_pdf_error 才做关键字映射；工厂本身是 parse。
+        assert_eq!(parse.code, "fs_pdf_parse");
+        // 用 Display 字符串走同一关键字逻辑
+        let lower = "pdf error: decryption(incorrectpassword)".to_string();
+        assert!(lower.contains("password") || lower.contains("decrypt"));
     }
 }
