@@ -4,7 +4,6 @@ use crate::memory::MemoryStore;
 use crate::persona::eval::DialogueBackend;
 
 use super::cloud_loop::{kit_task_id, tool_label};
-use super::persist::lock_conn;
 use super::trace::TraceRecorder;
 use super::types::CHAT_TEMPERATURE;
 

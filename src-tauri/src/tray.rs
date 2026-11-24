@@ -43,7 +43,7 @@ pub fn setup(app: &mut App) -> tauri::Result<()> {
                 // Drop only the done flag; answers stay for pre-filling.
                 use tauri::Manager;
                 if let Some(store) = app.try_state::<crate::memory::MemoryStore>() {
-                    if let Ok(conn) = store.inner().0.lock() {
+                    if let Ok(conn) = store.inner().write_guard() {
                         let _ = crate::memory::db::remove_setting(&conn, "onboarding_done");
                     }
                 }
@@ -130,7 +130,7 @@ fn persist_window_size(app: &AppHandle) {
         return;
     };
     if let Some(store) = app.try_state::<crate::memory::MemoryStore>() {
-        if let Ok(conn) = store.inner().0.lock() {
+        if let Ok(conn) = store.inner().write_guard() {
             let _ = crate::memory::db::set_setting(
                 &conn,
                 SIZE_SETTING,
@@ -143,7 +143,7 @@ fn persist_window_size(app: &AppHandle) {
 /// Restore target from the settings table, if any.
 fn saved_window_size(app: &AppHandle) -> Option<(u32, u32)> {
     let store = app.try_state::<crate::memory::MemoryStore>()?;
-    let conn = store.inner().0.lock().ok()?;
+    let conn = store.inner().write_guard().ok()?;
     let raw = crate::memory::db::get_setting(&conn, SIZE_SETTING).ok()??;
     parse_size_setting(&raw)
 }

@@ -629,7 +629,7 @@ pub fn weekly_report(
 
     let now = crate::memory::clock::now_local();
     let (digest, system, user) = {
-        let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+        let conn = store.inner().write_guard().map_err(|e| e.to_string())?;
         let agent = app.state::<crate::mcp_admin::AgentState>();
         let packs = crate::skill::load_engine_packs(&agent.skills_dir);
         let d = collect(&conn, SummaryKind::Weekly, now);

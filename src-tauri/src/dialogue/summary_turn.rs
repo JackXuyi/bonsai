@@ -7,7 +7,7 @@ use crate::memory::db;
 use crate::memory::MemoryStore;
 use crate::persona::eval::DialogueBackend;
 
-use super::persist::{filter_json, lock_conn, persist_model_turn};
+use super::persist::{filter_json, persist_model_turn};
 use super::trace::TraceRecorder;
 use super::types::DialogueOutcome;
 
@@ -32,7 +32,7 @@ pub(crate) fn summary_turn(
     let now = crate::memory::clock::now_local();
     rec.simple("summary_intent", "总结意图路由", kind.action(), None);
     let (digest, system, prompt) = {
-        let conn = lock_conn(store)?;
+        let conn = store.write_guard()?;
         // 「20 日的日报」这类带具体日期的请求按那个日期开窗，不是永远今天。
         let w = crate::summary::resolve_window(user_text, kind, now);
         let t_recall = std::time::Instant::now();
@@ -90,7 +90,7 @@ pub(crate) fn summary_turn(
     let filter = generation::filter(&text);
     rec.simple("filter", "反谄媚过滤", "pass", None);
     let tool = format!("builtin:{}", kind.action());
-    let conn = lock_conn(store)?;
+    let conn = store.write_guard()?;
     // 总结也记一次工具使用：调用记录页可见，周报的「用过工具」也有据。
     // detail 只放计数，不放内容。
     let _ = db::log_tool_call(

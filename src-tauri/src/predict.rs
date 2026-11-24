@@ -357,7 +357,7 @@ pub fn spawn(app: tauri::AppHandle) {
         let Some(store) = app.try_state::<crate::memory::MemoryStore>() else {
             return;
         };
-        let Ok(conn) = store.inner().0.lock() else {
+        let Ok(conn) = store.inner().write_guard() else {
             return;
         };
         let _ = db::resolve_stale_predictions(&conn);
@@ -465,7 +465,7 @@ pub fn prediction_feedback(
     if !matches!(verdict.as_str(), "hit" | "miss" | "shut_up") {
         return Err("verdict must be hit | miss | shut_up".into());
     }
-    let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+    let conn = store.inner().write_guard().map_err(|e| e.to_string())?;
     apply_feedback(&conn, id, &verdict).map_err(|e| e.to_string())
 }
 
@@ -474,8 +474,10 @@ pub fn prediction_feedback(
 pub fn prediction_stats(
     store: tauri::State<'_, crate::memory::MemoryStore>,
 ) -> Result<db::PredictionStats, String> {
-    let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
-    db::prediction_stats(&conn).map_err(|e| e.to_string())
+    store
+        .inner()
+        .with_read(|conn| db::prediction_stats(conn))
+        .map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------- tests

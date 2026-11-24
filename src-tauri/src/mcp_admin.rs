@@ -326,7 +326,7 @@ fn connect_and_cache(conn: &Connection, row: &RawRow) -> Result<(Arc<McpClient>,
 /// number of servers successfully reconnected.
 pub fn reconnect_enabled_servers(agent: &AgentState, store: &crate::memory::MemoryStore) -> usize {
     let rows: Vec<RawRow> = {
-        let conn = match store.0.lock() {
+        let conn = match store.write_guard() {
             Ok(c) => c,
             Err(_) => return 0,
         };
@@ -367,7 +367,7 @@ pub fn reconnect_enabled_servers(agent: &AgentState, store: &crate::memory::Memo
             }
         };
         {
-            let conn = match store.0.lock() {
+            let conn = match store.write_guard() {
                 Ok(c) => c,
                 Err(_) => continue,
             };
@@ -660,7 +660,7 @@ pub fn execute_audited(
         }
     }
     let result = if provider.needs_conn() {
-        let conn = store.0.lock().map_err(|_| "store_poisoned".to_string())?;
+        let conn = store.write_guard().map_err(|_| "store_poisoned".to_string())?;
         provider.execute_with_conn(&conn, &call)
     } else {
         provider.execute(&call)
@@ -731,7 +731,7 @@ fn audit_log(
     duration_ms: Option<i64>,
     task_id: Option<&str>,
 ) {
-    let Ok(conn) = store.0.lock() else {
+    let Ok(conn) = store.write_guard() else {
         log::warn!("audit_log: store lock poisoned — row dropped");
         return;
     };
@@ -976,7 +976,7 @@ impl ApprovalGate for AskFirstGate {
 fn now_conn<'a>(
     store: &'a tauri::State<'_, crate::memory::MemoryStore>,
 ) -> Result<std::sync::MutexGuard<'a, Connection>, String> {
-    store.inner().0.lock().map_err(|e| e.to_string())
+    store.inner().write_guard().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1394,7 +1394,7 @@ pub(crate) mod tests {
     }
 
     fn with_conn<T>(s: &crate::memory::MemoryStore, f: impl FnOnce(&Connection) -> T) -> T {
-        let conn = s.0.lock().unwrap();
+        let conn = s.write_guard().unwrap();
         f(&conn)
     }
 
@@ -1673,7 +1673,7 @@ pub(crate) mod tests {
             approvals: Arc::new(ApprovalBroker::default()),
             app: None,
         };
-        let conn = store.0.lock().unwrap();
+        let conn = store.write_guard().unwrap();
         let id = insert_server(&conn, "死掉的", "stdio", Some("/bin/true"), &[], None, &[], &[]).unwrap();
         drop(conn);
 
@@ -1684,7 +1684,7 @@ pub(crate) mod tests {
         // Enabled but not a real MCP server (/bin/true exits immediately →
         // initialize fails): clean skip, pool stays empty.
         {
-            let conn = store.0.lock().unwrap();
+            let conn = store.write_guard().unwrap();
             conn.execute("UPDATE mcp_servers SET enabled=1 WHERE id=?1", [&id]).unwrap();
         }
         assert_eq!(reconnect_enabled_servers(&agent, &store), 0);

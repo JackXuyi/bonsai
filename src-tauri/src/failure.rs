@@ -846,7 +846,7 @@ pub fn record_loop_stop(app: &AppHandle, name: &str, detail: &str) {
         "restarts": restarts,
     });
     if let Some(store) = app.try_state::<MemoryStore>() {
-        if let Ok(conn) = store.0.lock() {
+        if let Ok(conn) = store.write_guard() {
             let _ = crate::memory::db::set_setting(
                 &conn,
                 &loop_status_key(name),
@@ -872,7 +872,7 @@ fn autorestart_enabled(app: &AppHandle) -> bool {
     let Some(store) = app.try_state::<MemoryStore>() else {
         return false;
     };
-    let Ok(conn) = store.0.lock() else {
+    let Ok(conn) = store.write_guard() else {
         return false;
     };
     matches!(
@@ -918,13 +918,14 @@ pub fn loops_status(registry: tauri::State<'_, LoopRegistry>) -> Vec<LoopStatusD
 
 #[tauri::command]
 pub fn loop_autorestart_get(store: tauri::State<'_, MemoryStore>) -> Result<bool, String> {
-    let conn = store.0.lock().map_err(|e| e.to_string())?;
-    Ok(matches!(
-        crate::memory::db::get_setting(&conn, SETTING_AUTORESTART)
-            .map_err(|e| e.to_string())?
-            .as_deref(),
-        Some("on")
-    ))
+    store
+        .with_read(|conn| {
+            Ok(matches!(
+                crate::memory::db::get_setting(conn, SETTING_AUTORESTART)?.as_deref(),
+                Some("on")
+            ))
+        })
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -932,7 +933,7 @@ pub fn loop_autorestart_set(
     store: tauri::State<'_, MemoryStore>,
     enabled: bool,
 ) -> Result<bool, String> {
-    let conn = store.0.lock().map_err(|e| e.to_string())?;
+    let conn = store.write_guard().map_err(|e| e.to_string())?;
     let val = if enabled { "on" } else { "off" };
     crate::memory::db::set_setting(&conn, SETTING_AUTORESTART, val).map_err(|e| e.to_string())?;
     Ok(enabled)

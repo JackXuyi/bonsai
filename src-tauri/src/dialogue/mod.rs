@@ -32,7 +32,7 @@ pub use proactive::{proactive_iteration, proactive_text, spawn_proactive};
 // ---- crate-visible re-exports so `tests` can `use super::*` ----
 pub(crate) use types::{resolve_model_reply, CHAT_TEMPERATURE, FALLBACK_REPLY, INTERRUPTED_TAIL};
 pub(crate) use trace::TraceRecorder;
-pub(crate) use persist::{clip, filter_json, lock_conn, persist_model_turn};
+pub(crate) use persist::{clip, filter_json, persist_model_turn};
 pub(crate) use prompt::{
     env_prefix, is_weekend_today, mood_str, system_prompt, turn_budget, turns_to_history,
 };

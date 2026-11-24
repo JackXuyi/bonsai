@@ -122,7 +122,7 @@ fn tick(app: &AppHandle) -> Result<(), String> {
 
     // Short lock: the trigger decision needs two small reads only.
     let (last, age) = {
-        let conn = store.0.lock().map_err(|e| e.to_string())?;
+        let conn = store.write_guard().map_err(|e| e.to_string())?;
         (
             last_run_date(&conn).map_err(|e| e.to_string())?,
             hours_since_last_run(&conn),
@@ -138,7 +138,7 @@ fn tick(app: &AppHandle) -> Result<(), String> {
     // tick 再看，不消耗 trigger。
     let job_guard = crate::failure::JobGuard { name: "consolidate" };
     {
-        let conn = store.0.lock().map_err(|e| e.to_string())?;
+        let conn = store.write_guard().map_err(|e| e.to_string())?;
         if !job_guard.should_run(&conn, now_local) {
             log::info!("consolidate: job backoff active, skipping this tick");
             return Ok(());
@@ -180,7 +180,7 @@ fn tick(app: &AppHandle) -> Result<(), String> {
             // + 原因（v17 error 列），退避状态写 settings（60s 起步，5 次当天停）。
             let detail = format!("consolidate run failed: {e}");
             {
-                let conn = store.0.lock().map_err(|e2| e2.to_string())?;
+                let conn = store.write_guard().map_err(|e2| e2.to_string())?;
                 let st = record_consolidate_failure(
                     &conn, &job_guard, now_local, opts.trigger, &opts.window_start, &opts.window_end,
                     &detail,
@@ -193,7 +193,7 @@ fn tick(app: &AppHandle) -> Result<(), String> {
 
     // 跑成了 → 清退避，明天从零算起。
     {
-        let conn = store.0.lock().map_err(|e| e.to_string())?;
+        let conn = store.write_guard().map_err(|e| e.to_string())?;
         job_guard.record_ok(&conn);
     }
 

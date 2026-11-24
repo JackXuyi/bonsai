@@ -744,7 +744,7 @@ pub fn spawn(app: tauri::AppHandle) {
                 let Some(state) = app.try_state::<CalendarState>() else {
                     return;
                 };
-                let Ok(mut conn) = store.inner().0.lock() else {
+                let Ok(mut conn) = store.inner().write_guard() else {
                     return;
                 };
                 let now = Local::now();
@@ -838,8 +838,10 @@ pub fn calendar_status(
     store: tauri::State<'_, MemoryStore>,
     state: tauri::State<'_, CalendarState>,
 ) -> Result<CalendarStatus, String> {
-    let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
-    Ok(status(&conn, state.inner().source(), Local::now()))
+    store
+        .inner()
+        .with_read(|conn| Ok(status(conn, state.inner().source(), Local::now())))
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -852,7 +854,7 @@ pub fn calendar_request_access(
         .inner()
         .source()
         .request_access(Duration::from_secs(REQUEST_TIMEOUT_SECS));
-    let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+    let conn = store.inner().write_guard().map_err(|e| e.to_string())?;
     match result {
         Ok(access) => {
             let _ = db::log_tool_call(
@@ -892,7 +894,7 @@ pub fn calendar_set_config(
     enabled: Option<bool>,
     remind: Option<bool>,
 ) -> Result<CalendarStatus, String> {
-    let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+    let conn = store.inner().write_guard().map_err(|e| e.to_string())?;
     if let Some(v) = enabled {
         db::set_setting(&conn, SETTING_ENABLED, if v { "1" } else { "0" })
             .map_err(|e| e.to_string())?;
@@ -912,7 +914,7 @@ pub fn calendar_clear_cache(
     store: tauri::State<'_, MemoryStore>,
     state: tauri::State<'_, CalendarState>,
 ) -> Result<CalendarStatus, String> {
-    let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+    let conn = store.inner().write_guard().map_err(|e| e.to_string())?;
     db::clear_calendar_cache(&conn).map_err(|e| e.to_string())?;
     Ok(status(&conn, state.inner().source(), Local::now()))
 }
@@ -923,7 +925,7 @@ pub fn calendar_mute_today(
     store: tauri::State<'_, MemoryStore>,
     state: tauri::State<'_, CalendarState>,
 ) -> Result<CalendarStatus, String> {
-    let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+    let conn = store.inner().write_guard().map_err(|e| e.to_string())?;
     db::set_setting(&conn, SETTING_MUTED_DATE, &Local::now().date_naive().to_string())
         .map_err(|e| e.to_string())?;
     Ok(status(&conn, state.inner().source(), Local::now()))

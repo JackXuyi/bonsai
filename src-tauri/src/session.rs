@@ -15,20 +15,16 @@ use tauri::State;
 
 use crate::memory::{db, MemoryStore};
 
-fn lock<'a>(
-    state: &'a State<'_, MemoryStore>,
-) -> Result<std::sync::MutexGuard<'a, rusqlite::Connection>, String> {
-    state.inner().0.lock().map_err(|e| e.to_string())
-}
-
 /// 会话列表。`include_archived` 缺省 false（抽屉默认只看活的）。
 #[tauri::command]
 pub fn session_list(
     state: State<'_, MemoryStore>,
     include_archived: Option<bool>,
 ) -> Result<Vec<db::SessionRow>, String> {
-    let conn = lock(&state)?;
-    db::session_list(&conn, include_archived.unwrap_or(false)).map_err(|e| e.to_string())
+    state
+        .inner()
+        .with_read(|conn| db::session_list(conn, include_archived.unwrap_or(false)))
+        .map_err(|e| e.to_string())
 }
 
 /// 新建空会话。返回行本身（前端拿 id 立刻切换，不用再查一次）。
@@ -37,9 +33,10 @@ pub fn session_create(
     state: State<'_, MemoryStore>,
     title: Option<String>,
 ) -> Result<db::SessionRow, String> {
-    let conn = lock(&state)?;
     let id = crate::mcp_admin::uuid_v4();
-    db::session_create(&conn, &id, title.as_deref().unwrap_or(""))
+    state
+        .inner()
+        .with_write(|conn| db::session_create(conn, &id, title.as_deref().unwrap_or("")))
         .map_err(|e| e.to_string())
 }
 
@@ -49,9 +46,9 @@ pub fn session_rename(
     id: String,
     title: String,
 ) -> Result<(), String> {
-    let conn = lock(&state)?;
-    db::session_rename(&conn, &id, &title)
-        .map(|_| ())
+    state
+        .inner()
+        .with_write(|conn| db::session_rename(conn, &id, &title).map(|_| ()))
         .map_err(|e| e.to_string())
 }
 
@@ -61,9 +58,9 @@ pub fn session_archive(
     id: String,
     archived: bool,
 ) -> Result<(), String> {
-    let conn = lock(&state)?;
-    db::session_set_archived(&conn, &id, archived)
-        .map(|_| ())
+    state
+        .inner()
+        .with_write(|conn| db::session_set_archived(conn, &id, archived).map(|_| ()))
         .map_err(|e| e.to_string())
 }
 
@@ -71,8 +68,10 @@ pub fn session_archive(
 /// 会话行一起删。返回删掉的事件条数（前端用来确认「清掉了几条」）。
 #[tauri::command]
 pub fn session_delete(state: State<'_, MemoryStore>, id: String) -> Result<usize, String> {
-    let conn = lock(&state)?;
-    db::forget_session(&conn, &id).map_err(|e| e.to_string())
+    state
+        .inner()
+        .with_write(|conn| db::forget_session(conn, &id))
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

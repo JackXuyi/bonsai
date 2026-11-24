@@ -111,7 +111,7 @@ pub fn run_with_store(
     opts: &Options,
 ) -> rusqlite::Result<Report> {
     let (events, user_events, blocked, facts) = {
-        let conn = lock_store(store)?;
+        let conn = store.write_guard()?;
         read_phase(&conn, opts)?
     };
     let mut report = report_skeleton(opts, events.len(), blocked);
@@ -121,18 +121,9 @@ pub fn run_with_store(
         extractor.extract(&SessionDigest { user_utterances: &user_events, active_facts: &facts })
     };
     report.extracted = candidates.len();
-    let mut conn = lock_store(store)?;
+    let mut conn = store.write_guard()?;
     write_phase(&mut conn, &mut report, &candidates)?;
     Ok(report)
-}
-
-fn lock_store(store: &super::MemoryStore) -> rusqlite::Result<std::sync::MutexGuard<'_, Connection>> {
-    store.0.lock().map_err(|_| {
-        rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error::new(1),
-            Some("memory store mutex poisoned".into()),
-        )
-    })
 }
 
 /// Phase 1: read everything the run needs as OWNED data, so the lock can be
@@ -373,7 +364,7 @@ pub fn digest_pass(
     let mut report = DigestReport::default();
 
     let candidates = {
-        let Ok(conn) = lock_store(store) else {
+        let Ok(conn) = store.write_guard() else {
             return report;
         };
         match db::get_setting(&conn, SETTING_DIGEST_MODEL).ok().flatten().as_deref() {
@@ -394,7 +385,7 @@ pub fn digest_pass(
             continue;
         };
         // 锁只在读候选与写回这两小段里持有，模型推理全程零锁（同巩固管线）。
-        let written = lock_store(store)
+        let written = store.write_guard()
             .ok()
             .and_then(|conn| db::session_set_digest_if(&conn, &row.id, old, &new).ok())
             .unwrap_or(0);
@@ -509,11 +500,11 @@ mod tests {
         let conn = mem();
         db::session_create(&conn, "s1", "封窗报价").unwrap();
         db::session_set_digest(&conn, "s1", digest, 12).unwrap();
-        (crate::memory::MemoryStore(std::sync::Mutex::new(conn)), "s1".to_string())
+        (crate::memory::MemoryStore::from_connection(conn), "s1".to_string())
     }
 
     fn digest_of(store: &crate::memory::MemoryStore, id: &str) -> Option<String> {
-        let conn = store.0.lock().unwrap();
+        let conn = store.write_guard().unwrap();
         db::session_digest(&conn, id).unwrap().0
     }
 
@@ -535,7 +526,7 @@ mod tests {
         let _g = clock::pinned("2026-11-23T22:00:00Z");
         let (store, id) = store_with_digest("- [11-22] 问报价 → 给了估算");
         {
-            let conn = store.0.lock().unwrap();
+            let conn = store.write_guard().unwrap();
             db::set_setting(&conn, SETTING_DIGEST_MODEL, "local").unwrap();
         }
         let client = FakeClient::new(Some("  用户在比价封窗，倾向先做客厅阳台。  "));
@@ -557,7 +548,7 @@ mod tests {
         let _g = clock::pinned("2026-11-23T22:00:00Z");
         let (store, id) = store_with_digest("- [11-22] 问报价 → 给了估算");
         {
-            let conn = store.0.lock().unwrap();
+            let conn = store.write_guard().unwrap();
             db::set_setting(&conn, SETTING_DIGEST_MODEL, "local").unwrap();
         }
         let client = FakeClient::new(None); // 超时 / 连不上
@@ -578,7 +569,7 @@ mod tests {
         let _g = clock::pinned("2026-11-23T22:00:00Z");
         let (store, id) = store_with_digest("- [11-22] 问报价 → 给了估算");
         {
-            let conn = store.0.lock().unwrap();
+            let conn = store.write_guard().unwrap();
             db::set_setting(&conn, SETTING_DIGEST_MODEL, "local").unwrap();
         }
         let long: &'static str = Box::leak("很长的一句话。".repeat(80).into_boxed_str());
@@ -865,7 +856,7 @@ mod tests {
 
         // Seed one event so the run has a window to read.
         {
-            let conn = store.0.lock().unwrap();
+            let conn = store.write_guard().unwrap();
             let _guard = clock::pinned("2026-11-18T12:00:00Z");
             db::add_event_meta(&conn, "chat", "我喜欢雨天", Some("user"), Some("s1")).unwrap();
         }
@@ -875,7 +866,7 @@ mod tests {
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(50));
             loop {
-                if let Ok(conn) = bg.0.try_lock() {
+                if let Ok(Some(conn)) = bg.try_write_guard() {
                     let _ = db::add_event(&conn, "face_state", "bg-marker");
                     let _ = tx.send(std::time::Instant::now());
                     break;

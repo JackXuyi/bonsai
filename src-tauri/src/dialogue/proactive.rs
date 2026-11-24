@@ -4,8 +4,6 @@ use std::time::Duration;
 
 use chrono::Timelike;
 use rusqlite::Connection;
-use tauri::Manager;
-
 use crate::decision::Decision;
 use crate::face::{self, FaceState};
 use crate::memory::db;
@@ -15,7 +13,7 @@ use crate::persona::{eval::DialogueBackend, Persona};
 use crate::report;
 use crate::AppState;
 
-use super::persist::{lock_conn, persist_model_turn};
+use super::persist::persist_model_turn;
 use super::prompt::system_prompt;
 use super::trace::TraceRecorder;
 use super::types::{CHAT_TEMPERATURE, PROACTIVE_POLL_SECS, PROACTIVE_SESSION};
@@ -62,7 +60,7 @@ pub fn proactive_text(
     raining: bool,
 ) -> rusqlite::Result<Option<(String, i64)>> {
     let (system, obs) = {
-        let conn = lock_conn(store)?;
+        let conn = store.write_guard()?;
         let s = system_prompt(&conn, card, hour, raining)?;
         let o = today_observations(&conn);
         (s, o)
@@ -80,7 +78,7 @@ pub fn proactive_text(
         return Ok(None); // model down → silence, not a canned line
     }
     rec.llm_round("主动搭话 · 今日观察", &system, reply, "answered", dur);
-    let conn = lock_conn(store)?;
+    let conn = store.write_guard()?;
     let asst_id =
         db::add_event_meta(&conn, "dialogue", reply, Some("assistant"), Some(PROACTIVE_SESSION))?;
     let turn_id = rec.persist(
@@ -115,7 +113,7 @@ pub fn proactive_iteration(app: &tauri::AppHandle) -> Option<Decision> {
         .unwrap_or_else(|e| e.into_inner())
         .clone();
     let decision = {
-        let conn = store.inner().0.lock().ok()?;
+        let conn = store.inner().write_guard().ok()?;
         let mut proactivity = app_state
             .proactivity
             .lock()

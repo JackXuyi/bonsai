@@ -290,7 +290,7 @@ pub fn daily_report(
         None => Local::now().date_naive(),
     };
 
-    let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+    let conn = store.inner().write_guard().map_err(|e| e.to_string())?;
     // spec-m2: 日报跟随当前 provider（本地 sidecar 或已启用的云端条目）。
     let client = crate::llm::current_client();
     let tomorrow = tomorrow_agenda(&conn, calendar.inner().source(), day);

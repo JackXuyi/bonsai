@@ -11,8 +11,10 @@ use crate::memory::MemoryStore;
 pub fn llm_cloud_entries_get(
     store: tauri::State<'_, MemoryStore>,
 ) -> Result<Vec<CloudEntryView>, String> {
-    let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
-    Ok(load(&conn).iter().map(super::CloudEntry::view).collect())
+    store
+        .inner()
+        .with_read(|conn| Ok(load(conn).iter().map(super::CloudEntry::view).collect()))
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -21,7 +23,7 @@ pub fn llm_cloud_entry_save(
     store: tauri::State<'_, MemoryStore>,
     entry: CloudEntryInput,
 ) -> Result<CloudEntryView, String> {
-    let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+    let conn = store.inner().write_guard().map_err(|e| e.to_string())?;
     let view = save_entry(&conn, entry).map_err(humanize)?;
     drop(conn);
     // 页头状态可能因编辑改名而变化（list 是唯一真源，通知前端重读）。
@@ -35,7 +37,7 @@ pub fn llm_cloud_entry_remove(
     store: tauri::State<'_, MemoryStore>,
     id: String,
 ) -> Result<(), String> {
-    let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+    let conn = store.inner().write_guard().map_err(|e| e.to_string())?;
     remove_entry(&conn, &id)?;
     drop(conn);
     let _ = app.emit("llm:cloud:changed", ());
@@ -47,7 +49,7 @@ pub fn llm_cloud_test(
     store: tauri::State<'_, MemoryStore>,
     entry: CloudEntryInput,
 ) -> Result<TestReport, String> {
-    let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+    let conn = store.inner().write_guard().map_err(|e| e.to_string())?;
     let built = build_entry(&entry, &load(&conn)).map_err(humanize)?;
     let started = std::time::Instant::now();
     probe_entry(&built)?;

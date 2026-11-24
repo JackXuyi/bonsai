@@ -410,7 +410,7 @@ pub(crate) fn web_enabled(conn: &Connection) -> bool {
 
 #[tauri::command]
 pub fn web_status(store: tauri::State<'_, crate::memory::MemoryStore>) -> Result<WebStatus, String> {
-    let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+    let conn = store.inner().write_guard().map_err(|e| e.to_string())?;
     Ok(WebStatus { enabled: web_enabled(&conn) })
 }
 
@@ -424,7 +424,7 @@ pub fn web_set_config(
     store: tauri::State<'_, crate::memory::MemoryStore>,
     enabled: Option<bool>,
 ) -> Result<WebStatus, String> {
-    let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+    let conn = store.inner().write_guard().map_err(|e| e.to_string())?;
     if let Some(v) = enabled {
         crate::memory::db::set_setting(&conn, SETTING_ENABLED, if v { "1" } else { "0" })
             .map_err(|e| e.to_string())?;

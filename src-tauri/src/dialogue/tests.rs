@@ -34,7 +34,7 @@ fn card() -> Persona {
     /// `chat_turn*` call — the turn locks the store internally per phase
     /// (2026-11-20 lock-narrowing), so a live guard would self-deadlock.
     fn with_conn<T>(s: &MemoryStore, f: impl FnOnce(&Connection) -> T) -> T {
-        let conn = s.0.lock().unwrap();
+        let conn = s.write_guard().unwrap();
         f(&conn)
     }
 
@@ -2561,7 +2561,7 @@ fn card() -> Persona {
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(50));
             loop {
-                if let Ok(conn) = bg.0.try_lock() {
+                if let Ok(Some(conn)) = bg.try_write_guard() {
                     let _ = db::add_event(&conn, "face_state", "bg-marker");
                     let _ = tx.send(std::time::Instant::now());
                     break;

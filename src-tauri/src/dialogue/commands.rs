@@ -39,7 +39,7 @@ pub async fn dialogue_chat(
         let mut backend = crate::persona::backend().map_err(|e| e.to_string())?;
         // Short lock for the gate + kit build; the turn locks per phase.
         let mut kit = {
-            let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+            let conn = store.inner().write_guard().map_err(|e| e.to_string())?;
             crate::onboarding::ensure_not_minor(&conn)?;
             crate::mcp_admin::build_agent_kit(&conn, agent.inner(), &user_text)
         };
@@ -92,7 +92,7 @@ pub async fn dialogue_chat_stream(
             let mut backend = crate::persona::backend().map_err(|e| e.to_string())?;
             // Short lock for the gate + kit build; the turn locks per phase.
             let mut kit = {
-                let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+                let conn = store.inner().write_guard().map_err(|e| e.to_string())?;
                 crate::onboarding::ensure_not_minor(&conn)?;
                 crate::mcp_admin::build_agent_kit(&conn, agent.inner(), &user_text)
             };
@@ -158,7 +158,7 @@ pub async fn dialogue_proactive_now(
         let hour = chrono::Local::now().hour() as u32;
         let mut backend = crate::persona::backend().map_err(|e| e.to_string())?;
         {
-            let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+            let conn = store.inner().write_guard().map_err(|e| e.to_string())?;
             crate::onboarding::ensure_not_minor(&conn)?;
         }
         // proactive_text locks per phase itself — no guard held here.
@@ -181,15 +181,18 @@ pub fn dialogue_history(
     limit: Option<i64>,
     before_id: Option<i64>,
 ) -> Result<Vec<db::DialogueBubble>, String> {
-    let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
     let session = session_id.unwrap_or_else(|| "default".to_string());
-    db::dialogue_bubbles(
-        &conn,
-        &session,
-        limit.unwrap_or(30).clamp(1, 200) as usize,
-        before_id,
-    )
-    .map_err(|e| e.to_string())
+    store
+        .inner()
+        .with_read(|conn| {
+            db::dialogue_bubbles(
+                conn,
+                &session,
+                limit.unwrap_or(30).clamp(1, 200) as usize,
+                before_id,
+            )
+        })
+        .map_err(|e| e.to_string())
 }
 
 /// Full generation trace of one turn (spec-s8). Read-only; `None` = the turn
@@ -199,8 +202,10 @@ pub fn turn_trace_get(
     store: tauri::State<'_, MemoryStore>,
     turn_id: i64,
 ) -> Result<Option<db::TurnTraceRow>, String> {
-    let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
-    db::turn_trace_get(&conn, turn_id).map_err(|e| e.to_string())
+    store
+        .inner()
+        .with_read(|conn| db::turn_trace_get(conn, turn_id))
+        .map_err(|e| e.to_string())
 }
 
 /// Reverse lookup by dialogue event id (either side of the pair) — the trace
@@ -211,7 +216,9 @@ pub fn turn_trace_find_by_event(
     store: tauri::State<'_, MemoryStore>,
     event_id: i64,
 ) -> Result<Option<i64>, String> {
-    let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
-    db::turn_trace_find_by_event(&conn, event_id).map_err(|e| e.to_string())
+    store
+        .inner()
+        .with_read(|conn| db::turn_trace_find_by_event(conn, event_id))
+        .map_err(|e| e.to_string())
 }
 

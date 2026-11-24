@@ -197,7 +197,7 @@ pub fn spawn(app: tauri::AppHandle) {
             let Some(store) = app.try_state::<crate::memory::MemoryStore>() else {
                 continue;
             };
-            let Ok(conn) = store.inner().0.lock() else {
+            let Ok(conn) = store.inner().write_guard() else {
                 continue;
             };
             let now = chrono::Local::now();
@@ -278,8 +278,10 @@ pub fn status_payload(conn: &Connection) -> GrowthStatus {
 pub fn growth_status(
     store: tauri::State<'_, crate::memory::MemoryStore>,
 ) -> Result<GrowthStatus, String> {
-    let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
-    Ok(status_payload(&conn))
+    store
+        .inner()
+        .with_read(|conn| Ok(status_payload(conn)))
+        .map_err(|e| e.to_string())
 }
 
 /// Acknowledge announcements the frontend actually rendered (idempotent:
@@ -289,7 +291,7 @@ pub fn growth_ack(
     store: tauri::State<'_, crate::memory::MemoryStore>,
     id: i64,
 ) -> Result<bool, String> {
-    let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+    let conn = store.inner().write_guard().map_err(|e| e.to_string())?;
     db::mark_growth_notified(&conn, id).map_err(|e| e.to_string())
 }
 

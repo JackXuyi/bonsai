@@ -226,7 +226,7 @@ pub fn llm_model_remove(
     tag: String,
 ) -> Result<(), String> {
     let cfg = {
-        let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+        let conn = store.inner().write_guard().map_err(|e| e.to_string())?;
         crate::llm_admin::effective(&conn)
     };
     if same_model(&cfg.local_model, &tag)

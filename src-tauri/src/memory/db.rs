@@ -70,12 +70,31 @@ pub fn init_schema_for_test(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(SCHEMA)
 }
 
+/// Writer / migrator connection (plan-store-lock T1)：WAL + FK + busy_timeout。
+/// `busy_timeout` 管跨连接文件锁（读池 vs 写者），不是进程内 Mutex 的替代。
 pub fn open(path: &std::path::Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
-    conn.pragma_update(None, "journal_mode", "WAL")?;
-    conn.pragma_update(None, "foreign_keys", "ON")?;
+    apply_common_pragmas(&conn)?;
     migrate(&conn)?;
     Ok(conn)
+}
+
+/// 只读旁路连接（plan-store-lock T3）：同路径、同 pragma，另开 `query_only`，
+/// **不**跑 migrate（migrate 只属于 writer）。
+pub fn open_reader(path: &std::path::Path) -> rusqlite::Result<Connection> {
+    let conn = Connection::open(path)?;
+    apply_common_pragmas(&conn)?;
+    // SQLite 3.8+：阻止这条连接上的写；误写在 API 层失败而非脏写。
+    conn.pragma_update(None, "query_only", true)?;
+    Ok(conn)
+}
+
+fn apply_common_pragmas(conn: &Connection) -> rusqlite::Result<()> {
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    // 5s：与 plan-store-lock §6.4 / A2 对齐。
+    conn.busy_timeout(std::time::Duration::from_millis(5_000))?;
+    Ok(())
 }
 
 /// Full schema for a fresh database (v2).

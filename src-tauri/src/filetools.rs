@@ -685,7 +685,7 @@ fn set_flag(conn: &Connection, key: &str, value: bool) -> Result<(), String> {
 
 #[tauri::command]
 pub fn fs_status(store: tauri::State<'_, crate::memory::MemoryStore>) -> Result<FsStatus, String> {
-    let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+    let conn = store.inner().write_guard().map_err(|e| e.to_string())?;
     Ok(status(&conn))
 }
 
@@ -695,7 +695,7 @@ pub fn fs_set_config(
     enabled: Option<bool>,
     cloud_read: Option<bool>,
 ) -> Result<FsStatus, String> {
-    let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+    let conn = store.inner().write_guard().map_err(|e| e.to_string())?;
     if let Some(v) = enabled {
         set_flag(&conn, SETTING_ENABLED, v)?;
     }
@@ -710,7 +710,7 @@ pub fn fs_root_add(
     store: tauri::State<'_, crate::memory::MemoryStore>,
     path: String,
 ) -> Result<FsStatus, String> {
-    let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+    let conn = store.inner().write_guard().map_err(|e| e.to_string())?;
     fs_root_add_inner(&conn, &path)?;
     Ok(status(&conn))
 }
@@ -743,7 +743,7 @@ pub fn fs_root_remove(
     store: tauri::State<'_, crate::memory::MemoryStore>,
     path: String,
 ) -> Result<FsStatus, String> {
-    let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+    let conn = store.inner().write_guard().map_err(|e| e.to_string())?;
     fs_root_remove_inner(&conn, &path)?;
     Ok(status(&conn))
 }

@@ -106,7 +106,7 @@ pub fn run() {
             // configured model.
             {
                 let store = app.state::<MemoryStore>();
-                let conn = store.0.lock().map_err(|e| e.to_string())?;
+                let conn = store.write_guard().map_err(|e| e.to_string())?;
                 // §5.6 启动清残留：崩溃留下的 status='running' 幽灵行标
                 // interrupted（超 24h 才动，刚崩完的保守不动）。turn_trace
                 // 无 assistant_event_id 的失败轮过滤留给 T7（统计口径在
@@ -152,7 +152,7 @@ pub fn run() {
             // 回落到编译进二进制的契约副本。
             {
                 let store = app.state::<MemoryStore>();
-                let conn = store.0.lock().map_err(|e| e.to_string())?;
+                let conn = store.write_guard().map_err(|e| e.to_string())?;
                 let seeded = memory::db::get_setting(&conn, "summary_skills_seeded")
                     .ok()
                     .flatten();
@@ -419,7 +419,7 @@ fn open_memory_store(path: &std::path::Path) -> rusqlite::Result<MemoryStore> {
                 })?;
                 let store = MemoryStore::open(path)?;
                 {
-                    let conn = store.0.lock().map_err(|_| {
+                    let conn = store.write_guard().map_err(|_| {
                         rusqlite::Error::SqliteFailure(
                             rusqlite::ffi::Error::new(1),
                             Some("internal_poisoned: memory store mutex poisoned".into()),
@@ -517,7 +517,7 @@ mod tests {
         assert!(!entries.contains(&"bonsai.sqlite3.corrupt.bak".to_string()));
 
         // 全新空库 + settings 两键（前端横幅的数据源，绝不静默）。
-        let conn = store.0.lock().unwrap();
+        let conn = store.write_guard().unwrap();
         let recovered_at = memory::db::get_setting(&conn, "db_recovered_at")
             .unwrap()
             .expect("db_recovered_at 必须有值");
@@ -541,7 +541,7 @@ mod tests {
             .filter_map(|e| e.ok().and_then(|e| e.file_name().into_string().ok()))
             .collect();
         assert!(!entries.iter().any(|n| n.contains(".corrupt-")));
-        let conn = store.0.lock().unwrap();
+        let conn = store.write_guard().unwrap();
         assert_eq!(memory::db::get_setting(&conn, "db_recovered_at").unwrap(), None);
     }
 
@@ -551,7 +551,7 @@ mod tests {
     fn stale_running_tasks_are_marked_interrupted() {
         let dir = tmp_dir("stale");
         let store = open_memory_store(&dir.join("bonsai.sqlite3")).unwrap();
-        let conn = store.0.lock().unwrap();
+        let conn = store.write_guard().unwrap();
 
         let old = (chrono::Utc::now() - chrono::Duration::hours(30)).to_rfc3339();
         let fresh = chrono::Utc::now().to_rfc3339();

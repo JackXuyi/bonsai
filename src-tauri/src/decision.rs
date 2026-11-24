@@ -124,9 +124,11 @@ pub fn evaluate(
         .lock()
         .map_err(|e| e.to_string())?
         .clone();
-    let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
     let mut proactivity = app_state.proactivity.lock().map_err(|e| e.to_string())?;
-    Ok(evaluate_live(&conn, &signals, &mut proactivity))
+    store
+        .inner()
+        .with_read(|conn| Ok(evaluate_live(conn, &signals, &mut proactivity)))
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

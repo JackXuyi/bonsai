@@ -231,8 +231,10 @@ pub fn status(conn: &rusqlite::Connection) -> rusqlite::Result<OnboardingStatus>
 
 #[tauri::command]
 pub fn onboarding_status(store: tauri::State<'_, MemoryStore>) -> Result<OnboardingStatus, String> {
-    let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
-    status(&conn).map_err(|e| e.to_string())
+    store
+        .inner()
+        .with_read(|conn| status(conn))
+        .map_err(|e| e.to_string())
 }
 
 #[derive(Debug, Deserialize)]
@@ -263,7 +265,7 @@ pub fn onboarding_submit(
     store: tauri::State<'_, MemoryStore>,
     payload: SubmitPayload,
 ) -> Result<SubmitReport, String> {
-    let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+    let conn = store.inner().write_guard().map_err(|e| e.to_string())?;
     if payload.age_group != "adult" && payload.age_group != "minor" {
         return Err("age_group 必须是 adult 或 minor".into());
     }
@@ -290,7 +292,7 @@ pub fn onboarding_submit(
 /// back pre-listed next time the frontend asks for status).
 #[tauri::command]
 pub fn onboarding_reset(store: tauri::State<'_, MemoryStore>) -> Result<(), String> {
-    let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+    let conn = store.inner().write_guard().map_err(|e| e.to_string())?;
     db::remove_setting(&conn, "onboarding_done").map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -306,7 +308,7 @@ pub struct BoundaryRow {
 
 #[tauri::command]
 pub fn boundary_list(store: tauri::State<'_, MemoryStore>) -> Result<Vec<BoundaryRow>, String> {
-    let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+    let conn = store.inner().write_guard().map_err(|e| e.to_string())?;
     let mut stmt = conn
         .prepare("SELECT id, content FROM boundaries ORDER BY id ASC")
         .map_err(|e| e.to_string())?;
@@ -320,7 +322,7 @@ pub fn boundary_list(store: tauri::State<'_, MemoryStore>) -> Result<Vec<Boundar
 
 #[tauri::command]
 pub fn boundary_delete(store: tauri::State<'_, MemoryStore>, id: i64) -> Result<usize, String> {
-    let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+    let conn = store.inner().write_guard().map_err(|e| e.to_string())?;
     conn.execute("DELETE FROM boundaries WHERE id = ?1", [id])
         .map_err(|e| e.to_string())
 }

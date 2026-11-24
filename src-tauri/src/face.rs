@@ -128,7 +128,7 @@ pub fn spawn_tick_loop(handle: AppHandle) {
                 if let Some(state) = controller.tick(hour, weekend) {
                     drop(controller); // release before touching the memory store
                     let store = handle.state::<crate::memory::MemoryStore>();
-                    if let Ok(conn) = store.inner().0.lock() {
+                    if let Ok(conn) = store.inner().write_guard() {
                         let _ = crate::memory::db::add_event(&conn, "face_state", state.as_str());
                     }
                     let _ = handle.emit("face:state", state);
@@ -165,7 +165,7 @@ pub fn face_poke(handle: AppHandle) -> Result<FaceState, String> {
     let now = chrono::Local::now();
     let desired = {
         let store = handle.state::<crate::memory::MemoryStore>();
-        match store.inner().0.lock() {
+        match store.inner().write_guard() {
             Ok(conn) => crate::morph::poke_face(&conn, now),
             Err(_) => FaceState::Greeted,
         }

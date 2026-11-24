@@ -358,7 +358,7 @@ pub fn spawn(app: tauri::AppHandle, cfg_path: PathBuf) {
                 };
 
                 if let Some(store) = app.try_state::<MemoryStore>() {
-                    if let Ok(conn) = store.inner().0.lock() {
+                    if let Ok(conn) = store.inner().write_guard() {
                         for s in &samples {
                             let _ = crate::memory::db::add_event(&conn, "perception", &s.content);
                         }

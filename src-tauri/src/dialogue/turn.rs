@@ -1,17 +1,14 @@
 //! Chat turn entry points and pipeline orchestrator (`chat_turn_inner`).
 
-use rusqlite::Connection;
-
 use crate::face::{self, FaceState};
 use crate::generation;
 use crate::memory::db;
 use crate::memory::MemoryStore;
 use crate::persona::{eval::DialogueBackend, Persona};
-use crate::relationship;
 
 use super::cloud_loop::{cloud_tool_loop, skill_section, tool_label};
 use super::local_legs::{local_perception_answer, local_recall_answer};
-use super::persist::{clip, filter_json, lock_conn, persist_model_turn};
+use super::persist::persist_model_turn;
 use super::prompt::{system_prompt, turn_budget, turns_to_history, env_prefix};
 use super::summary_turn::summary_turn;
 use super::trace::TraceRecorder;
@@ -161,7 +158,7 @@ pub(crate) fn chat_turn_inner(
     );
     if crisis {
         let reply = crate::onboarding::CRISIS_REPLY.to_string();
-        let conn = lock_conn(store)?;
+        let conn = store.write_guard()?;
         let user_id =
             db::add_event_meta(&conn, "dialogue", user_text, Some("user"), Some(session_id))?;
         let asst_id =
@@ -196,12 +193,12 @@ pub(crate) fn chat_turn_inner(
     // invents a meeting. A miss falls straight through to normal chat.
     // One lock scope: cache read/write + both event rows (ids captured here
     // for the trace backfill — spec-s8 §3.2).
-    let tool_answer: Option<(crate::tools::ToolReply, i64, i64)> = {
-        let conn = lock_conn(store)?;
+    // plan-store-lock T2/C1：日历命中时答 + 双事件 + trace 同一把写锁。
+    {
+        let conn = store.write_guard()?;
         match crate::tools::maybe_answer(&conn, access, user_text, chrono::Local::now()) {
             None => {
                 rec.simple("tool_intent", "日历规则路由", "miss", None);
-                None
             }
             Some(t) => {
                 rec.simple("tool_intent", "日历规则路由", "hit", Some(&t.reply));
@@ -219,34 +216,30 @@ pub(crate) fn chat_turn_inner(
                     Some("assistant"),
                     Some(session_id),
                 )?;
-                Some((t, user_id, asst_id))
+                let turn_id = rec.persist(
+                    &conn,
+                    session_id,
+                    Some(user_id),
+                    Some(asst_id),
+                    "tool",
+                    false,
+                    Some(format!("calendar:{}", t.action)),
+                    None,
+                    Some(user_text),
+                    Some(&t.reply),
+                )?;
+                return Ok(DialogueOutcome {
+                    reply: t.reply,
+                    filter: generation::FilterReport::default(),
+                    model_used: false,
+                    crisis: false,
+                    tool: Some(t.action.to_string()),
+                    task: None,
+                    turn_id: Some(turn_id),
+                    failure: None,
+                });
             }
         }
-    };
-    if let Some((tool, user_id, asst_id)) = tool_answer {
-        let conn = lock_conn(store)?;
-        let turn_id = rec.persist(
-            &conn,
-            session_id,
-            Some(user_id),
-            Some(asst_id),
-            "tool",
-            false,
-            Some(format!("calendar:{}", tool.action)),
-            None,
-            Some(user_text),
-            Some(&tool.reply),
-        )?;
-        return Ok(DialogueOutcome {
-            reply: tool.reply,
-            filter: generation::FilterReport::default(),
-            model_used: false,
-            crisis: false,
-            tool: Some(tool.action.to_string()),
-            task: None,
-            turn_id: Some(turn_id),
-            failure: None,
-        });
     }
 
     // ---- phase: context read (one short lock) → then inference runs FREE
@@ -256,7 +249,7 @@ pub(crate) fn chat_turn_inner(
     // 直答 / 总结全部消费这一份 system + history。
     let will_use_tools = kit.as_deref().map(|k| k.has_capabilities()).unwrap_or(false);
     let (system, history) = {
-        let conn = lock_conn(store)?;
+        let conn = store.write_guard()?;
         let env = env_prefix(&conn);
         let body = system_prompt(&conn, card, hour, raining)?;
         let turns = db::dialogue_turns_meta(&conn, session_id, crate::context::HISTORY_MAX_TURNS)?;
@@ -403,20 +396,11 @@ pub(crate) fn chat_turn_inner(
             }
         }
         let filter = generation::filter(&reply);
+        // disagreement 证据已并入 persist_model_turn（plan-store-lock T2/C2）。
         let turn_id = persist_model_turn(
             store, &mut rec, session_id, user_text, &reply, model_used, tool_label.clone(),
             Some(&filter),
         )?;
-        if model_used {
-            let conn = lock_conn(store)?;
-            if filter.explicit_disagreement {
-                db::add_event(&conn, "disagreement", &clip(&reply, 80))?;
-            }
-            if filter.hedged_disagreement {
-                db::add_event(&conn, "disagreement_hedged", &clip(&reply, 80))?;
-                let _ = relationship::maybe_first_refusal(&conn, chrono::Local::now());
-            }
-        }
         return Ok(DialogueOutcome {
             reply,
             filter,
@@ -440,23 +424,6 @@ pub(crate) fn chat_turn_inner(
     let turn_id = persist_model_turn(
         store, &mut rec, session_id, user_text, &reply, model_used, None, Some(&filter),
     )?;
-
-    // Anti-sycophancy evidence (plan-relationship.md §3.6): the filter used to
-    // be report-only, so "how often does it actually push back" was
-    // unknowable. Record the two shapes as events — explicit push-back is the
-    // relationship line's only qualitative evidence.
-    if model_used {
-        let conn = lock_conn(store)?;
-        if filter.explicit_disagreement {
-            db::add_event(&conn, "disagreement", &clip(&reply, 80))?;
-        }
-        if filter.hedged_disagreement {
-            db::add_event(&conn, "disagreement_hedged", &clip(&reply, 80))?;
-            // The wishy-washy moment may be the one worth telling a story about
-            // (R2 + 7 days, fired at most once, ever).
-            let _ = relationship::maybe_first_refusal(&conn, chrono::Local::now());
-        }
-    }
     Ok(DialogueOutcome {
         reply,
         filter,

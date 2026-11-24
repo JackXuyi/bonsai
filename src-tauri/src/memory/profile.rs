@@ -157,8 +157,10 @@ pub fn delete(conn: &Connection, key: &str) -> rusqlite::Result<usize> {
 
 #[tauri::command]
 pub fn profile_list(state: tauri::State<'_, super::MemoryStore>) -> Result<Vec<ProfileRow>, String> {
-    let conn = state.inner().0.lock().map_err(|e| e.to_string())?;
-    get_all(&conn).map_err(|e| e.to_string())
+    state
+        .inner()
+        .with_read(|conn| get_all(conn))
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -167,13 +169,13 @@ pub fn profile_set(
     key: String,
     value: String,
 ) -> Result<bool, String> {
-    let conn = state.inner().0.lock().map_err(|e| e.to_string())?;
+    let conn = state.inner().write_guard().map_err(|e| e.to_string())?;
     apply(&conn, &key, &value, "manual", None, 1.0).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn profile_delete(state: tauri::State<'_, super::MemoryStore>, key: String) -> Result<usize, String> {
-    let conn = state.inner().0.lock().map_err(|e| e.to_string())?;
+    let conn = state.inner().write_guard().map_err(|e| e.to_string())?;
     delete(&conn, &key).map_err(|e| e.to_string())
 }
 

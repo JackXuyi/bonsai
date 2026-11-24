@@ -92,7 +92,7 @@ pub fn persona_snapshot(
     store: tauri::State<'_, crate::memory::MemoryStore>,
     face: tauri::State<'_, std::sync::Mutex<crate::face::FaceController>>,
 ) -> Result<PersonaSnapshot, String> {
-    let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+    let conn = store.inner().write_guard().map_err(|e| e.to_string())?;
     // Mirror face_current: derive the base state from the clock, then ask
     // the controller what is actually showing (it may hold a transient).
     let now = chrono::Local::now();

@@ -425,7 +425,7 @@ pub fn spawn(app: tauri::AppHandle) {
             let Some(store) = app.try_state::<crate::memory::MemoryStore>() else {
                 continue;
             };
-            let Ok(conn) = store.inner().0.lock() else {
+            let Ok(conn) = store.inner().write_guard() else {
                 continue;
             };
             let now = chrono::Local::now();
@@ -522,8 +522,10 @@ pub fn status_payload(conn: &Connection) -> RelationshipStatus {
 pub fn relationship_status(
     store: tauri::State<'_, crate::memory::MemoryStore>,
 ) -> Result<RelationshipStatus, String> {
-    let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
-    Ok(status_payload(&conn))
+    store
+        .inner()
+        .with_read(|conn| Ok(status_payload(conn)))
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -531,7 +533,7 @@ pub fn relationship_ack(
     store: tauri::State<'_, crate::memory::MemoryStore>,
     id: i64,
 ) -> Result<bool, String> {
-    let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+    let conn = store.inner().write_guard().map_err(|e| e.to_string())?;
     db::mark_relationship_notified(&conn, id).map_err(|e| e.to_string())
 }
 
@@ -541,7 +543,7 @@ pub fn relationship_ack(
 pub fn relationship_reset(
     store: tauri::State<'_, crate::memory::MemoryStore>,
 ) -> Result<(), String> {
-    let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+    let conn = store.inner().write_guard().map_err(|e| e.to_string())?;
     db::forget_relationship(&conn).map_err(|e| e.to_string())
 }
 

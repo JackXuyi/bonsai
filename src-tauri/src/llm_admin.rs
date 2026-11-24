@@ -240,7 +240,7 @@ fn view_of(cfg: LlmConfig, sidecar_up: bool) -> LlmConfigView {
 #[tauri::command]
 pub fn llm_config_get(store: tauri::State<'_, MemoryStore>) -> Result<LlmConfigView, String> {
     let cfg = {
-        let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+        let conn = store.inner().write_guard().map_err(|e| e.to_string())?;
         effective(&conn)
     };
     let up = crate::llm::OllamaClient::new(llm_models::base_url(), DEFAULT_MODEL).is_up();
@@ -253,7 +253,7 @@ pub fn llm_config_set_active(
     id: String,
 ) -> Result<LlmConfigView, String> {
     if id.starts_with(CLOUD_PREFIX) {
-        let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+        let conn = store.inner().write_guard().map_err(|e| e.to_string())?;
         let entries = llm_cloud::load(&conn);
         let local_model = effective(&conn).local_model;
         let cfg = set_active_cloud_with(
@@ -273,7 +273,7 @@ pub fn llm_config_set_active(
         &installed,
         |tag| probe_model(&base, tag),
         |cfg| {
-            let conn = store.inner().0.lock().map_err(|e| e.to_string())?;
+            let conn = store.inner().write_guard().map_err(|e| e.to_string())?;
             persist(&conn, cfg).map_err(|e| e.to_string())
         },
     )?;

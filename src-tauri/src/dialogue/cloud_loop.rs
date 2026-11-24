@@ -7,9 +7,8 @@ use std::time::Duration;
 
 use crate::memory::db;
 use crate::memory::MemoryStore;
-use crate::persona::eval::DialogueBackend;
 
-use super::persist::{clip, lock_conn};
+use super::persist::clip;
 use super::trace::TraceRecorder;
 use super::types::{TaskCard, TaskStep, CHAT_TEMPERATURE};
 
@@ -204,7 +203,7 @@ pub(crate) fn bridge_plan_step(
     audit_before: Option<i64>,
     attempts: usize,
 ) -> Option<(usize, String, Option<i64>)> {
-    let conn = lock_conn(store).ok()?;
+    let conn = store.write_guard().ok()?;
     let mut plan = db::plan_get(&conn, task_id).ok()??;
     let status = match outcome {
         "ok" => "done",
@@ -294,7 +293,7 @@ pub(crate) fn tool_access(kit: &crate::mcp_admin::AgentKit, name: &str) -> crate
 /// T4：把计划里剩余 pending 步骤标 skipped，并写 cancel_reason。
 /// 用于取消/护栏触发的强制收尾——已执行步骤不动（不回滚、不造假）。
 pub(crate) fn skip_remaining_steps(store: &MemoryStore, task_id: &str, reason: &str) {
-    let Ok(conn) = lock_conn(store) else { return; };
+    let Ok(conn) = store.write_guard() else { return; };
     if let Ok(Some(mut plan)) = db::plan_get(&conn, task_id) {
         let mut changed = false;
         for step in &mut plan.steps {
@@ -409,7 +408,7 @@ pub(crate) fn cloud_tool_loop(
     };
     if !skill_names.is_empty() {
         // skill 使用审计（沿旧管线惯例：answered，不出执行行）。
-        let conn = lock_conn(store)?;
+        let conn = store.write_guard()?;
         for name in &skill_names {
             db::log_agent_tool_call(
                 &conn,
@@ -498,31 +497,25 @@ pub(crate) fn cloud_tool_loop(
                 let call = pr.tool_calls.iter().find(|c| c.name == "submit_plan");
                 match call.and_then(|c| parse_submitted_plan(&c.arguments)) {
                     Some(plan) => {
-                        // D1 确认门：读 settings（默认 auto）；本版两档都放行，
-                        // 只把模式留痕到 tasks.confirm_mode，不弹卡不阻塞（A11/A12）。
-                        let confirm_mode = {
-                            let conn = lock_conn(store)?;
-                            db::get_setting(&conn, "plan_confirm")
-                                .ok()
-                                .flatten()
-                                .unwrap_or_else(|| "auto".into())
-                        };
+                        // plan-store-lock T2/C3：confirm 读设置 + 开卡 + plan_put
+                        // 同一把写锁（读后写事务，不能拆到 read 池）。
+                        let conn = store.write_guard()?;
+                        let confirm_mode = db::get_setting(&conn, "plan_confirm")
+                            .ok()
+                            .flatten()
+                            .unwrap_or_else(|| "auto".into());
                         if plan_confirm_gate(&confirm_mode) {
-                            // 提前开卡：计划成功即建 tasks 行（现有惰性开卡太晚，
-                            // plan_json 需要先有归属行）。后续工具循环见 task_open=true
-                            // 不再重复开卡。
-                            let conn = lock_conn(store)?;
                             match db::task_start_in(&conn, user_text, Some(session_id)) {
                                 Ok(id) => {
                                     task.borrow_mut().id = id.clone();
                                     if let Ok(mut g) = kit.task_id.lock() {
                                         *g = Some(id.clone());
                                     }
-                                    // T4：注册取消标志，命令与循环共享同一 Arc。
                                     kit.canceled = crate::mcp_admin::register_cancel(&id);
                                     task_open.set(true);
                                     let _ = db::plan_put(&conn, &id, &plan);
                                     let _ = db::task_set_confirm_mode(&conn, &id, &confirm_mode);
+                                    drop(conn);
                                     if let Some(cb) = on_task.as_deref_mut() {
                                         cb(serde_json::json!({
                                             "event": "task_start", "id": id,
@@ -530,8 +523,6 @@ pub(crate) fn cloud_tool_loop(
                                             "steps": plan.steps.len(),
                                         }));
                                     }
-                                    // 接回主循环：assistant(tool_calls) + tool_result，
-                                    // 构成合法的工具轮尾部，让模型开始按计划执行。
                                     if let Some(c) = call {
                                         msgs.push(crate::llm::ToolMsg::assistant_tool_calls(
                                             vec![crate::llm::ToolCallOut {
@@ -729,7 +720,7 @@ pub(crate) fn cloud_tool_loop(
             }
             executed += 1;
             if !task_open.get() {
-                let conn = lock_conn(store)?;
+                let conn = store.write_guard()?;
                 match db::task_start_in(&conn, user_text, Some(session_id)) {
                     Ok(id) => {
                         task.borrow_mut().id = id.clone();
@@ -764,7 +755,7 @@ pub(crate) fn cloud_tool_loop(
                 // 审计水位只取首次 attempt 前的值：桥接据此取"最后一次"审计行 id。
                 if attempts == 1 && task_open.get() {
                     let tid = task.borrow().id.clone();
-                    first_audit_before = lock_conn(store).ok().and_then(|c| audit_max_id(&c, &tid));
+                    first_audit_before = store.write_guard().ok().and_then(|c| audit_max_id(&c, &tid));
                 }
                 match crate::mcp_admin::execute_audited(store, kit, &call.name, call.arguments.clone()) {
                     Ok(out) => {
@@ -859,7 +850,7 @@ pub(crate) fn cloud_tool_loop(
     if task_open.get() {
         let t = task.borrow();
         let task_id = t.id.clone();
-        let conn = lock_conn(store)?;
+        let conn = store.write_guard()?;
         let _ = db::task_finish(&conn, &task_id, status, executed as i64, Some(&reply));
         // 无计划取消（skip_remaining_steps 未走到）也要写 cancel_reason。
         if let Some(reason) = cancel_reason {
