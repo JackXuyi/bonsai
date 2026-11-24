@@ -729,8 +729,10 @@ fn count_reminders_today(conn: &Connection, start_iso: &str, end_iso: &str) -> u
 // ---------------------------------------------------------------- runtime
 
 pub fn spawn(app: tauri::AppHandle) {
-    use tauri::Manager;
-    // plan-loop-supervisor T1/D3：calendar 计入齐套；双层守卫；CAP 留痕；D1 有界复活。
+    // plan-loop-supervisor D3：calendar 仍计入齐套 8 行。
+    // P3-5（docs/zh/plan-jobs/v1）：提醒执行权迁入统一 `scheduler` jobs
+    // （`calendar_remind`）；本 loop **只保活心跳**，不再 `tick` / emit，
+    // 避免与 jobs 双发。
     crate::failure::spawn_guarded("calendar", move || {
         crate::failure::try_register(&app, "calendar");
         let mut guard = crate::failure::PanicGuard::new("calendar");
@@ -738,27 +740,7 @@ pub fn spawn(app: tauri::AppHandle) {
             std::thread::sleep(Duration::from_secs(POLL_SECS));
             crate::failure::try_heartbeat(&app, "calendar");
             let _ = guard.tick(|| {
-                let Some(store) = app.try_state::<MemoryStore>() else {
-                    return;
-                };
-                let Some(state) = app.try_state::<CalendarState>() else {
-                    return;
-                };
-                let Ok(mut conn) = store.inner().write_guard() else {
-                    return;
-                };
-                let now = Local::now();
-                match tick(&mut conn, state.inner().source(), now) {
-                    Ok(Some(r)) => {
-                        // The bubble carries a title, so it goes to the webview only —
-                        // never to the events table, never to the tray tooltip.
-                        drop(conn);
-                        use tauri::Emitter;
-                        let _ = app.emit("calendar:remind", r);
-                    }
-                    Ok(None) => {}
-                    Err(_) => {}
-                }
+                // heartbeat-only
             });
             if guard.stopped() {
                 if crate::failure::on_loop_cap(&app, "calendar", "consecutive panic cap") {

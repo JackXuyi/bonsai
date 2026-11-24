@@ -89,7 +89,7 @@
 | G-05 | 文件系统操作 | 无 → **T0–T4 已实施**（2026-11-22 代码；2026-11-24 T4 真机通过，plan-files.md §11）；**PDF 文本层可读**（2026-11-24，plan-pdf-read/v1） | 改造 | 只读搜索/摘要先行；写入仅限用户指定目录且二次确认（Ask 档复用 AskFirstGate）；delete/move/rename 连执行分支都没有；PDF 仅文本层抽取（无 OCR） | P3-2（docs/zh/plan-files.md；docs/zh/plan-pdf-read/v1） |
 | G-06 | Web 检索 | 无 → **T0–T3 已落地**（2026-11-23 代码；2026-11-24 T3 真机通过） | 改造 | 本地 LLM 总结网页/搜索结果；无网时明示不可用 | P3-3（plan-web.md §11） |
 | G-07 | MCP 客户端 | 无 → **已落地** | 采纳 | 行业标准工具协议；本地 stdio MCP 服务器不影响隐私定位 | P3-4（2026-11-20 实施，stdio + Streamable HTTP） |
-| G-08 | 定时/常驻任务 | 仅夜间 consolidate、提醒 lane | 改造 | 把 consolidate 模式推广为通用 job 表（cron 语义），为 C5 铺路 | P3-5 |
+| G-08 | 定时/常驻任务 | 仅夜间 consolidate、提醒 lane → **P3-5 已落地**（2026-11-24） | 改造 | 统一 `jobs` 表 + scheduler；consolidate / calendar_remind / daily_digest | P3-5（docs/zh/plan-jobs/v1） |
 | G-09 | 轻量任务模式（目标→步骤→执行→验证） | 无（单轮对话+规则路由） | 改造 | 2B 模型跑不稳自由 ReAct；改为「结构化任务卡」：LLM 只填字段，执行与重试由 Rust 引擎控制 | P4-1 |
 | G-10 | 工具权限分级 + Ask-first 审批 | 隐性（日历只读无需审批） | 采纳 | 工具增多后必须显式化：只读/询问/禁止三档 + 审批 UI | P4-2 |
 | G-11 | 审计轨迹（工具调用日志） | tool_calls 仅计数 → **最小版已扩** | 改造 | 扩为「参数摘要+结果状态+时间」审计表，UI 可查 | P4-2（最小版随 P3-4 落地；权限分级仍在 P4-2） |
@@ -123,7 +123,7 @@
 | P3-2 | 文件操作（分级） | T0：指定目录内搜索+读取+摘要；T1：写文件（仅用户显式给的目录+二次确认）；禁止移动/删除 | Given T0 授权目录，When 查询，Then 仅返回该目录内容；Given 删除请求，Then 永远拒绝 | P4-2 权限框架可并行设计 |
 | P3-3 | Web 检索 | 系统默认浏览器打开 + 本地抓取（HTTP 客户端）→ 本地 LLM 总结；外部内容强制打 untrusted 标签 | Given 断网，When 触发搜索，Then 明示「当前离线」不虚构；Given 抓取到网页，When 总结，Then 引用含 URL 可溯源 | G-12 同期落地 |
 | P3-4 | MCP 客户端（stdio + HTTP） | ✅ **已实施（2026-11-20）**：rmcp 官方 SDK 双传输（stdio 子进程 / Streamable HTTP）、schema v8 `mcp_servers`、三级渐进注入（名称→候选→详情）、`ApprovalGate`（默认 auto；ask 弹卡 30s 超时拒绝）、tool_calls 审计（脱敏参数摘要 + result_status + prompt_trace）、Skill 包提示注入同期落地 | 见 docs/zh/plan-agent-mcp-skill.md §8；真机项待验（MCP 实连 / 2B 误触发率） | P4-2 审批框架的**钩子**已先行（分级仍在 P4-2） |
-| P3-5 | 常驻任务框架 | job 表（schema v9 —— v8 已被 mcp_servers 占用）：name/cron/last_run/status；把 consolidate、日报、提醒 lane 迁入统一调度 | Given 新增 job，When 到达计划时间，Then 执行且失败有重试上限（≤3）与状态记录 | 现有 scheduler.rs |
+| P3-5 | 常驻任务框架 | ✅ **已实施（2026-11-24）**：`jobs` 表（schema v20）+ 统一 `scheduler` tick；内置 `consolidate` / `calendar_remind` / `daily_digest`；失败 ≤3；`job_list` / `job_set_enabled`；日历独立 remind 线程改为齐套心跳（见 docs/zh/plan-jobs/v1） | Given 新增 job，When 到达计划时间，Then 执行且失败有重试上限（≤3）与状态记录 | 现有 scheduler.rs |
 | P3-6 | 打包发布 | | | （合并入 P2-6，此处占位保持编号连续） |
 
 ### P4：从「会答」到「会办」——规划与治理
@@ -197,6 +197,7 @@
 |---|---|---|
 | v1.0 | 2026-11-19 | 初稿：8 类通用能力图谱、19 项差距裁决、P2–P5 分期 roadmap |
 | v1.6 | 2026-11-24 | P2-12 真机验收通过：P2-6 干净机断网能聊；G-05 T4 / G-06 T3 闭合；规划/retry 真机尾巴闭合 |
+| v1.7 | 2026-11-24 | P3-5 常驻任务框架落地：统一 jobs + scheduler；提醒/日报迁入；见 plan-jobs/v1 |
 | v1.2 | 2026-11-22 | G-05 状态回填：P3-2 文件操作分级 T0–T3 落地（commits 0b8619e/75e17b6/8d3e159），T4 真机验收待做 |
 | v1.5 | 2026-11-23 | G-06 状态回填：P3-3 Web 检索 T0–T2 落地（commits 090108f/a822a12/ce45baa），T3 真机验收待做 |
 | v1.3 | 2026-11-22 | 演进原则新增第 6 条：工具/skill 仅云端启用、本地模型纯聊天零工具调用（对齐 AGENTS.md 模型调用约束） |

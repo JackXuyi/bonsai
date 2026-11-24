@@ -280,6 +280,8 @@ pub fn run() {
             memory::consolidate,
             memory::forget_session,
             memory::forget_all,
+            memory::job::job_list,
+            memory::job::job_set_enabled,
             session::session_list,
             session::session_create,
             session::session_rename,

@@ -620,6 +620,19 @@ export interface ResumePrepareResult {
   lastSafeSeq: number;
 }
 
+/** P3-5 `job_list` 行（Rust `JobRow`，camelCase）。 */
+export interface JobRow {
+  id: string;
+  name: string;
+  scheduleKind: string;
+  scheduleExpr: string;
+  enabled: boolean;
+  lastRunAt?: string | null;
+  lastStatus?: string | null;
+  consecutiveFails: number;
+  payloadJson: string;
+}
+
 /** 步骤态：库/事件里是 `done|skipped|failed` 与 `ok|denied|error` 两套，
  *  统一收敛到这一组（store 里映射，组件只认这一份）。 */
 export type PlanStepStatus =

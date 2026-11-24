@@ -202,6 +202,7 @@ User Message
 - [x] A3：`intent_gate` 模块化；分类器默认不上（D3）。
 - [x] A4：`action_rank` 与 Decision 分立；proactive tick 消费候选。
 - [x] A5：`jobs` 表 + consolidate 迁入闸；失败 ≤3。
+- [x] P3-5 收尾：`calendar_remind` / `daily_digest` 迁入统一 scheduler（见 [`plan-jobs/v1`](../../plan-jobs/v1/index.md)）。
 - [ ] L3 真机：杀进程半截计划 → 面板恢复；写文件不双写（见 plan §11.1）。
 
 ---

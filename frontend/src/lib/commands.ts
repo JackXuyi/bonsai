@@ -27,6 +27,7 @@ import type {
   PersonaSnapshot,
   PlanTaskRow,
   ResumePrepareResult,
+  JobRow,
   PerceptionConfig,
   PerceptionStatus,
   ProfileEntry,
@@ -321,6 +322,11 @@ export const taskResume = (taskId: string) =>
 /** Phase 3 A2：ask_user 步骤选择。 */
 export const taskReentryChoice = (taskId: string, choice: "retry" | "skip" | "cancel") =>
   call<ResumePrepareResult>("task_reentry_choice", { taskId, choice });
+
+/** P3-5：常驻 job 列表 / 开关。 */
+export const jobList = () => call<JobRow[]>("job_list");
+export const jobSetEnabled = (name: string, enabled: boolean) =>
+  call<boolean>("job_set_enabled", { name, enabled });
 
 /** 审批回执：返回 false 表示该请求已过期（30s 超时已拒绝或已答复过）。 */
 export const mcpApprovalReply = (id: number, allow: boolean) =>
