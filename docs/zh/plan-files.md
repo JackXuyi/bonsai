@@ -1,6 +1,6 @@
 # 方案：文件操作分级（P3-2，roadmap G-05）
 
-> **状态**：T0–T3 已实施（2026-11-22，见 §11）；T4 真机验收待做
+> **状态**：T0–T4 已实施（2026-11-22 代码；2026-11-24 T4 真机验收通过，见 §11）
 > **日期**：2026-11-22
 > **依赖**：权限三档（agent_tools.rs `ToolAccess`，已落地）、审批门（mcp_admin.rs `AskFirstGate`，已落地）、云端工具循环（dialogue.rs `cloud_tool_loop`，已落地）、工具调用审计（db.rs `tool_calls` + `log_agent_tool_call`，已落地）、内置工具挂载模式（memory_search.rs `builtin_descriptor` + `build_agent_kit` 信号门控，已落地）
 > **对应 roadmap**：docs/zh/roadmap-agent-capabilities.md G-05（改造档）、G-10/G-12（权限与外部内容约束）、RK-02（隐私稀释风险）
@@ -300,10 +300,10 @@ if !fs_roots.is_empty() {
 
 **门禁**：cargo test --lib 374 全绿（filetools 16 + registry 单源测试更新）；clippy 对 filetools 零警告；`tsc --noEmit` 干净；vitest 99 过（FileCard 5 例：零授权空态 / 引导与列表 / 取消选择器不触发 add / 错误剥 code 前缀 toast / cloud_read 透传）；next lint 无警告。
 
-**待人工验收（T4，无法在 CI 做）**
+**T4 真机验收（2026-11-24，P2-12 用户确认通过）**
 
-1. 工具页添加目录（系统选择器真实弹出）→ 问「帮我在 X 目录里找上周的周报」→ DeepSeek 走 fs_search/fs_read 返回命中与摘要。
-2. 让模型写文件 → ask 弹卡出现（路径+内容预览）→ 拒绝后不落盘、允许后原子落盘；重名文件被拒且不覆盖。
-3. 问「删掉某个文件」→ tools[] 里根本没有 delete 工具，模型应回答做不到。
-4. cloud_read 关闭后再问文件内容 → 模型只知存在性，正文不出机器；开开关后内容可总结。
-5. 误触发率观察：普通闲聊（不含文件语义）不应产生 fs_* 调用（§9 最后一行的 might 信号门控备而不发）。
+1. ~~工具页添加目录 → fs_search/fs_read~~ ✅
+2. ~~写文件 ask 卡：拒不落盘 / 允原子落盘；重名不覆盖~~ ✅
+3. ~~「删掉」→ 无 delete 工具，诚实拒绝~~ ✅
+4. ~~cloud_read 关 → 正文不出机器~~ ✅
+5. ~~闲聊误触发率可接受~~ ✅

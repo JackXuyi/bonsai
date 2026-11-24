@@ -2,9 +2,9 @@
 
 | 文档信息 | 内容 |
 |---|---|
-| 版本 | v0.9 |
+| 版本 | v0.10（真机验收） |
 | 日期 | 2026-11-24 |
-| 状态 | **已实施**（T1–T7 含诊断列表）；「现状」锚点保留作历史 |
+| 状态 | **已实施**（T1–T7 含诊断列表；真机拔网/杀 sidecar 已过）；「现状」锚点保留作历史 |
 | 上游输入 | `plan-dialogue-timeout.md`（流式协议与前端看门狗）、`plan-context.md`（摘要与 L2 的 CAS 写回）、`plan-planning.md`（多步任务把单轮拉长到分钟级）、`plan-task-card.md`（三档权限与审计） |
 | 定位约束 | 本地 LLM 优先；失败不伪装成功；不静默重试有副作用的动作；能力不重复实现 |
 | 一句话 | 失败不是异常分支，是**每层都有名字、有预算、有出口**的正常状态 |
@@ -420,7 +420,7 @@ failure?: { kind: string; text: string; retryable: boolean };
 | T3 | 本提交 | `cargo test --lib` **562 passed / 1 ignored**（+3：A5 三段式、重发恢复、A11 落库）；`tsc` 0 错、`vitest` 187 | 云循环失败分支从「整轮放弃」改三段式（§5.2）：①可重试 kind 且预算有余 → 重发同一 msgs（纯读不重跑工具）②仍失败且已执行工具 → 收尾请求不带 tools ③连收尾也失败 → 本地拼装「做到了 X/Y + hint」（A5：任务卡保留已完成步，兜底句不出现）；失败轮落库（§5.3/D1）：`persist_model_turn` 单点接线两处落库段——完全失败不落 assistant 事件（兜底句只回 UI，A11：历史/digest 零污染），trace `reply_text` 空正文传 None、error 步带 `kind=… attempts=…`；反谄媚过滤与 disagreement 事件只对真正文执行 |
 | T4 | 本提交 | `cargo test --lib` **565 passed / 1 ignored**（+3：web 传输重试、web 非传输不重试、A6 Write 措辞 + A7 trace 步）；`tsc` 0 错、`vitest` 187 | `should_retry(err,…)→should_retry(&Failure,…)`：分类只此一处（`Failure::from_tool`），Read 档看 `kind.retryable`，陌生错误归 Internal 不再被当抖动重试；web 工具从「永不重试」放宽到传输层失败重试 1 次（Transport/Timeout，原 P2 裁决被推翻并更新对应测试）；新增 `tool_failure_reply`：Write（Ask）档失败回传固定带「该操作可能已部分生效，不要重复调用」（denied/bad_args 等未生效失败不带）；trace `retry` 步照记（pending 发起 / ok 成功） |
 | T5 | 本提交 | `cargo test --lib` **571 passed / 1 ignored**（+6：JobGuard 退避 4、A8 失败审计 2）；前端门禁随合并后统一跑 | `JobGuard`（settings KV，`job_backoff:<name>`）接线 `scheduler::tick`：退避门放 `decide_trigger` **之后**（该不该跑/能不能跑分开，§5.5）；`record_consolidate_failure` 落 `consolidate_runs status='error' + error` 行并 `record_fail`（60s 起步，第 5 次推明天 03:00），成功 `record_ok` 清零；v17 迁移（**SCHEMA_VERSION 16→17，user_version 同步 bump**）：`turn_trace.error_kind/attempts` + `consolidate_runs.error` 三列，`TraceRecorder` 从 error llm_round output 解析 `kind=/attempts=` 落列；`spawn_guarded` + `PanicGuard`（逐 tick catch_unwind，连续 5 次停循环）替换生产 spawn——计划写 7 处，实为 6 处（consolidate.rs:873 是测试桩、serve.rs:239 是进程 spawn），全部替换。**齐套收尾**（含当时未列的 calendar、CAP 留痕、有界自动重启、设置页）见 `docs/zh/plan-loop-supervisor.md` v0.4 |
-| T6 | t6-process 分支 `3e6c44d`，合并入 main | `cargo test --lib` **578 passed / 1 ignored**（+7：RestartGate 判定 4、DB 恢复 2、清残留 running 1）；`tsc` 0 错、`vitest` 187 | 新增 `llm/watchdog.rs`：`RestartGate` 纯判定（连续 2 次 down + `try_wait()` 确认退出才重启，每小时至多 1 次，D6 双门控），`init`/`record_request` 两入口接线，不侵入 persona/eval.rs，重启期间 emit `llm:restarting`；DB 第二出口（D5=A，lib.rs）：仅 `CORRUPT/NOTADB` 走改名备份 + 建新库 + `settings.db_recovered_at`/`db_backup_path`（绝不静默），`SQLITE_BUSY` 1s/2s/4s 重试 3 次再报错；`lock_conn` 中毒错误固定 `internal_poisoned` 前缀（不做 unsafe 恢复）；启动清残留：`tasks.status='running'` 且超 24h 标 `interrupted`。**真机拔网/杀 sidecar 验证留给用户**（A10 后半） |
+| T6 | t6-process 分支 `3e6c44d`，合并入 main | `cargo test --lib` **578 passed / 1 ignored**（+7：RestartGate 判定 4、DB 恢复 2、清残留 running 1）；`tsc` 0 错、`vitest` 187 | 新增 `llm/watchdog.rs`：`RestartGate` 纯判定（连续 2 次 down + `try_wait()` 确认退出才重启，每小时至多 1 次，D6 双门控），`init`/`record_request` 两入口接线，不侵入 persona/eval.rs，重启期间 emit `llm:restarting`；DB 第二出口（D5=A，lib.rs）：仅 `CORRUPT/NOTADB` 走改名备份 + 建新库 + `settings.db_recovered_at`/`db_backup_path`（绝不静默），`SQLITE_BUSY` 1s/2s/4s 重试 3 次再报错；`lock_conn` 中毒错误固定 `internal_poisoned` 前缀（不做 unsafe 恢复）；启动清残留：`tasks.status='running'` 且超 24h 标 `interrupted`。**真机拔网/杀 sidecar：2026-11-24 用户验收通过**（P2-12） |
 | T7 | 本提交 | `cargo test --lib dialogue::` 全绿；`tsc` 0 错；相关 vitest 绿 | `DialogueOutcome.failure` + `resolve_model_reply`：空正文用 `Failure.hint`（401/429/502/超时各说各话），不再抹成「脑子转不动」；云循环 `last_failure` 带回轮层；断流尾标；前端失败细行 + 取长规则 + retryable「重试」（复用上一句 user，不插第二条）；`turn_error` 结构化 |
 | T7·诊断 | 本提交 | `cargo test --lib failure::` 含 `recent_failures_*`；`tsc` + `DiagnosticsCard` vitest | 设置页「诊断」只读卡：`failures_recent` 合并 `turn_trace.error_kind`（仅 `assistant_event_id IS NULL`）与 `consolidate_runs.error`，最近 10 条，kind/时间/hint；无重跑按钮 |
 
@@ -431,6 +431,7 @@ failure?: { kind: string; text: string; retryable: boolean };
 | 版本 | 日期 | 变更 |
 |---|---|---|
 | v0.1 | 2026-11-23 | 初稿：现状 17 条实测锚点、`Failure` 分类法、分层策略表、T1–T7、A1–A12、D1–D8 |
+| v0.10 | 2026-11-24 | P2-12 真机验收：拔网/杀 sidecar + 诊断列表抽测通过 |
 | v0.9 | 2026-11-24 | T7 诊断列表补齐：`failures_recent` + 设置页 DiagnosticsCard；口径过滤已收尾轮 |
 | v0.8 | 2026-11-24 | T7 落地：失败不再抹成空串/同一句兜底；`DialogueOutcome.failure` 出 hint；前端失败细行 + 取长 + 重试；诊断列表仍待补 |
 | v0.7 | 2026-11-24 | T6 落地：sidecar 重启走 `serve::restart` 复用 `attempt_start`；watchdog 记录点在本地模型请求出口（成功也过门，用于清零连续计数）；trace 无 assistant_event_id 的轮暂不加统计过滤（口径留给 T7 诊断页一并做）；真机拔网/杀 sidecar 验证待用户执行 |

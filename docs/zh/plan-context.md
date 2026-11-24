@@ -2,9 +2,9 @@
 
 | 文档信息 | 内容 |
 |---|---|
-| 版本 | v0.7（文首回填） |
+| 版本 | v0.8（真机验收） |
 | 日期 | 2026-11-24 |
-| 状态 | **已实施**（T1–T6；T7 观测/真机待补）；「现状」锚点保留作历史 |
+| 状态 | **已实施**（T1–T7）；「现状」锚点保留作历史 |
 | 上游输入 | `docs/zh/plan-dialogue-timeout.md`（2026-11-23 流式协议与 IPC 兜底）、`docs/zh/plan-planning.md`（多步任务把单轮拉长到分钟级）、`docs/zh/plan-agent-mcp-skill.md`（工具目录与会话维度） |
 | 定位约束 | 本地 LLM 优先、本地零工具调用；记忆真值不删；能力不重复实现；助手非伴侣 |
 | 一句话 | 上下文不是数据，是每轮按预算现算的**投影** |
@@ -455,7 +455,7 @@ pub struct Built {
 | T4 | `3b73d9c` | `cargo test --lib` 518 passed（T4 自身 +8：迁移/索引/遗忘 4 + 会话命令 4；总数含工作区里他人未提交的 S0 检索改动）；`cargo check` 仅既有 `TraceRecorder::new` dead_code | `memory/db.rs` 落地 schema v15（`sessions` 表 + `idx_sessions_updated` + `idx_events_session` + `turn_trace` 三列 + `tasks.session_id`）+ 迁移回填 `default`（标题取首条用户消息，不造 digest，`proactive` 不建行）+ 会话 CRUD（`session_touch`/`list`/`get`/`create`/`rename`/`set_archived`）+ 遗忘补全（`forget_session` 连带 trace_steps/trace_trace/tasks/sessions；`forget_all` 补四张表）；`src/session.rs` 提供 5 个 IPC 命令；`add_event_meta` 成为会话索引的**唯一**维护点 |
 | T5 | 本提交 | `tsc --noEmit` 0 错；`vitest run` 186 passed（+14：sessionStore 纯函数 6 + SessionSwitch 切换/抽屉 8）；金丝雀 A12/A11/A13/A14 由 `SessionSwitch.test.tsx` 用真实 ChatPane + 真实 store 锁死；浏览器预览截图核对药丸/抽屉版式 | `sessionStore.ts`（列表/当前/切换/CRUD + 3 个纯函数）+ `SessionDrawer.tsx`（右侧 260px 抽屉：全宽「新对话」、行尾「…」菜单改名/归档/删除、归档折叠区、删除二次确认复用 `.mconfirm`）+ ChatPane 顶部会话药丸与 `currentId` 切换 effect；`useChat` 去常量、按发送时归属兜底；`chatStore.reset()` 供切换清流；抽屉整体滚动（行尾菜单绝对定位不被列表裁切） |
 | T6 | 本提交 | `cargo test --lib` **541 passed / 1 ignored**（+18：摘要纯函数 8 / db 4 / L2 4 / 装配集成 2）；`tsc --noEmit` 0 错、`vitest run` 187 passed（前端无改动）；`cargo check` 仅既有 `TraceRecorder::new` dead_code | `context.rs` 加 `digest_line` / `digest_merge` / `DigestTurn`（单行 ≤60 字、总 ≤600 字、去重、保留 L2 人话）；`db.rs` 加 `TurnMeta` + `dialogue_turns_meta`（`dialogue_history` 改为其投影，配对逻辑收敛成一份）+ `session_digest` / `session_set_digest`（水位线只前进）/ `session_set_digest_if`（CAS）/ `session_digest_candidates`；`dialogue.rs` 装配改两遍（探 dropped → 合并写库 → 带摘要重建），trace 的 `context_budget` 补 `digest=true/false`；`consolidate::digest_pass` 实现 L2（默认关、CAS 写回、本地 client、10s 超时、≤300 字）+ scheduler 在巩固后调用 |
-| T7 | | | |
+| T7 | 2026-11-24 真机 | 用户验收通过（P2-12）：会话切换/遗忘/trace `context_budget` 观测抽测过线；无新代码提交 | TraceTimeline 已展示 `context_budget`；用量文案与 A10 真机核对 |
 
 ---
 
@@ -463,6 +463,7 @@ pub struct Built {
 
 | 版本 | 日期 | 说明 |
 |---|---|---|
+| v0.8 | 2026-11-24 | P2-12 真机验收通过：T7 闭合 |
 | v0.7 | 2026-11-24 | P2-10 文首回填：状态改为已实施（T1–T6）；T7 仍空 |
 | v0.1 | 2026-11-23 | 初稿：现状锚点、三段预算、三级压缩、schema v15、T1–T7、A1–A17、D1–D8 |
 | v0.1.1 | 2026-11-23 | T1 落地：`context.rs` 估算器 / 窗口表 / `Budget` / 分段上限；方案本身无变更 |

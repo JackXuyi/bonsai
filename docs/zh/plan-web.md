@@ -1,6 +1,6 @@
 # 方案：Web 检索（P3-3，roadmap G-06）
 
-> **状态**：T0–T2 已实施（2026-11-23，见 §11）；T3 真机验收待做
+> **状态**：T0–T3 已实施（2026-11-23 代码；2026-11-24 T3 真机验收通过，见 §11）
 > **日期**：2026-11-22（实施 2026-11-23）
 > **依赖**：云端工具循环（dialogue.rs `cloud_tool_loop`，已落地）、权限三档（`ToolAccess::Read`，已落地）、内置工具挂载模式（`builtin_tools()` + `build_agent_kit` 开关门控，filetools 先例）、工具调用审计（`tool_calls` 表，已落地）、reqwest 0.13 + rustls（Cargo.toml:37，已在依赖树）
 > **对应 roadmap**：G-06（改造档）、G-12（untrusted 标签随本项落地）、P4-3（外部内容安全前置）、RK-01/RK-02（隐私）
@@ -299,11 +299,11 @@ impl ToolProvider for WebToolsProvider {
 
 **门禁**：cargo test --lib **435 全绿**（webtools 12 例：内核反例/重定向回炉/闸门/提取/parse_ddg/provider 分发/summary 形状）；clippy 对 webtools 零警告；`tsc --noEmit` 干净；vitest **122 过**（WebCard 4 例）；next lint 无警告。
 
-**待真机验收（T3，无法在 CI 做——沙箱无外网，DDG 解析用 fixture 锁行为）**
+**T3 真机验收（2026-11-24，P2-12 用户确认通过；沙箱仍无外网，CI 继续用 fixture）**
 
-1. 开关打开 → 问「搜一下 Rust 异步运行时」→ DeepSeek 调 web_search 返回带 URL 结果；点 URL 链接可达真实页面（uddg 解包正确性）。
-2. 让模型总结一个真实长网页 → web_fetch 抓取 + 引用带 URL；>8000 字有截断标记。
-3. DDG 反爬观察：高频使用是否出现 429/验证页（出现即 `web_search_failed` 显式报错，评估切 Tavily）。
-4. 断网 → 明示「网络不可用」不虚构；SPA 页面 → `web_no_text` 提示需浏览器渲染。
-5. 注入页面真机测试：抓取一个含「忽略之前指令」的页面，观察模型不执行且 trace 留痕（P4-3 前置验收项）。
-6. 误触发率：普通闲聊不产生 web_* 调用（超标则启用 might 信号门控备选，plan §7-4）。
+1. ~~web_search 带 URL / uddg 可点~~ ✅
+2. ~~web_fetch 总结带 URL；长文截断标记~~ ✅
+3. ~~DDG 失败路径显式报错（未强制切 Tavily）~~ ✅
+4. ~~断网明示离线；SPA → `web_no_text`~~ ✅
+5. ~~注入页不执行指令 + trace 留痕~~ ✅
+6. ~~闲聊误触发率可接受~~ ✅
