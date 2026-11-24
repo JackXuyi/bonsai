@@ -46,6 +46,8 @@ pub struct CandidateFact {
     /// Correction marker: the pipeline resolves WHICH active fact this
     /// supersedes at apply time (so same-run facts count — plan §5.1 ④).
     pub is_correction: bool,
+    /// 模型显式指认的目标 fact（plan-intelligence I3）；规则路径为 None。
+    pub target_fact_id: Option<i64>,
     /// 用户画像出口（plan-user-profile.md §3）：key 已过白名单校验的
     /// (key, value)。一份抽取两个出口——facts 照旧落库，画像由
     /// consolidate apply 写进 user_profile。None = 本条不带画像。
@@ -196,8 +198,7 @@ fn overlap(a: &str, b: &str) -> usize {
         .count()
 }
 
-/// The most overlapping active fact for a correction utterance, if any.
-/// Threshold 2 shared bigrams = "same subject, plausibly about it".
+/// 规则路径：最重叠的有效 fact。阈值 ≥3 共享 2-gram（I3 D8，降低短中文误匹配）。
 pub fn correction_target<'a>(
     facts: &'a [ActiveFact],
     content: &str,
@@ -205,9 +206,28 @@ pub fn correction_target<'a>(
     facts
         .iter()
         .map(|f| (overlap(content, &f.content), f))
-        .filter(|(hits, _)| *hits >= 2)
+        .filter(|(hits, _)| *hits >= 3)
         .max_by_key(|(hits, _)| *hits)
         .map(|(_, f)| f)
+}
+
+/// 显式 id 优先；校验存在于 active 列表后再接受。
+pub fn resolve_correction_target<'a>(
+    facts: &'a [ActiveFact],
+    content: &str,
+    target_fact_id: Option<i64>,
+) -> Option<&'a ActiveFact> {
+    if let Some(id) = target_fact_id {
+        if let Some(f) = facts.iter().find(|f| f.id == id) {
+            // 软校验：至少 1 个共享 2-gram；否则拒绝乱填 id。
+            if overlap(content, &f.content) >= 1 {
+                return Some(f);
+            }
+            return None;
+        }
+        return None;
+    }
+    correction_target(facts, content)
 }
 
 pub struct RuleExtractor;
@@ -226,6 +246,7 @@ impl FactExtractor for RuleExtractor {
                     confidence: 0.95,
                     source_event_id: Some(ev.id),
                     is_correction: false,
+                    target_fact_id: None,
                     profile: None,
                     source: "rule",
                 });
@@ -243,6 +264,7 @@ impl FactExtractor for RuleExtractor {
                     confidence: 0.6,
                     source_event_id: Some(ev.id),
                     is_correction: true,
+                    target_fact_id: None,
                     profile: None,
                     source: "rule",
                 });
@@ -265,6 +287,7 @@ impl FactExtractor for RuleExtractor {
                     confidence: *confidence,
                     source_event_id: Some(ev.id),
                     is_correction: false,
+                    target_fact_id: None,
                     profile,
                     source: "rule",
                 });
@@ -279,6 +302,7 @@ impl FactExtractor for RuleExtractor {
                     confidence: 0.7,
                     source_event_id: Some(ev.id),
                     is_correction: false,
+                    target_fact_id: None,
                     profile: Some(p),
                     source: "rule",
                 });
@@ -393,6 +417,8 @@ struct RawCandidate {
     #[serde(default)]
     correction: bool,
     #[serde(default)]
+    target_fact_id: Option<i64>,
+    #[serde(default)]
     profile: Option<RawProfile>,
 }
 
@@ -441,6 +467,7 @@ fn parse_candidates(reply: &str, events: &[EventRow]) -> Option<Vec<CandidateFac
             confidence,
             source_event_id: Some(ev.id),
             is_correction: c.correction,
+            target_fact_id: c.target_fact_id,
             profile,
             source: "model",
         });

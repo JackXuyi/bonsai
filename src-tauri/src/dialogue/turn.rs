@@ -258,6 +258,8 @@ pub(crate) fn chat_turn_inner(
         // 调用，预留只会白占 2B 的 8192 窗口。
         let reserve = cloud && will_use_tools;
         let (digest, upto) = db::session_digest(&conn, session_id).unwrap_or((None, None));
+        // I1/I2：隐式轻量检索（装配期；本地零工具）。空 = 零注入。
+        let retrieved = crate::memory::implicit::retrieve_block(&conn, user_text);
 
         // 装一遍先看会丢几轮（纯计算，微秒级）。
         let mut built = crate::context::build(
@@ -265,6 +267,7 @@ pub(crate) fn chat_turn_inner(
                 env: &env,
                 body: &body,
                 digest: digest.as_deref(),
+                retrieved: retrieved.as_deref(),
                 history: turns_to_history(&turns),
                 user_text,
                 reserve_tool_room: reserve,
@@ -299,6 +302,7 @@ pub(crate) fn chat_turn_inner(
                         env: &env,
                         body: &body,
                         digest: Some(&merged),
+                        retrieved: retrieved.as_deref(),
                         history: turns_to_history(&turns),
                         user_text,
                         reserve_tool_room: reserve,

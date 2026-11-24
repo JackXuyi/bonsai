@@ -2,8 +2,10 @@
 //!
 //! 所有派生记忆（fact / preference / boundary / profile）通过本表挂到
 //! 原始 `events`。Forget Service 只认这里的边，不靠各表零散 FK 猜来源。
+//!
+//! v19：`independence_group` —— 同组内对同一 fact 不重复 bump（plan-intelligence I3）。
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use super::clock;
 
@@ -23,6 +25,22 @@ pub struct EvidenceRef {
     pub memory_id: String,
 }
 
+/// 由 event 推导独立性组：优先 session_id，否则 `event:{id}`。
+pub fn group_for_event(conn: &Connection, event_id: i64) -> rusqlite::Result<String> {
+    let session = conn
+        .query_row(
+            "SELECT session_id FROM events WHERE id = ?1",
+            params![event_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(match session {
+        Some(s) if !s.is_empty() => s,
+        _ => format!("event:{event_id}"),
+    })
+}
+
 /// 幂等挂一条证据。`event_id` 必须已存在。
 pub fn link(
     conn: &Connection,
@@ -31,16 +49,29 @@ pub fn link(
     event_id: i64,
     relation: &str,
 ) -> rusqlite::Result<()> {
+    let group = group_for_event(conn, event_id)?;
+    link_with_group(conn, memory_type, memory_id, event_id, relation, &group)
+}
+
+pub fn link_with_group(
+    conn: &Connection,
+    memory_type: &str,
+    memory_id: &str,
+    event_id: i64,
+    relation: &str,
+    independence_group: &str,
+) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT OR IGNORE INTO memory_evidence
-             (memory_type, memory_id, event_id, relation, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+             (memory_type, memory_id, event_id, relation, created_at, independence_group)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![
             memory_type,
             memory_id,
             event_id,
             relation,
-            clock::now_iso()
+            clock::now_iso(),
+            independence_group
         ],
     )?;
     Ok(())
@@ -78,6 +109,17 @@ pub fn link_boundary(conn: &Connection, boundary_id: i64, event_id: i64) -> rusq
 
 pub fn link_profile(conn: &Connection, key: &str, event_id: i64, relation: &str) -> rusqlite::Result<()> {
     link(conn, TYPE_PROFILE, key, event_id, relation)
+}
+
+/// 该 fact 是否已有给定 independence_group 的 evidence。
+pub fn fact_has_group(conn: &Connection, fact_id: i64, group: &str) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM memory_evidence
+          WHERE memory_type = ?1 AND memory_id = ?2 AND independence_group = ?3",
+        params![TYPE_FACT, fact_id.to_string(), group],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
 }
 
 /// 一批 event 上挂着的全部派生记忆（去重）。

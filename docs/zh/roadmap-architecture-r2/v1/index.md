@@ -138,6 +138,8 @@ Forget Session / Forget Event / Forget All **统一走同一 Forget Service**，
 
 ## 5. Phase 2 · Intelligence（依赖 Phase 1）
 
+> **详细方案**：[`plan-intelligence-phase2/v1`](../../plan-intelligence-phase2/v1/index.md)（隐式检索、Memory Context Builder、证据独立性、评测与裁决默认）。
+
 | ID | 优先级 | 事项 | 交付物 | 依赖 |
 |---|---|---|---|---|
 | **I1** | P1 | 隐式相关记忆轻量检索 | 非 `might_recall` 门控的轻量 Top-K；无命中则不注入 | R1、R2 |
@@ -165,9 +167,10 @@ User Message
 
 ### 5.2 Phase 2 完成定义
 
-- [ ] 用户无需显式「你还记得吗」时，相关偏好/事实可在预算内注入（有评测基线，不靠体感）。
-- [ ] 召回内容不可提升为系统指令（注入防御单测）。
-- [ ] Confidence / Correction 行为有独立性与显式目标 ID 的测试；Importance 文档标明「未成熟」。
+- [x] 用户无需显式「你还记得吗」时，相关偏好/事实可在预算内注入（有评测基线，不靠体感）。
+- [x] 召回内容不可提升为系统指令（注入防御单测）。
+- [x] Confidence / Correction 行为有独立性与显式目标 ID 的测试；Importance 文档标明「未成熟」。
+- [ ] I4 eval 棘轮扩展 / L3 真机隐式用例（见 plan M5）——可选补强。
 
 ---
 
@@ -234,3 +237,4 @@ User Message
 |---|---|---|
 | v1 | 2026-11-24 | 初稿：由第二轮架构 Review 收敛为三阶段可执行路线；代码锚点含 `forget_session`、`beyond_window`、`synonym::CLUSTERS`、`should_speak` UTC 日界 |
 | v1.1 | 2026-11-24 | Phase 1 详细方案落盘：`docs/zh/plan-reliability-phase1/v1` |
+| v1.2 | 2026-11-24 | Phase 2 详细方案落盘：`docs/zh/plan-intelligence-phase2/v1` |

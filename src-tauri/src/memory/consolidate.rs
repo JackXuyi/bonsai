@@ -212,7 +212,11 @@ fn apply_candidates(
         // Stage ④: corrections resolve their target against the CURRENT
         // snapshot (extraction time only had the pre-run state).
         if cand.is_correction {
-            if let Some(old) = super::extract::correction_target(&facts, &cand.content) {
+            if let Some(old) = super::extract::resolve_correction_target(
+                &facts,
+                &cand.content,
+                cand.target_fact_id,
+            ) {
                 let old_id = old.id;
                 report.contradicted += db::invalidate_fact(conn, old_id)?;
                 facts.retain(|f| f.id != old_id);
@@ -242,9 +246,28 @@ fn apply_candidates(
         let norm = super::extract::normalize(&cand.content);
         let fact_id = match facts.iter_mut().find(|f| super::extract::normalize(&f.content) == norm) {
             Some(existing) => {
-                db::bump_fact(conn, existing.id, REPEAT_BUMP)?;
-                report.merged += 1;
-                existing.confidence = ((existing.confidence + REPEAT_BUMP).min(0.95) * 100.0).round() / 100.0;
+                // I3：同 independence_group 不重复 bump；跨会话才加置信。
+                let mut bumped = false;
+                if let Some(eid) = cand.source_event_id {
+                    let group = crate::memory::evidence::group_for_event(conn, eid)?;
+                    if crate::memory::evidence::fact_has_group(conn, existing.id, &group)? {
+                        crate::memory::evidence::link_fact(conn, existing.id, eid)?;
+                    } else {
+                        db::bump_fact(conn, existing.id, REPEAT_BUMP)?;
+                        crate::memory::evidence::link_fact(conn, existing.id, eid)?;
+                        existing.confidence =
+                            ((existing.confidence + REPEAT_BUMP).min(0.95) * 100.0).round() / 100.0;
+                        bumped = true;
+                    }
+                } else {
+                    db::bump_fact(conn, existing.id, REPEAT_BUMP)?;
+                    existing.confidence =
+                        ((existing.confidence + REPEAT_BUMP).min(0.95) * 100.0).round() / 100.0;
+                    bumped = true;
+                }
+                if bumped {
+                    report.merged += 1;
+                }
                 existing.id
             }
             None => {
@@ -454,7 +477,11 @@ mod tests {
     const END: &str = "2026-11-19T00:00:00Z"; // events land 2026-11-18T12:00Z, strictly inside
 
     fn say(conn: &Connection, content: &str) -> i64 {
-        db::add_event_meta(conn, "chat", content, Some("user"), Some("s1")).unwrap()
+        say_in(conn, content, "s1")
+    }
+
+    fn say_in(conn: &Connection, content: &str, session: &str) -> i64 {
+        db::add_event_meta(conn, "chat", content, Some("user"), Some(session)).unwrap()
     }
 
     fn nightly() -> Options<'static> {
@@ -601,7 +628,8 @@ mod tests {
 
         say(&conn, "我喜欢雨天");
         say(&conn, "我每天散步半小时");
-        say(&conn, "我喜欢雨天。"); // punctuation differs → merge
+        // I3：跨会话重复才 bump；同会话复读不计 merged。
+        say_in(&conn, "我喜欢雨天。", "s2");
         say(&conn, "说错了，其实是我不喜欢雨天"); // correction targets the rainy fact
 
         let report = run_with_rules(&mut conn, &nightly()).unwrap();
@@ -634,7 +662,8 @@ mod tests {
         .unwrap();
         assert_eq!(r1.promoted, 0); // 0.7 < 0.8 — not confident enough yet
 
-        say(&conn, "我喜欢雨天");
+        // I3：必须跨 independence_group（不同会话）才 bump。
+        say_in(&conn, "我喜欢雨天", "s2");
         let r2 = run_with_rules(
             &mut conn,
             &Options { trigger: "manual", window_start: START, window_end: END },
@@ -647,6 +676,30 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM preferences WHERE category = 'like'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(prefs, 1); // promote_fact dedup guard held
+    }
+
+    #[test]
+    fn same_session_repeat_does_not_bump_confidence() {
+        let _guard = clock::pinned("2026-11-18T12:00:00Z");
+        let mut conn = mem();
+        say(&conn, "我喜欢雨天");
+        run_with_rules(
+            &mut conn,
+            &Options { trigger: "manual", window_start: START, window_end: END },
+        )
+        .unwrap();
+        say(&conn, "我喜欢雨天");
+        let r2 = run_with_rules(
+            &mut conn,
+            &Options { trigger: "manual", window_start: START, window_end: END },
+        )
+        .unwrap();
+        assert_eq!(r2.merged, 0, "同会话复读不得 bump");
+        assert_eq!(r2.promoted, 0);
+        let conf: f64 = conn
+            .query_row("SELECT confidence FROM facts LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert!((conf - 0.7).abs() < 1e-9, "置信度应仍为 0.7，got {conf}");
     }
 
     #[test]
@@ -818,6 +871,7 @@ mod tests {
                     confidence: 0.7,
                     source_event_id: Some(999_999),
                     is_correction: false,
+                    target_fact_id: None,
                     profile: None,
                     source: "rule",
                 }]

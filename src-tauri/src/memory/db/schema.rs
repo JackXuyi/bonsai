@@ -6,6 +6,9 @@ use rusqlite::{params, Connection};
 
 use crate::memory::clock;
 
+/// SCHEMA_VERSION = 19（2026-11-24）：Intelligence Phase 2 I3
+/// （docs/zh/plan-intelligence-phase2/v1）——
+/// `memory_evidence.independence_group`：同会话重复提及不无限 bump 置信度。
 /// SCHEMA_VERSION = 18（2026-11-24）：Reliability Phase 1
 /// （docs/zh/plan-reliability-phase1/v1）——
 /// `memory_evidence`（派生记忆统一溯源）+ `proactive_daily_usage`（主动搭话
@@ -49,7 +52,7 @@ use crate::memory::clock;
 /// EXISTS 不会给已有表加列；v9→v9 不触发 migrate，INSERT 带 user_text 直接
 /// 报 "table turn_trace has no column named user_text"。教训：改 SCHEMA 必
 /// 须同时 bump 此版本号。
-pub(crate) const SCHEMA_VERSION: i64 = 18;
+pub(crate) const SCHEMA_VERSION: i64 = 19;
 
 /// 不进会话列表的保留 session id：主动搭话（bubble 照旧实时显示，但不占
 /// 用户能切换的对话窗口）。sessions 里**永不建行**（plan-context D6）。
@@ -132,7 +135,9 @@ CREATE TABLE IF NOT EXISTS facts (
     source_event_id INTEGER REFERENCES events(id),
     invalid_at      TEXT,
     confidence      REAL NOT NULL DEFAULT 0.6,  -- rises on repeated mention, gate for preference promotion
-    importance      INTEGER NOT NULL DEFAULT 3  -- 1..5; P0 keeps the column only (plan: no logic yet)
+    -- importance 未成熟（plan-intelligence-phase2 I3 / D9）：默认 3，禁止当成
+    -- 已精排的质量指标对外宣传；排序公式可保留权重，文档预期已降级。
+    importance      INTEGER NOT NULL DEFAULT 3  -- 1..5; immature
 );
 
 -- Layer 3a: user preferences (report §4.1: four categories).
@@ -476,6 +481,7 @@ CREATE TABLE IF NOT EXISTS memory_evidence (
     event_id    INTEGER NOT NULL REFERENCES events(id),
     relation    TEXT NOT NULL,   -- 'extracted' | 'promoted' | 'derived' | 'manual_link'
     created_at  TEXT NOT NULL,
+    independence_group TEXT,     -- v19：通常 = session_id；无会话则 event:{id}
     PRIMARY KEY (memory_type, memory_id, event_id, relation)
 );
 CREATE INDEX IF NOT EXISTS idx_evidence_event ON memory_evidence(event_id);
@@ -598,8 +604,28 @@ pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     // v18：evidence / 配额表由 SCHEMA IF NOT EXISTS 建出；这里只回填可追溯行。
     backfill_memory_evidence(conn)?;
     clear_stale_proactive_reserves(conn)?;
+    // v19：independence_group 列（老表 CREATE IF NOT EXISTS 不会加列）。
+    add_column_if_missing(conn, "memory_evidence", "independence_group", "TEXT")?;
+    backfill_independence_groups(conn)?;
 
     set_user_version_if_behind(conn)?;
+    Ok(())
+}
+
+/// v19：按 event.session_id 回填 independence_group（空则 event:{id}）。
+fn backfill_independence_groups(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE memory_evidence
+            SET independence_group = (
+                SELECT COALESCE(
+                    NULLIF(e.session_id, ''),
+                    'event:' || e.id
+                )
+                FROM events e WHERE e.id = memory_evidence.event_id
+            )
+          WHERE independence_group IS NULL OR independence_group = ''",
+        [],
+    )?;
     Ok(())
 }
 
