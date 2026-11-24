@@ -108,24 +108,38 @@ pub fn is_weekend(now: &chrono::DateTime<chrono::Local>) -> bool {
 /// Background loop: every 5 s, recompute the base state, log changes to the
 /// L2 memory store and broadcast `face:state` to the frontend.
 pub fn spawn_tick_loop(handle: AppHandle) {
-    std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_secs(5));
-        let now = chrono::Local::now();
-        let hour = now.hour() as u8;
-        let weekend = is_weekend(&now);
+    // plan-loop-supervisor T1：双层守卫；CAP 留痕；D1 有界复活。
+    crate::failure::spawn_guarded("face", move || {
+        crate::failure::try_register(&handle, "face");
+        let mut guard = crate::failure::PanicGuard::new("face");
+        loop {
+            std::thread::sleep(Duration::from_secs(5));
+            crate::failure::try_heartbeat(&handle, "face");
+            let _ = guard.tick(|| {
+                let now = chrono::Local::now();
+                let hour = now.hour() as u8;
+                let weekend = is_weekend(&now);
 
-        let controller = handle.state::<Mutex<FaceController>>();
-        let mut controller = match controller.lock() {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-        if let Some(state) = controller.tick(hour, weekend) {
-            drop(controller); // release before touching the memory store
-            let store = handle.state::<crate::memory::MemoryStore>();
-            if let Ok(conn) = store.inner().0.lock() {
-                let _ = crate::memory::db::add_event(&conn, "face_state", state.as_str());
+                let controller = handle.state::<Mutex<FaceController>>();
+                let mut controller = match controller.lock() {
+                    Ok(c) => c,
+                    Err(_) => return,
+                };
+                if let Some(state) = controller.tick(hour, weekend) {
+                    drop(controller); // release before touching the memory store
+                    let store = handle.state::<crate::memory::MemoryStore>();
+                    if let Ok(conn) = store.inner().0.lock() {
+                        let _ = crate::memory::db::add_event(&conn, "face_state", state.as_str());
+                    }
+                    let _ = handle.emit("face:state", state);
+                }
+            });
+            if guard.stopped() {
+                if crate::failure::on_loop_cap(&handle, "face", "consecutive panic cap") {
+                    spawn_tick_loop(handle.clone());
+                }
+                break;
             }
-            let _ = handle.emit("face:state", state);
         }
     });
 }

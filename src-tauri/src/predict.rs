@@ -346,12 +346,13 @@ fn last_shut_up(conn: &Connection) -> rusqlite::Result<Option<chrono::NaiveDate>
 /// 48h feedback windows. Delivery emits `prediction:asked` for the frontend.
 pub fn spawn(app: tauri::AppHandle) {
     use tauri::Manager;
-    // T5 §5.6/A9：逐 tick panic 守卫——整个迭代包进 catch_unwind，
-    // panic 不杀线程；连续 5 次退出（防 panic 风暴）。
+    // T5 §5.6/A9 + plan-loop-supervisor：双层守卫；CAP 留痕；D1 有界复活。
     crate::failure::spawn_guarded("predict", move || {
+        crate::failure::try_register(&app, "predict");
         let mut pg = crate::failure::PanicGuard::new("predict");
         loop {
         std::thread::sleep(std::time::Duration::from_secs(60));
+        crate::failure::try_heartbeat(&app, "predict");
         let _ = pg.tick(|| {
         let Some(store) = app.try_state::<crate::memory::MemoryStore>() else {
             return;
@@ -411,7 +412,9 @@ pub fn spawn(app: tauri::AppHandle) {
         }
         });
         if pg.stopped() {
-            log::error!("predict 循环连续 panic 达上限，本线程退出");
+            if crate::failure::on_loop_cap(&app, "predict", "consecutive panic cap") {
+                spawn(app.clone());
+            }
             break;
         }
         }

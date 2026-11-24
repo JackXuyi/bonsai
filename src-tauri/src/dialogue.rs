@@ -2237,36 +2237,50 @@ pub fn proactive_iteration(app: &tauri::AppHandle) -> Option<Decision> {
 /// `proactive:message` to the frontend, record it in memory.
 pub fn spawn_proactive(app: tauri::AppHandle) {
     use tauri::Manager;
-    std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_secs(PROACTIVE_POLL_SECS));
-        let Some(decision) = proactive_iteration(&app) else {
-            continue;
-        };
-        if !matches!(decision, Decision::Speak) {
-            continue;
-        }
+    // plan-loop-supervisor T1：双层守卫；CAP 留痕；D1 有界复活。
+    crate::failure::spawn_guarded("proactive", move || {
+        crate::failure::try_register(&app, "proactive");
+        let mut guard = crate::failure::PanicGuard::new("proactive");
+        loop {
+            std::thread::sleep(Duration::from_secs(PROACTIVE_POLL_SECS));
+            crate::failure::try_heartbeat(&app, "proactive");
+            let _ = guard.tick(|| {
+                let Some(decision) = proactive_iteration(&app) else {
+                    return;
+                };
+                if !matches!(decision, Decision::Speak) {
+                    return;
+                }
 
-        let Some(store) = app.try_state::<MemoryStore>() else {
-            continue;
-        };
-        let Ok(mut backend) = crate::persona::backend() else {
-            continue;
-        };
-        let hour = chrono::Local::now().hour() as u32;
-        let message = (|| -> Option<(String, i64)> {
-            let card = app.try_state::<Persona>()?;
-            // proactive_text locks per phase itself — no guard held here.
-            proactive_text(store.inner(), backend.as_mut(), card.inner(), hour, false)
-                .ok()
-                .flatten()
-        })();
+                let Some(store) = app.try_state::<MemoryStore>() else {
+                    return;
+                };
+                let Ok(mut backend) = crate::persona::backend() else {
+                    return;
+                };
+                let hour = chrono::Local::now().hour() as u32;
+                let message = (|| -> Option<(String, i64)> {
+                    let card = app.try_state::<Persona>()?;
+                    // proactive_text locks per phase itself — no guard held here.
+                    proactive_text(store.inner(), backend.as_mut(), card.inner(), hour, false)
+                        .ok()
+                        .flatten()
+                })();
 
-        if let Some((text, turn_id)) = message {
-            use tauri::Emitter;
-            let _ = app.emit(
-                "proactive:message",
-                serde_json::json!({ "text": text, "turn_id": turn_id }),
-            );
+                if let Some((text, turn_id)) = message {
+                    use tauri::Emitter;
+                    let _ = app.emit(
+                        "proactive:message",
+                        serde_json::json!({ "text": text, "turn_id": turn_id }),
+                    );
+                }
+            });
+            if guard.stopped() {
+                if crate::failure::on_loop_cap(&app, "proactive", "consecutive panic cap") {
+                    spawn_proactive(app.clone());
+                }
+                break;
+            }
         }
     });
 }

@@ -414,12 +414,14 @@ pub fn maybe_first_refusal(
 /// boot so a long absence is recomputed honestly.
 pub fn spawn(app: tauri::AppHandle) {
     use tauri::Manager;
-    // T5 §5.6/A9：逐 tick panic 守卫（同 growth 循环）。
+    // T5 §5.6/A9 + plan-loop-supervisor：双层守卫；CAP 留痕；D1 有界复活。
     crate::failure::spawn_guarded("relationship", move || {
+        crate::failure::try_register(&app, "relationship");
         let mut booted = false;
         let mut pg = crate::failure::PanicGuard::new("relationship");
         loop {
             std::thread::sleep(std::time::Duration::from_secs(60));
+            crate::failure::try_heartbeat(&app, "relationship");
             let Some(store) = app.try_state::<crate::memory::MemoryStore>() else {
                 continue;
             };
@@ -443,7 +445,9 @@ pub fn spawn(app: tauri::AppHandle) {
                 Err(_) => {}
             });
             if pg.stopped() {
-                log::error!("relationship 循环连续 panic 达上限，本线程退出");
+                if crate::failure::on_loop_cap(&app, "relationship", "consecutive panic cap") {
+                    spawn(app.clone());
+                }
                 break;
             }
         }

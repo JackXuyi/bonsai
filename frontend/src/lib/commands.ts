@@ -40,6 +40,7 @@ import type {
   TurnTrace,
   WebStatus,
   FaceSkinManifest,
+  LoopStatus,
 } from "./types";
 
 async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -235,6 +236,12 @@ export const personaSnapshot = () => call<PersonaSnapshot>("persona_snapshot");
 export const debugLogTail = (file: LogFile, lines?: number) =>
   call<string[]>("debug_log_tail", { file, lines });
 export const debugOpenLogDir = () => call<void>("debug_open_log_dir");
+
+// ---------- background loops（plan-loop-supervisor）----------
+export const loopsStatus = () => call<LoopStatus[]>("loops_status");
+export const loopAutorestartGet = () => call<boolean>("loop_autorestart_get");
+export const loopAutorestartSet = (enabled: boolean) =>
+  call<boolean>("loop_autorestart_set", { enabled });
 
 // ---------- agent 工具管线（mcp_admin.rs，spec-s2/s4/s5）----------
 export const mcpServerList = () => call<McpServerRow[]>("mcp_server_list");

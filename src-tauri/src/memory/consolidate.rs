@@ -150,8 +150,10 @@ fn read_phase(
     // just never becomes a fact, preference, or boundary.
     let no_record = crate::onboarding::no_record_items(conn)?;
     let mut blocked = 0usize;
+    // plan-loop-supervisor：`kind=system` 是运维留痕，永不进抽取（宁漏勿误）。
     let user_events: Vec<db::EventRow> = events
         .iter()
+        .filter(|e| e.kind != "system")
         .filter(|e| e.role.as_deref() != Some("assistant"))
         .filter(|e| {
             let hit = no_record.iter().any(|item| e.content.contains(item));

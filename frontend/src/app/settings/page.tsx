@@ -2,6 +2,7 @@
 
 // 设置页：M1 模型配置 + M4 日志 + agent 能力（MCP / Skill，spec-s6）+ 形象选择。
 import { LogsCard } from "@/components/settings/LogsCard";
+import { LoopsCard } from "@/components/settings/LoopsCard";
 import { McpSection } from "@/components/agent/McpSection";
 import { SkillSection } from "@/components/agent/SkillSection";
 import { ModelSection } from "@/components/settings/ModelSection";
@@ -14,6 +15,7 @@ export default function SettingsPage() {
       <ModelSection />
       <McpSection />
       <SkillSection />
+      <LoopsCard />
       <LogsCard />
     </div>
   );

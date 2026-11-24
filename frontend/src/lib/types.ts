@@ -2,6 +2,16 @@
 // 以 ui/main.js 实际消费的字段为准，不确定的标 optional。
 // 命令签名以 src-tauri/src/lib.rs generate_handler 为准，不凭记忆写。
 
+// ── background loops（plan-loop-supervisor / failure::loops_status）──
+export interface LoopStatus {
+  name: string;
+  state: "running" | "stopped" | string;
+  last_beat?: string | null;
+  stopped_at?: string | null;
+  detail?: string | null;
+  restarts: number;
+}
+
 // ── face ──────────────────────────────────────────────────────
 export type FaceState =
   | "calm"

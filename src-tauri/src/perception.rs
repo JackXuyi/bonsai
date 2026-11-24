@@ -337,34 +337,46 @@ pub fn decision_input(
 /// layer → refresh LatestSignals. Runs forever; every source is skipped
 /// unless both switches are on.
 pub fn spawn(app: tauri::AppHandle, cfg_path: PathBuf) {
-    std::thread::spawn(move || {
+    // plan-loop-supervisor T1：双层守卫；CAP 留痕；D1 有界复活。
+    crate::failure::spawn_guarded("perception", move || {
         use tauri::Manager;
+        crate::failure::try_register(&app, "perception");
+        let mut guard = crate::failure::PanicGuard::new("perception");
         let mut collector = Collector::primed();
         loop {
             std::thread::sleep(std::time::Duration::from_secs(POLL_INTERVAL_SECS));
-            let cfg = load_config(&cfg_path);
-            let idle = os::idle_secs().unwrap_or(f64::MAX);
-            let inputs = OsInputs::real(&cfg);
+            crate::failure::try_heartbeat(&app, "perception");
+            let _ = guard.tick(|| {
+                let cfg = load_config(&cfg_path);
+                let idle = os::idle_secs().unwrap_or(f64::MAX);
+                let inputs = OsInputs::real(&cfg);
 
-            let samples = if cfg.enabled {
-                collector.tick(&cfg, &inputs)
-            } else {
-                Vec::new()
-            };
+                let samples = if cfg.enabled {
+                    collector.tick(&cfg, &inputs)
+                } else {
+                    Vec::new()
+                };
 
-            if let Some(store) = app.try_state::<MemoryStore>() {
-                if let Ok(conn) = store.inner().0.lock() {
-                    for s in &samples {
-                        let _ = crate::memory::db::add_event(&conn, "perception", &s.content);
+                if let Some(store) = app.try_state::<MemoryStore>() {
+                    if let Ok(conn) = store.inner().0.lock() {
+                        for s in &samples {
+                            let _ = crate::memory::db::add_event(&conn, "perception", &s.content);
+                        }
                     }
                 }
-            }
 
-            if let Some(state) = app.try_state::<PerceptionState>() {
-                let mut latest = state.latest.lock().unwrap_or_else(|e| e.into_inner());
-                latest.idle_secs = idle;
-                latest.front_app = inputs.app;
-                latest.updated_ts = crate::memory::clock::now_iso();
+                if let Some(state) = app.try_state::<PerceptionState>() {
+                    let mut latest = state.latest.lock().unwrap_or_else(|e| e.into_inner());
+                    latest.idle_secs = idle;
+                    latest.front_app = inputs.app;
+                    latest.updated_ts = crate::memory::clock::now_iso();
+                }
+            });
+            if guard.stopped() {
+                if crate::failure::on_loop_cap(&app, "perception", "consecutive panic cap") {
+                    spawn(app.clone(), cfg_path.clone());
+                }
+                break;
             }
         }
     });

@@ -1,20 +1,26 @@
-//! 通用重试与失败恢复（plan-retry.md §4）。
+//! 通用重试与失败恢复（plan-retry.md §4）+ 后台循环守卫
+//! （plan-loop-supervisor.md）。
 //!
 //! 一句话：失败不是异常分支，是**每层都有名字、有预算、有出口**的正常状态。
 //!
-//! 本模块只做判定与算术：把 `LlmError` / 工具错误串 / `rusqlite::Error`
-//! 收敛成同一个 [`Failure`]，并提供确定性的 [`Backoff`]。重试动作发生在
-//! 各层（模型 / 流式 / 工具 / 轮 / 作业），本模块不知道谁在调它——所以它
-//! 能被单测钉死，也不持有任何全局状态。
+//! 本模块做判定与算术：把 `LlmError` / 工具错误串 / `rusqlite::Error`
+//! 收敛成同一个 [`Failure`]，并提供确定性的 [`Backoff`]。另含后台 loop 的
+//! [`PanicGuard`] / [`spawn_guarded`] / [`LoopRegistry`]（D5 同文件）。
 //!
-//! 三条硬规矩（对应 §3 不变量）：
+//! 三条硬规矩（对应 plan-retry §3 不变量）：
 //! - 只有 [`FailureKind::retryable`] 为真的 kind 才允许重试；
 //! - 分类**只此一处**（字符串匹配在这退役，别在调用点再写 `starts_with`）；
 //! - 退避必须可复现：同样的 attempt 得到同样的毫秒数，测试才能断言确切值。
 
+use std::collections::HashMap;
+use std::sync::Mutex;
 use std::time::Duration;
 
+use serde::Serialize;
+use tauri::{AppHandle, Emitter, Manager};
+
 use crate::llm::LlmError;
+use crate::memory::MemoryStore;
 
 /// 11 类失败。新增一类要同时给它 hint、retryable 与 from_* 的归类分支。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -672,6 +678,266 @@ fn panic_summary(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
+// --------------------------------------------------------------- loop registry（plan-loop-supervisor）
+
+/// 齐套验收的 8 条常驻 loop 名（D3）。顺序稳定，给设置页列表用。
+pub const LOOP_NAMES: &[&str] = &[
+    "scheduler",
+    "predict",
+    "growth",
+    "relationship",
+    "perception",
+    "face",
+    "proactive",
+    "calendar",
+];
+
+/// `settings` 键：用户是否允许 CAP 后有界自动重启（D1，默认 off）。
+pub const SETTING_AUTORESTART: &str = "loop_autorestart";
+
+fn loop_status_key(name: &str) -> String {
+    format!("loop_status:{name}")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoopState {
+    Running,
+    Stopped,
+}
+
+#[derive(Debug, Clone)]
+struct LoopHealth {
+    state: LoopState,
+    last_beat: Option<String>,
+    stopped_at: Option<String>,
+    detail: Option<String>,
+    restarts: u32,
+}
+
+impl Default for LoopHealth {
+    fn default() -> Self {
+        LoopHealth {
+            state: LoopState::Running,
+            last_beat: None,
+            stopped_at: None,
+            detail: None,
+            restarts: 0,
+        }
+    }
+}
+
+/// 进程内存活注册表（plan-loop-supervisor §4.1 / D5）。
+/// 不持久化存活态；停机细节另写 `settings`。
+#[derive(Default)]
+pub struct LoopRegistry {
+    inner: Mutex<HashMap<&'static str, LoopHealth>>,
+}
+
+/// 设置页 / 命令用的只读快照。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct LoopStatusDto {
+    pub name: String,
+    pub state: String,
+    pub last_beat: Option<String>,
+    pub stopped_at: Option<String>,
+    pub detail: Option<String>,
+    pub restarts: u32,
+}
+
+impl LoopRegistry {
+    /// 启动或复活时登记为 running；**保留** `restarts` 计数。
+    pub fn register(&self, name: &'static str) {
+        let now = crate::memory::clock::now_iso();
+        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = map.entry(name).or_default();
+        entry.state = LoopState::Running;
+        entry.last_beat = Some(now);
+        entry.stopped_at = None;
+        entry.detail = None;
+    }
+
+    pub fn heartbeat(&self, name: &str) {
+        let now = crate::memory::clock::now_iso();
+        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(h) = map.get_mut(name) {
+            if h.state == LoopState::Running {
+                h.last_beat = Some(now);
+            }
+        }
+    }
+
+    /// CAP 停机：记 stopped；返回当前 `restarts`（尚未因本次复活递增）。
+    pub fn mark_stopped(&self, name: &str, summary: &str) -> u32 {
+        let now = crate::memory::clock::now_iso();
+        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        // 停机时 name 可能来自 &'static，但 HashMap 键是 &'static——用已知表查找。
+        let key = LOOP_NAMES.iter().copied().find(|n| *n == name);
+        let Some(key) = key else {
+            return 0;
+        };
+        let entry = map.entry(key).or_default();
+        entry.state = LoopState::Stopped;
+        entry.stopped_at = Some(now);
+        entry.detail = Some(summary.to_string());
+        entry.restarts
+    }
+
+    /// 尝试占用一次复活额度。已重启过 → false；否则 restarts+=1 并 true。
+    pub fn try_consume_restart(&self, name: &str) -> bool {
+        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(key) = LOOP_NAMES.iter().copied().find(|n| *n == name) else {
+            return false;
+        };
+        let entry = map.entry(key).or_default();
+        if entry.restarts >= 1 {
+            return false;
+        }
+        entry.restarts += 1;
+        true
+    }
+
+    pub fn snapshot(&self) -> Vec<LoopStatusDto> {
+        let map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        LOOP_NAMES
+            .iter()
+            .map(|name| {
+                let h = map.get(name).cloned().unwrap_or_default();
+                LoopStatusDto {
+                    name: (*name).to_string(),
+                    state: match h.state {
+                        LoopState::Running => "running".into(),
+                        LoopState::Stopped => "stopped".into(),
+                    },
+                    last_beat: h.last_beat,
+                    stopped_at: h.stopped_at,
+                    detail: h.detail,
+                    restarts: h.restarts,
+                }
+            })
+            .collect()
+    }
+}
+
+/// 安全登记（Registry 尚未 manage 时静默跳过——单测 / 早期启动）。
+pub fn try_register(app: &AppHandle, name: &'static str) {
+    if let Some(reg) = app.try_state::<LoopRegistry>() {
+        reg.register(name);
+    }
+}
+
+pub fn try_heartbeat(app: &AppHandle, name: &str) {
+    if let Some(reg) = app.try_state::<LoopRegistry>() {
+        reg.heartbeat(name);
+    }
+}
+
+/// CAP / 外层退出单点留痕（§4.2）：settings + system 事件 + registry + emit。
+pub fn record_loop_stop(app: &AppHandle, name: &str, detail: &str) {
+    log::error!("后台循环 {name} 停机：{detail}");
+    let restarts = app
+        .try_state::<LoopRegistry>()
+        .map(|r| r.mark_stopped(name, detail))
+        .unwrap_or(0);
+    let at = crate::memory::clock::now_iso();
+    let payload = serde_json::json!({
+        "state": "stopped",
+        "at": at,
+        "detail": detail,
+        "restarts": restarts,
+    });
+    if let Some(store) = app.try_state::<MemoryStore>() {
+        if let Ok(conn) = store.0.lock() {
+            let _ = crate::memory::db::set_setting(
+                &conn,
+                &loop_status_key(name),
+                &payload.to_string(),
+            );
+            let content = serde_json::json!({
+                "loop": name,
+                "event": "stopped",
+                "detail": detail,
+                "restarts": restarts,
+            })
+            .to_string();
+            let _ = crate::memory::db::add_event(&conn, "system", &content);
+        }
+    }
+    let _ = app.emit(
+        "loop:stopped",
+        serde_json::json!({ "name": name, "detail": detail, "restarts": restarts }),
+    );
+}
+
+fn autorestart_enabled(app: &AppHandle) -> bool {
+    let Some(store) = app.try_state::<MemoryStore>() else {
+        return false;
+    };
+    let Ok(conn) = store.0.lock() else {
+        return false;
+    };
+    matches!(
+        crate::memory::db::get_setting(&conn, SETTING_AUTORESTART)
+            .ok()
+            .flatten()
+            .as_deref(),
+        Some("on")
+    )
+}
+
+/// D1+D2：开关开着且本进程该 name 尚未复活过 → 立即允许再起。
+/// 调用方在返回 true 后**立刻**再调一次本模块的 `spawn`（不追溯、无冷却）。
+pub fn maybe_autorestart(app: &AppHandle, name: &'static str) -> bool {
+    if !autorestart_enabled(app) {
+        return false;
+    }
+    let Some(reg) = app.try_state::<LoopRegistry>() else {
+        return false;
+    };
+    if !reg.try_consume_restart(name) {
+        return false;
+    }
+    let _ = app.emit(
+        "loop:restarted",
+        serde_json::json!({ "name": name }),
+    );
+    true
+}
+
+/// CAP 停机：留痕；若应复活返回 true（调用方立即再 spawn）。
+pub fn on_loop_cap(app: &AppHandle, name: &'static str, detail: &str) -> bool {
+    record_loop_stop(app, name, detail);
+    maybe_autorestart(app, name)
+}
+
+// ---------------------------------------------------------------- commands
+
+#[tauri::command]
+pub fn loops_status(registry: tauri::State<'_, LoopRegistry>) -> Vec<LoopStatusDto> {
+    registry.snapshot()
+}
+
+#[tauri::command]
+pub fn loop_autorestart_get(store: tauri::State<'_, MemoryStore>) -> Result<bool, String> {
+    let conn = store.0.lock().map_err(|e| e.to_string())?;
+    Ok(matches!(
+        crate::memory::db::get_setting(&conn, SETTING_AUTORESTART)
+            .map_err(|e| e.to_string())?
+            .as_deref(),
+        Some("on")
+    ))
+}
+
+#[tauri::command]
+pub fn loop_autorestart_set(
+    store: tauri::State<'_, MemoryStore>,
+    enabled: bool,
+) -> Result<bool, String> {
+    let conn = store.0.lock().map_err(|e| e.to_string())?;
+    let val = if enabled { "on" } else { "off" };
+    crate::memory::db::set_setting(&conn, SETTING_AUTORESTART, val).map_err(|e| e.to_string())?;
+    Ok(enabled)
+}
+
 #[cfg(test)]
 mod guard_tests {
     use super::*;
@@ -748,5 +1014,39 @@ mod guard_tests {
         assert_eq!(next.hour(), 3, "第 5 次失败推到明天 03:00");
         assert_eq!(next.date_naive(), now.date_naive() + chrono::Duration::days(1));
         assert!(!g.should_run(&conn, now + chrono::Duration::hours(1)));
+    }
+
+    #[test]
+    fn registry_register_heartbeat_and_stop_snapshot() {
+        let reg = LoopRegistry::default();
+        assert_eq!(reg.snapshot().len(), LOOP_NAMES.len(), "八行齐套");
+        reg.register("face");
+        reg.heartbeat("face");
+        let snap = reg.snapshot();
+        let face = snap.iter().find(|r| r.name == "face").unwrap();
+        assert_eq!(face.state, "running");
+        assert!(face.last_beat.is_some());
+
+        let r = reg.mark_stopped("face", "consecutive panic cap");
+        assert_eq!(r, 0);
+        let face = reg.snapshot().into_iter().find(|x| x.name == "face").unwrap();
+        assert_eq!(face.state, "stopped");
+        assert_eq!(face.detail.as_deref(), Some("consecutive panic cap"));
+        assert!(face.stopped_at.is_some());
+    }
+
+    #[test]
+    fn registry_restart_hard_cap_one_per_process() {
+        let reg = LoopRegistry::default();
+        reg.register("calendar");
+        reg.mark_stopped("calendar", "cap");
+        assert!(reg.try_consume_restart("calendar"), "第一次复活放行");
+        assert!(!reg.try_consume_restart("calendar"), "硬顶：第二次拒绝");
+        // 复活后再登记不应清零 restarts。
+        reg.register("calendar");
+        let cal = reg.snapshot().into_iter().find(|x| x.name == "calendar").unwrap();
+        assert_eq!(cal.state, "running");
+        assert_eq!(cal.restarts, 1);
+        assert!(!reg.try_consume_restart("calendar"));
     }
 }

@@ -11,6 +11,8 @@ import {
   dialogueChatStream,
   facePreview,
   growthAck,
+  loopAutorestartSet,
+  loopsStatus,
   onboardingSubmit,
   perceptionSetConfig,
 } from "@/lib/commands";
@@ -51,6 +53,14 @@ describe("commands", () => {
     await onboardingSubmit({ ageGroup: "adult", crisisAck: true, answers: [] });
     expect(invokeMock).toHaveBeenCalledWith("onboarding_submit", {
       payload: { ageGroup: "adult", crisisAck: true, answers: [] },
+    });
+
+    await loopsStatus();
+    expect(invokeMock).toHaveBeenCalledWith("loops_status", undefined);
+
+    await loopAutorestartSet(true);
+    expect(invokeMock).toHaveBeenCalledWith("loop_autorestart_set", {
+      enabled: true,
     });
   });
 });

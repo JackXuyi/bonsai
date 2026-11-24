@@ -730,28 +730,42 @@ fn count_reminders_today(conn: &Connection, start_iso: &str, end_iso: &str) -> u
 
 pub fn spawn(app: tauri::AppHandle) {
     use tauri::Manager;
-    std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_secs(POLL_SECS));
-        let Some(store) = app.try_state::<MemoryStore>() else {
-            continue;
-        };
-        let Some(state) = app.try_state::<CalendarState>() else {
-            continue;
-        };
-        let Ok(mut conn) = store.inner().0.lock() else {
-            continue;
-        };
-        let now = Local::now();
-        match tick(&mut conn, state.inner().source(), now) {
-            Ok(Some(r)) => {
-                // The bubble carries a title, so it goes to the webview only —
-                // never to the events table, never to the tray tooltip.
-                drop(conn);
-                use tauri::Emitter;
-                let _ = app.emit("calendar:remind", r);
+    // plan-loop-supervisor T1/D3：calendar 计入齐套；双层守卫；CAP 留痕；D1 有界复活。
+    crate::failure::spawn_guarded("calendar", move || {
+        crate::failure::try_register(&app, "calendar");
+        let mut guard = crate::failure::PanicGuard::new("calendar");
+        loop {
+            std::thread::sleep(Duration::from_secs(POLL_SECS));
+            crate::failure::try_heartbeat(&app, "calendar");
+            let _ = guard.tick(|| {
+                let Some(store) = app.try_state::<MemoryStore>() else {
+                    return;
+                };
+                let Some(state) = app.try_state::<CalendarState>() else {
+                    return;
+                };
+                let Ok(mut conn) = store.inner().0.lock() else {
+                    return;
+                };
+                let now = Local::now();
+                match tick(&mut conn, state.inner().source(), now) {
+                    Ok(Some(r)) => {
+                        // The bubble carries a title, so it goes to the webview only —
+                        // never to the events table, never to the tray tooltip.
+                        drop(conn);
+                        use tauri::Emitter;
+                        let _ = app.emit("calendar:remind", r);
+                    }
+                    Ok(None) => {}
+                    Err(_) => {}
+                }
+            });
+            if guard.stopped() {
+                if crate::failure::on_loop_cap(&app, "calendar", "consecutive panic cap") {
+                    spawn(app.clone());
+                }
+                break;
             }
-            Ok(None) => {}
-            Err(_) => continue,
         }
     });
 }

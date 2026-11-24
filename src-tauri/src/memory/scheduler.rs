@@ -92,16 +92,19 @@ fn hours_since_last_run(conn: &rusqlite::Connection) -> Option<f64> {
 /// Spawn the polling thread. Never blocks startup; errors are logged, the
 /// loop keeps running (a bad night must not kill the companion).
 pub fn spawn(app: AppHandle) {
-    // T5 §5.6/A9：线程与逐 tick 双层 panic 守卫——panic 不杀进程，也
-    // 不允许同一循环无限刷日志（连续 5 次即停）。
+    // T5 §5.6/A9 + plan-loop-supervisor：双层守卫；CAP 留痕；D1 有界复活。
     crate::failure::spawn_guarded("scheduler", move || {
+        crate::failure::try_register(&app, "scheduler");
         let mut guard = crate::failure::PanicGuard::new("scheduler");
         loop {
             std::thread::sleep(std::time::Duration::from_secs(POLL_SECONDS));
+            crate::failure::try_heartbeat(&app, "scheduler");
             let res = guard.tick(|| tick(&app));
             match res {
                 None if guard.stopped() => {
-                    log::error!("scheduler 循环连续 panic 达上限，本线程退出");
+                    if crate::failure::on_loop_cap(&app, "scheduler", "consecutive panic cap") {
+                        spawn(app.clone());
+                    }
                     break;
                 }
                 Some(Ok(())) => {}

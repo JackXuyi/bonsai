@@ -98,6 +98,9 @@ pub fn run() {
             let store = open_memory_store(&db_path)?;
             app.manage(store);
 
+            // plan-loop-supervisor：进程内 loop 存活注册表（先于各 spawn 登记）。
+            app.manage(failure::LoopRegistry::default());
+
             // LLM config (spec-m1): UI settings win over env, survive restarts.
             // Backfill BEFORE the sidecar starts so `llm:ready` names the
             // configured model.
@@ -270,6 +273,9 @@ pub fn run() {
             persona::snapshot::persona_snapshot,
             debug::debug_log_tail,
             debug::debug_open_log_dir,
+            failure::loops_status,
+            failure::loop_autorestart_get,
+            failure::loop_autorestart_set,
             memory::memory_overview,
             generation::scaffold_reply,
             face::face_current,

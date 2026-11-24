@@ -187,12 +187,13 @@ pub fn tick(
 /// catches up via the pending announcement queue on the next open.
 pub fn spawn(app: tauri::AppHandle) {
     use tauri::Manager;
-    // T5 §5.6/A9：逐 tick panic 守卫——panic 不杀线程（下个 tick 照跑），
-    // 连续 5 次才退出；外层 spawn_guarded 兜底记录线程级 panic。
+    // T5 §5.6/A9 + plan-loop-supervisor：双层守卫；CAP 留痕；D1 有界复活。
     crate::failure::spawn_guarded("growth", move || {
+        crate::failure::try_register(&app, "growth");
         let mut pg = crate::failure::PanicGuard::new("growth");
         loop {
             std::thread::sleep(std::time::Duration::from_secs(60));
+            crate::failure::try_heartbeat(&app, "growth");
             let Some(store) = app.try_state::<crate::memory::MemoryStore>() else {
                 continue;
             };
@@ -212,7 +213,9 @@ pub fn spawn(app: tauri::AppHandle) {
                 Err(_) => {}
             });
             if pg.stopped() {
-                log::error!("growth 循环连续 panic 达上限，本线程退出");
+                if crate::failure::on_loop_cap(&app, "growth", "consecutive panic cap") {
+                    spawn(app.clone());
+                }
                 break;
             }
         }

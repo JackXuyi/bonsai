@@ -680,3 +680,60 @@ dialog.skill-dialog:not([open]) {
   padding: 6px 20px;
   font-size: 12px;
 }
+
+/* 后台循环卡（plan-loop-supervisor D4） */
+.loops-hint {
+  margin: 0 0 8px;
+}
+.loops-list {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.loops-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(60, 50, 30, 0.04);
+  font-size: 12px;
+}
+.loops-list li.off {
+  background: rgba(160, 60, 40, 0.06);
+}
+.loops-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-top: 4px;
+  background: #bbb;
+}
+.loops-dot.ok {
+  background: #5a9e6f;
+}
+.loops-dot.bad {
+  background: #c45c4a;
+}
+.loops-name {
+  flex: none;
+  min-width: 72px;
+  font-weight: 600;
+  color: var(--ink, #3c321e);
+}
+.loops-id {
+  display: block;
+  font-weight: 400;
+  font-size: 10px;
+  color: var(--muted, #8a7d64);
+}
+.loops-meta {
+  flex: 1;
+  min-width: 0;
+  color: var(--muted, #8a7d64);
+  word-break: break-word;
+}
