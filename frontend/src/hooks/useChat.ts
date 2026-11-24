@@ -15,19 +15,40 @@ import { useChatStore } from "@/lib/stores/chatStore";
 import { usePlanStore } from "@/lib/stores/planStore";
 import { useSessionStore } from "@/lib/stores/sessionStore";
 import { toast } from "@/lib/stores/uiStore";
-import type { DialogueOutcome } from "@/lib/types";
+import type { DialogueOutcome, TurnFailure } from "@/lib/types";
 
 /** 事件静默上限：模型层重试（plan-retry §4.2）把最长静默拉到
  *  3 次 × 120s ≈ 360s；240s 是折中——覆盖「一次超时 + 一次重试」的常见
  *  形状，又不至于让真断流的等待变得不可忍受。只判「真断了」，不判「慢」。 */
 export const IDLE_TIMEOUT_MS = 240000;
 
+/** 旧兜底句标记：取长规则用——本地已流出的字不许被它盖掉（plan-retry §7.2）。 */
+const FALLBACK_MARK = "脑子转不动";
+
 type StreamMsg = {
   delta?: string;
   task_step?: unknown;
   turn_done?: DialogueOutcome;
-  turn_error?: string;
+  /** T7：对象优先；旧字符串仍兼容。 */
+  turn_error?: string | TurnFailure;
 };
+
+function turnErrorText(err: string | TurnFailure): string {
+  return typeof err === "string" ? err : err.message;
+}
+
+function turnErrorFailure(err: string | TurnFailure): TurnFailure {
+  if (typeof err === "string") {
+    return { kind: "internal", message: err, retryable: true };
+  }
+  return err;
+}
+
+/** 正文取长：已流出的字只增不减；兜底句不得覆盖流式正文。 */
+export function pickReplyText(local: string, outcomeReply: string): string {
+  if (local.trim() && outcomeReply.includes(FALLBACK_MARK)) return local;
+  return local.length > outcomeReply.length ? local : outcomeReply;
+}
 
 export function useChat() {
   const [chatting, setChatting] = useState(false);
@@ -51,13 +72,15 @@ export function useChat() {
     }
   }, []);
 
-  const send = useCallback((raw: string) => {
-    const text = raw.trim();
+  /** 开一轮流：`reuseUserId` 有值时不插新 user 气泡（失败重试）。 */
+  const beginTurn = useCallback((text: string, reuseUserId: number | null) => {
     if (!text || chattingRef.current) return;
 
     const store = chat.getState();
     if (!inTauri) {
-      store.add({ kind: "user", text });
+      if (reuseUserId === null) {
+        store.add({ kind: "user", text });
+      }
       store.add({
         kind: "bot",
         text: "（浏览器预览模式：Rust 后端未连接，发消息不会有人回。）",
@@ -65,8 +88,9 @@ export function useChat() {
       return;
     }
 
-    const userId = store.add({ kind: "user", text, ts: new Date().toISOString() });
-    // 本轮归属：发送那一刻的当前会话（切会话时抽屉已禁用，这里只做兜底）。
+    const userId =
+      reuseUserId ??
+      store.add({ kind: "user", text, ts: new Date().toISOString() });
     const sessionId = useSessionStore.getState().currentId;
     chattingRef.current = true;
     setChatting(true);
@@ -86,14 +110,27 @@ export function useChat() {
     };
 
     // 失败/断流：已流出的字一个都不撤（后端可能仍在跑，撤了就前后端各说一套）。
-    const fail = (reason: unknown) => {
+    // 读 messages 必须用 chat.getState() 新快照——beginTurn 开头缓存的
+    // store.messages 在 appendText 之后是过期的。
+    const fail = (reason: string | TurnFailure) => {
       store.remove(typingId);
-      const tail = `\n\n（这一轮没等到结果：${reason}。它可能还在后台跑——别急着重发，稍等再看。）`;
+      const f = turnErrorFailure(reason);
+      const msg = turnErrorText(reason);
       if (bubbleId !== null) {
-        store.appendText(bubbleId, tail);
-        store.patch(bubbleId, { streaming: false });
+        const local =
+          chat.getState().messages.find((m) => m.id === bubbleId)?.text ?? "";
+        store.patch(bubbleId, {
+          streaming: false,
+          failure: f,
+          // 无本地正文时用 hint 填；有正文只挂 failure，不覆盖。
+          ...(local.trim() ? {} : { text: msg }),
+        });
       } else {
-        store.add({ kind: "bot", text: tail.trim() });
+        store.add({
+          kind: "bot",
+          text: msg,
+          failure: f,
+        });
       }
     };
 
@@ -102,7 +139,11 @@ export function useChat() {
       idle = setTimeout(() => {
         if (settled) return;
         settled = true;
-        fail(`静默超过 ${IDLE_TIMEOUT_MS / 1000} 秒`);
+        fail({
+          kind: "timeout",
+          message: `静默超过 ${IDLE_TIMEOUT_MS / 1000} 秒`,
+          retryable: true,
+        });
         endTurn();
         toast("等太久了：它可能还在后台跑");
       }, IDLE_TIMEOUT_MS);
@@ -119,8 +160,6 @@ export function useChat() {
           activeTaskRef.current = ev.id;
         }
         plan.applyTaskEvent(msg.task_step);
-        // 计划语义（goal + 每步 intent）只有 plan_list 有：开卡与收尾各拉一次
-        // 做基线/终态对齐，执行中靠事件增量推进，不做定时轮询。
         if (
           ev?.event === "task_start" ||
           ev?.event === "task_done" ||
@@ -131,9 +170,6 @@ export function useChat() {
         return;
       }
 
-      // 会话归属兜底（A13 已在前端禁用切换，这里只防万一）：这一轮属于旧
-      // 会话时，正文一个字符都不往新会话里写；但终态必须收尾，否则输入框
-      // 会永远卡在「在飞」。
       if (useSessionStore.getState().currentId !== sessionId) {
         if (msg?.turn_done || msg?.turn_error) {
           settled = true;
@@ -142,7 +178,6 @@ export function useChat() {
         return;
       }
 
-      // 终态事件：整轮的权威结果（P1 之后不再有「命令返回值」这条路）
       if (msg?.turn_done) {
         settled = true;
         const outcome = msg.turn_done;
@@ -154,13 +189,25 @@ export function useChat() {
             ts: new Date().toISOString(),
           });
         }
-        store.setText(bubbleId, outcome.reply);
-        store.setNote(bubbleId, noteFor(outcome));
+        const local =
+          chat.getState().messages.find((m) => m.id === bubbleId)?.text ?? "";
+        const body = pickReplyText(local, outcome.reply);
+        store.setText(bubbleId, body);
+        // 失败行已经说清原因，徽注不再叠「本地模型未就绪」。
+        store.setNote(bubbleId, outcome.failure ? "" : noteFor(outcome));
+        const patch: { turnId?: number; failure?: TurnFailure } = {};
         if (outcome.turn_id) {
-          store.patch(bubbleId, { turnId: outcome.turn_id });
+          patch.turnId = outcome.turn_id;
           store.patch(userId, { turnId: outcome.turn_id });
         }
-        facePreview("greeted").catch(() => {});
+        if (outcome.failure) {
+          patch.failure = outcome.failure;
+        }
+        if (Object.keys(patch).length) store.patch(bubbleId, patch);
+        // 失败轮不装成功脸（plan-retry §7.2）。
+        if (!outcome.failure) {
+          facePreview("greeted").catch(() => {});
+        }
         endTurn();
         return;
       }
@@ -186,14 +233,45 @@ export function useChat() {
     };
 
     armIdle();
-    // 命令只负责「受理」；结果一律走 Channel 事件。
     dialogueChatStream(text, sessionId, onDelta).catch((err) => {
       if (settled) return;
       settled = true;
-      fail(err);
+      fail(String(err));
       endTurn();
     });
   }, [chat]);
 
-  return { send, chatting, cancel };
+  const send = useCallback(
+    (raw: string) => {
+      const text = raw.trim();
+      if (!text) return;
+      beginTurn(text, null);
+    },
+    [beginTurn]
+  );
+
+  /** 失败气泡「重试」：去掉失败 bot，复用上一句 user，不插第二条用户气泡。 */
+  const retry = useCallback(
+    (botMessageId: number) => {
+      if (chattingRef.current) return;
+      const msgs = chat.getState().messages;
+      const idx = msgs.findIndex((m) => m.id === botMessageId);
+      if (idx < 0) return;
+      let userId: number | null = null;
+      let userText = "";
+      for (let i = idx - 1; i >= 0; i--) {
+        if (msgs[i].kind === "user") {
+          userId = msgs[i].id;
+          userText = msgs[i].text;
+          break;
+        }
+      }
+      if (userId === null || !userText.trim()) return;
+      chat.getState().remove(botMessageId);
+      beginTurn(userText.trim(), userId);
+    },
+    [beginTurn, chat]
+  );
+
+  return { send, chatting, cancel, retry };
 }

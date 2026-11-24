@@ -171,6 +171,13 @@ export interface DialogueFilter {
   hedged_disagreement?: boolean;
 }
 
+/** 轮层失败（plan-retry T7）：kind 决定文案，不再靠字符串 includes。 */
+export interface TurnFailure {
+  kind: string;
+  message: string;
+  retryable: boolean;
+}
+
 export interface DialogueOutcome {
   reply: string;
   crisis?: boolean;
@@ -180,6 +187,8 @@ export interface DialogueOutcome {
   filter?: DialogueFilter;
   /** 本回合链路追踪 id（spec-s8），气泡「查看详情」入口 */
   turn_id?: number | null;
+  /** 本轮失败：有值时气泡下方出失败行；401/429/超时各说各话 */
+  failure?: TurnFailure | null;
 }
 
 /** 主动搭话手动触发的返回（spec-s8：文本 + trace turn id）。 */

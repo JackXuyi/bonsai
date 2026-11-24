@@ -10,9 +10,12 @@ import { MarkdownText } from "./MarkdownText";
 export function MessageBubble({
   message,
   onStick,
+  onRetry,
 }: {
   message: ChatMessage;
   onStick?: () => void;
+  /** 失败行「重试」（plan-retry T7）：仅 retryable 时出现 */
+  onRetry?: (botMessageId: number) => void;
 }) {
   if (message.kind === "typing") {
     return (
@@ -63,6 +66,22 @@ export function MessageBubble({
           </>
         ) : null}
       </div>
+      {message.failure && !message.streaming ? (
+        <div className="turn-failure" role="status">
+          <span className="turn-failure-text">
+            这一轮没等到结果：{message.failure.message}
+          </span>
+          {message.failure.retryable && onRetry ? (
+            <button
+              type="button"
+              className="turn-failure-retry"
+              onClick={() => onRetry(message.id)}
+            >
+              重试
+            </button>
+          ) : null}
+        </div>
+      ) : null}
       {/* 操作条（spec-s8）：时间 / 复制 / 查看详情；流式中不渲染 */}
       {!message.streaming && <MessageActions message={message} />}
     </>

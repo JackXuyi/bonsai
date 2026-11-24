@@ -47,7 +47,7 @@ function bubblesFromHistory(
 
 export function ChatPane() {
   const messages = useChatStore((s) => s.messages);
-  const { send, chatting, cancel } = useChat();
+  const { send, chatting, cancel, retry } = useChat();
   const currentId = useSessionStore((s) => s.currentId);
   const current = useCurrentSession();
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -248,7 +248,12 @@ export function ChatPane() {
           )}
           {!empty &&
             messages.map((m: ChatMessage) => (
-              <MessageBubble key={m.id} message={m} onStick={stick} />
+              <MessageBubble
+                key={m.id}
+                message={m}
+                onStick={stick}
+                onRetry={m.kind === "bot" && m.failure?.retryable ? retry : undefined}
+              />
             ))}
         </div>
         {showToBottom && (

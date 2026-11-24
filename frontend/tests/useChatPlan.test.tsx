@@ -109,7 +109,7 @@ describe("useChat × 计划事件", () => {
     expect(planListMock).toHaveBeenCalled();
   });
 
-  it("IPC 等超时：已流出的字不撤，提示「可能还在后台跑」", async () => {
+  it("IPC 等超时：已流出的字不撤，失败挂在 failure 行", async () => {
     chatMock.mockImplementation(async (_t: string, _s: string, ch: { onmessage: ((m: unknown) => void) | null }) => {
       ch.onmessage?.({ delta: "黄山这周前半段……" });
       throw new Error("[IPC] dialogue_chat_stream did not respond within 15000ms");
@@ -121,24 +121,28 @@ describe("useChat × 计划事件", () => {
       const bot = useChatStore.getState().messages.filter((m) => m.kind === "bot");
       expect(bot).toHaveLength(1);
       expect(bot[0].text).toContain("黄山这周前半段");
-      expect(bot[0].text).toContain("可能还在后台跑");
+      expect(bot[0].failure?.message).toContain("dialogue_chat_stream");
+      expect(bot[0].failure?.retryable).toBe(true);
     });
-    // 不该出现「没发出去」这种误判文案
+    // 不该出现「没发出去」这种误判文案；正文也不该被错误串盖掉
     const all = useChatStore.getState().messages.map((m) => m.text).join("|");
     expect(all).not.toContain("没发出去");
+    expect(all).not.toMatch(/^Error:/);
   });
 
   it("turn_error 事件：气泡说明失败原因，不静默", async () => {
     chatMock.mockImplementation(async (_t: string, _s: string, ch: { onmessage: ((m: unknown) => void) | null }) => {
       ch.onmessage?.({ task_step: { event: "task_start", id: "t2", goal: "g", planned: true } });
-      ch.onmessage?.({ turn_error: "model_unreachable" });
+      ch.onmessage?.({
+        turn_error: { kind: "transport", message: "model_unreachable", retryable: true },
+      });
     });
     render(<Harness />);
     fireEvent.click(screen.getByText("发"));
 
     await waitFor(() => {
       const bot = useChatStore.getState().messages.filter((m) => m.kind === "bot");
-      expect(bot.some((m) => m.text.includes("model_unreachable"))).toBe(true);
+      expect(bot.some((m) => m.failure?.message.includes("model_unreachable") || m.text.includes("model_unreachable"))).toBe(true);
     });
   });
 

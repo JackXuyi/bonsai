@@ -142,6 +142,39 @@
   padding: 1px 6px;
 }
 
+/* 失败细行（plan-retry T7）：不占正文，hint + 可选重试 */
+.turn-failure {
+  align-self: flex-start;
+  max-width: 82%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: -2px 0 2px;
+  padding: 0 2px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+.turn-failure-text {
+  flex: 1;
+  min-width: 0;
+}
+.turn-failure-retry {
+  flex-shrink: 0;
+  border: 1px solid var(--line);
+  background: var(--card);
+  border-radius: 6px;
+  padding: 2px 8px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--accent-ink);
+  cursor: pointer;
+}
+.turn-failure-retry:hover {
+  border-color: rgba(76, 140, 43, 0.45);
+  background: #fbfdf7;
+}
+
 /* 气泡内 markdown（2026-11-23）：接管排版。.bubble 的 pre-wrap 会和
    markdown 块级元素的换行叠加出双倍空隙，这里归位 normal。 */
 .bubble .md {

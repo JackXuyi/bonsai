@@ -1,7 +1,7 @@
 "use client";
 
 import { create } from "zustand";
-import type { CalendarRemindPayload } from "@/lib/types";
+import type { CalendarRemindPayload, TurnFailure } from "@/lib/types";
 
 // 消息流（旧 main.js 直接操作 #messages 的 DOM，这里改为可跨组件推送的
 // store——proactive / prediction / 提醒事件到达时，ChatPane 不一定可见）。
@@ -33,6 +33,8 @@ export interface ChatMessage {
   eventId?: number;
   /** 链路追踪回合 id（spec-s8）：气泡「查看详情」入口 */
   turnId?: number;
+  /** 本轮失败（plan-retry T7）：细行 + 可选「重试」 */
+  failure?: TurnFailure;
 }
 
 interface ChatState {

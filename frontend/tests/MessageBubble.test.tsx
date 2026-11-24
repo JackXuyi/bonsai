@@ -38,6 +38,37 @@ describe("MessageBubble", () => {
     expect(container.querySelector(".bubble.typing")?.querySelectorAll("i")).toHaveLength(3);
   });
 
+  it("失败行展示 hint；retryable 才出重试按钮", () => {
+    const onRetry = vi.fn();
+    const failed: ChatMessage = {
+      id: 10,
+      kind: "bot",
+      text: "API Key 或额度不对，去设置里看一下",
+      failure: { kind: "auth", message: "API Key 或额度不对，去设置里看一下", retryable: false },
+    };
+    const { container, rerender } = render(
+      <MessageBubble message={failed} onRetry={onRetry} />
+    );
+    expect(container.querySelector(".turn-failure-text")?.textContent).toContain("API Key");
+    expect(container.querySelector(".turn-failure-retry")).toBeNull();
+
+    const retryable: ChatMessage = {
+      id: 11,
+      kind: "bot",
+      text: "云端出故障了（不是你的问题）",
+      failure: {
+        kind: "server",
+        message: "云端出故障了（不是你的问题）",
+        retryable: true,
+      },
+    };
+    rerender(<MessageBubble message={retryable} onRetry={onRetry} />);
+    const btn = container.querySelector(".turn-failure-retry") as HTMLButtonElement;
+    expect(btn).toBeTruthy();
+    btn.click();
+    expect(onRetry).toHaveBeenCalledWith(11);
+  });
+
   it("bot 消息按 markdown 渲染，user 消息保持原文", () => {
     const bot: ChatMessage = {
       id: 5,
