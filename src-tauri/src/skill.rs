@@ -70,7 +70,7 @@ pub fn builtin_body(id: &str) -> Option<String> {
         .iter()
         .find(|(pid, _)| *pid == id)
         .and_then(|(_, text)| parse_frontmatter(text).ok())
-        .map(|(_, _, body)| body.trim().to_string())
+        .map(|(_, _, _, body)| body.trim().to_string())
 }
 
 /// Write the engine packs into `root` when absent. Never overwrites: a pack
@@ -109,6 +109,8 @@ pub struct SkillPack {
     pub id: String,
     pub name: String,
     pub description: String,
+    /// 可选版本号（frontmatter `version:`）；缺省不写、预览显示「—」。
+    pub version: Option<String>,
     pub body: String,
     pub refs: Vec<(String, String)>, // (filename, content)
     pub dir: PathBuf,
@@ -164,28 +166,32 @@ impl std::fmt::Display for SkillError {
     }
 }
 
-/// Parse `name:` / `description:` from a light YAML-ish frontmatter delimited
-/// by `---` lines. Deliberately not a YAML parser — the pack format only
-/// ever needs two flat keys.
-fn parse_frontmatter(text: &str) -> Result<(String, String, &str), SkillError> {
+/// Parse `name:` / `description:` / optional `version:` from a light
+/// YAML-ish frontmatter delimited by `---` lines. Deliberately not a YAML
+/// parser — the pack format only ever needs these flat keys.
+fn parse_frontmatter(text: &str) -> Result<(String, String, Option<String>, &str), SkillError> {
     let rest = text.strip_prefix("---\n").ok_or(SkillError::Invalid("missing frontmatter"))?;
     let end = rest.find("\n---").ok_or(SkillError::Invalid("unterminated frontmatter"))?;
     let fm = &rest[..end];
     let body = rest[end + 4..].strip_prefix('\n').unwrap_or(&rest[end + 4..]);
     let mut name = None;
     let mut description = None;
+    let mut version = None;
     for line in fm.lines() {
         if let Some(v) = line.strip_prefix("name:") {
             name = Some(v.trim().trim_matches(['"', '\'']).to_string());
         } else if let Some(v) = line.strip_prefix("description:") {
             description = Some(v.trim().trim_matches(['"', '\'']).to_string());
+        } else if let Some(v) = line.strip_prefix("version:") {
+            version = Some(v.trim().trim_matches(['"', '\'']).to_string());
         }
     }
     let name = name.filter(|s| !s.is_empty()).ok_or(SkillError::Invalid("missing name"))?;
     let description = description
         .filter(|s| !s.is_empty())
         .ok_or(SkillError::Invalid("missing description"))?;
-    Ok((name, description, body))
+    let version = version.filter(|s| !s.is_empty());
+    Ok((name, description, version, body))
 }
 
 pub(crate) fn check_injection(body: &str) -> Result<(), SkillError> {
@@ -245,13 +251,14 @@ pub fn load_skill(dir: &Path) -> Result<SkillPack, SkillError> {
     if text.len() > SKILL_MD_MAX {
         return Err(SkillError::TooLarge("SKILL.md too large"));
     }
-    let (name, description, body) = parse_frontmatter(&text)?;
+    let (name, description, version, body) = parse_frontmatter(&text)?;
     check_injection(body)?;
     let refs = collect_refs(dir, body)?;
     Ok(SkillPack {
         id,
         name,
         description,
+        version,
         body: body.to_string(),
         refs,
         dir: dir.to_path_buf(),
@@ -580,7 +587,20 @@ mod tests {
         assert_eq!(pack.id, "gmp-qa");
         assert_eq!(pack.name, "GMP 助手");
         assert_eq!(pack.description, "药品 GMP 规范问答");
+        assert_eq!(pack.version, None, "无 version 键时保持 None");
         assert!(pack.body.contains("资深 QA"));
+    }
+
+    #[test]
+    fn parses_optional_version() {
+        let root = tmp_root("ver");
+        write_pack(
+            &root,
+            "ver-pack",
+            "---\nname: 带版本\ndescription: d\nversion: 1.2.0\n---\n正文\n",
+        );
+        let pack = load_skill(&root.join("ver-pack")).unwrap();
+        assert_eq!(pack.version.as_deref(), Some("1.2.0"));
     }
 
     #[test]

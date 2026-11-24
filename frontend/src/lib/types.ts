@@ -505,7 +505,7 @@ export interface SkillAutoCandidate {
   chainKey: string;
 }
 
-/** 技能预览：全文 + 已加载引用（skill_read）。 */
+/** 技能预览：元信息 + 全文 + 已加载引用（skill_read）。 */
 export interface SkillRefView {
   name: string;
   content: string;
@@ -515,6 +515,8 @@ export interface SkillDetail {
   id: string;
   name: string;
   description: string;
+  /** frontmatter `version:`；缺省 null/undefined，预览显示「—」 */
+  version?: string | null;
   body: string;
   refs: SkillRefView[];
   enabled: boolean;

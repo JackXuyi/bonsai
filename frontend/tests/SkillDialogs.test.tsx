@@ -8,7 +8,8 @@ const detail: SkillDetail = {
   id: "gmp-qa",
   name: "GMP 助手",
   description: "药品 GMP 规范问答",
-  body: "你是 GMP 领域的资深 QA。",
+  version: "1.2.0",
+  body: "# 角色\n\n你是 GMP 领域的资深 QA。\n\n## 要点\n\n- 引用条款编号",
   refs: [{ name: "条款.md", content: "第一条：保持洁净。" }],
   enabled: true,
   sizeBytes: 42,
@@ -45,14 +46,30 @@ beforeEach(() => {
 });
 
 describe("SkillPreviewDialog", () => {
-  it("loads the pack and renders body plus references", async () => {
+  it("loads the pack and shows name / version / description plus markdown", async () => {
     render(<SkillPreviewDialog open id="gmp-qa" onClose={onClose} />);
     await waitFor(() => expect(readMock).toHaveBeenCalledWith("gmp-qa"));
     await waitFor(() => expect(screen.getByTestId("skill-preview-body")).toBeTruthy());
+    const meta = screen.getByTestId("skill-preview-meta");
+    expect(meta.textContent).toContain("名称");
+    expect(meta.textContent).toContain("GMP 助手");
+    expect(meta.textContent).toContain("描述");
+    expect(meta.textContent).toContain("药品 GMP 规范问答");
+    expect(screen.getByTestId("skill-preview-version").textContent).toBe("1.2.0");
     expect(screen.getByText(/已启用/)).toBeTruthy();
-    expect(screen.getByText(/资深 QA/)).toBeTruthy();
-    expect(screen.getByText("引用：条款.md")).toBeTruthy();
+    // markdown 正文（GFM 标题 / 列表）
+    const doc = screen.getByTestId("skill-preview-markdown");
+    expect(doc.querySelector("h1")?.textContent).toContain("角色");
+    expect(doc.textContent).toContain("资深 QA");
+    expect(screen.getByText(/引用 · 条款.md/)).toBeTruthy();
     expect(screen.getByText(/保持洁净/)).toBeTruthy();
+  });
+
+  it("shows an em dash when version is missing", async () => {
+    readMock.mockResolvedValue({ ...detail, version: null });
+    render(<SkillPreviewDialog open id="gmp-qa" onClose={onClose} />);
+    await waitFor(() => expect(screen.getByTestId("skill-preview-version")).toBeTruthy());
+    expect(screen.getByTestId("skill-preview-version").textContent).toBe("—");
   });
 
   it("surfaces a humanized read error", async () => {

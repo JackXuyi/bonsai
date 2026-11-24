@@ -1251,6 +1251,8 @@ pub struct SkillDetail {
     pub id: String,
     pub name: String,
     pub description: String,
+    /// Frontmatter `version:`；缺省为 `None`（预览显示「—」）。
+    pub version: Option<String>,
     pub body: String,
     pub refs: Vec<SkillRefView>,
     pub enabled: bool,
@@ -1282,6 +1284,7 @@ pub fn skill_read(
         id: pack.id,
         name: pack.name,
         description: pack.description,
+        version: pack.version,
         body: pack.body,
     })
 }

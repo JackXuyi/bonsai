@@ -581,6 +581,11 @@ dialog.skill-dialog {
   max-height: min(620px, 84vh);
   border-radius: 15px;
 }
+/* 技能详情：更宽的文档页布局 */
+dialog.skill-dialog.skill-preview-dialog {
+  width: min(720px, 94vw);
+  max-height: min(780px, 90vh);
+}
 dialog.skill-dialog[open] {
   display: flex;
   flex-direction: column;
@@ -679,6 +684,189 @@ dialog.skill-dialog:not([open]) {
 .skill-dialog-foot .btn {
   padding: 6px 20px;
   font-size: 12px;
+}
+
+/* ── 技能详情页（SkillPreviewDialog）─────────────────────────── */
+.skill-preview-loading {
+  margin: 0;
+  padding: 16px;
+}
+.skill-preview {
+  gap: 18px;
+}
+.skill-preview-hero {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.skill-preview-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 650;
+  line-height: 1.3;
+  color: var(--ink);
+  letter-spacing: -0.01em;
+}
+.skill-preview-id {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--faint);
+}
+.skill-preview-id code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--bg-sunk);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.skill-preview-meta {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--card);
+  overflow: hidden;
+}
+.skill-preview-meta-row {
+  display: grid;
+  grid-template-columns: 52px 1fr;
+  gap: 10px;
+  align-items: start;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.skill-preview-meta-row:nth-child(odd) {
+  border-right: 1px solid var(--line);
+}
+/* 第二行（状态/体积）与描述之间只留描述的 top 线，避免双线 */
+.skill-preview-meta-row:nth-child(3),
+.skill-preview-meta-row:nth-child(4) {
+  border-bottom: none;
+}
+.skill-preview-meta-desc {
+  grid-column: 1 / -1;
+  border-right: none;
+  border-top: 1px solid var(--line);
+  border-bottom: none;
+}
+.skill-preview-meta dt {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--faint);
+  line-height: 1.55;
+}
+.skill-preview-meta dd {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--ink);
+  word-break: break-word;
+}
+
+.skill-preview-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.skill-preview-section-title {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.skill-preview-doc {
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--card);
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--ink);
+}
+.skill-preview-doc .md {
+  white-space: normal;
+}
+.skill-preview-doc .md > :first-child {
+  margin-top: 0;
+}
+.skill-preview-doc .md > :last-child {
+  margin-bottom: 0;
+}
+.skill-preview-doc .md p {
+  margin: 8px 0;
+}
+.skill-preview-doc .md ul,
+.skill-preview-doc .md ol {
+  margin: 8px 0;
+  padding-left: 20px;
+}
+.skill-preview-doc .md li {
+  margin: 3px 0;
+}
+.skill-preview-doc .md h1 {
+  margin: 12px 0 6px;
+  font-size: 15px;
+  font-weight: 650;
+  line-height: 1.35;
+}
+.skill-preview-doc .md h2 {
+  margin: 14px 0 6px;
+  font-size: 13.5px;
+  font-weight: 650;
+  line-height: 1.35;
+}
+.skill-preview-doc .md h3,
+.skill-preview-doc .md h4 {
+  margin: 10px 0 4px;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.skill-preview-doc .md code {
+  font-size: 11.5px;
+  background: var(--bg-sunk);
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+.skill-preview-doc .md pre {
+  margin: 8px 0;
+  padding: 10px 12px;
+  background: var(--bg-sunk);
+  border-radius: 8px;
+  overflow-x: auto;
+}
+.skill-preview-doc .md pre code {
+  background: none;
+  padding: 0;
+}
+.skill-preview-doc .md blockquote {
+  margin: 8px 0;
+  padding-left: 12px;
+  border-left: 2px solid var(--line);
+  color: var(--muted);
+}
+.skill-preview-doc .md a {
+  color: var(--accent-ink);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.skill-preview-doc .md table {
+  margin: 8px 0;
+  border-collapse: collapse;
+  font-size: 12px;
+  width: 100%;
+}
+.skill-preview-doc .md th,
+.skill-preview-doc .md td {
+  border: 1px solid var(--line);
+  padding: 4px 8px;
+  text-align: left;
 }
 
 /* 模型区 · 后台钉本地（plan-structured-routing T5） */
