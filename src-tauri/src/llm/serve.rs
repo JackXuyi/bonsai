@@ -144,6 +144,21 @@ impl ServerHandle {
             let _ = child.wait();
         }
     }
+
+    /// 看门狗用的三态（plan-retry §5.6 / D6）：`None` = 没有我们自己的
+    /// 子进程（比如复用了孤儿服务）；`Some(true)` = `try_wait()` 确认
+    /// 已退出；`Some(false)` = 还在跑。try_wait 出错按「还在跑」算——
+    /// 状态不明时宁可不动（不许重启风暴）。
+    pub fn child_exited(&self) -> Option<bool> {
+        let mut guard = self.child.lock().ok()?;
+        Some(
+            guard
+                .as_mut()?
+                .try_wait()
+                .map(|status| status.is_some())
+                .unwrap_or(false),
+        )
+    }
 }
 
 /// How one startup attempt ended.
@@ -182,6 +197,27 @@ pub fn start(app: tauri::AppHandle) {
         }
         log::warn!("llm sidecar did not start after 3 attempts; model legs stay on fallbacks");
     });
+}
+
+/// 运行期重启（plan-retry §5.6 / D6）：看门狗确认进程已退出后调用。
+/// 复用 `attempt_start` 的三态循环（与 `start` 同形状）；`llm:restarting`
+/// 由调用方（watchdog）先 emit，`llm:ready` 仍由 `attempt_start` 在成功时发。
+pub fn restart(app: &tauri::AppHandle) {
+    // 先清掉可能残留的子进程句柄（进程已退出时 kill/wait 都是安全空操作）。
+    app.state::<ServerHandle>().stop();
+    let model = crate::llm_admin::override_model().unwrap_or_else(|| DEFAULT_MODEL.into());
+    let probe = OllamaClient::new(DEFAULT_BASE_URL, model);
+    for attempt in 1..=3 {
+        if attempt > 1 {
+            log::warn!("watchdog: retrying llm sidecar restart (attempt {attempt}/3)");
+            std::thread::sleep(Duration::from_secs(3));
+        }
+        match attempt_start(app, &probe) {
+            Outcome::Ready | Outcome::Fatal => return,
+            Outcome::Retry => continue,
+        }
+    }
+    log::warn!("watchdog: llm sidecar restart failed after 3 attempts; model legs stay on fallbacks");
 }
 
 fn attempt_start(app: &tauri::AppHandle, probe: &OllamaClient) -> Outcome {

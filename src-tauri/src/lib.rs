@@ -95,7 +95,7 @@ pub fn run() {
             if let Some(parent) = db_path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            let store = MemoryStore::open(&db_path)?;
+            let store = open_memory_store(&db_path)?;
             app.manage(store);
 
             // LLM config (spec-m1): UI settings win over env, survive restarts.
@@ -104,6 +104,15 @@ pub fn run() {
             {
                 let store = app.state::<MemoryStore>();
                 let conn = store.0.lock().map_err(|e| e.to_string())?;
+                // §5.6 启动清残留：崩溃留下的 status='running' 幽灵行标
+                // interrupted（超 24h 才动，刚崩完的保守不动）。turn_trace
+                // 无 assistant_event_id 的失败轮过滤留给 T7（统计口径在
+                // 查询侧，本分支不动 memory/db.rs）。
+                match mark_stale_running_interrupted(&conn) {
+                    Ok(0) => {}
+                    Ok(n) => log::info!("startup cleanup: {n} stale 'running' task(s) marked interrupted"),
+                    Err(e) => log::warn!("startup cleanup of stale running tasks failed: {e}"),
+                }
                 llm_admin::load_from_settings(&conn);
             }
             app.manage(llm_pull::PullState::default());
@@ -188,6 +197,9 @@ pub fn run() {
             // binary = degraded mode, rule legs keep working). Health check
             // runs in the background; `llm:ready` fires when the server is up.
             app.manage(llm::serve::ServerHandle::default());
+            // §5.6 看门狗：模型请求失败 → probe 探活 → try_wait 确认退出
+            // → 每小时至多 1 次自动重启，期间 emit `llm:restarting`。
+            llm::watchdog::init(app.handle().clone());
             llm::serve::start(app.handle().clone());
 
             // L6: face state machine — Rust owns the state, the frontend only
@@ -354,4 +366,210 @@ pub fn run() {
                 app.state::<mcp_admin::AgentState>().manager.shutdown_all();
             }
         });
+}
+
+// ------------------------------------------------- 进程层恢复（plan-retry §5.6）
+
+/// `SQLITE_BUSY` 的重试间隔（§5.6 / §11 风险矩阵：文件锁先重试再报错，
+/// 绝不搬库）。
+const BUSY_RETRY_DELAYS: [std::time::Duration; 3] = [
+    std::time::Duration::from_secs(1),
+    std::time::Duration::from_secs(2),
+    std::time::Duration::from_secs(4),
+];
+
+/// L2 DB 打开的第二出口（plan-retry §5.6 / D5=A / A10）。
+///
+/// - `CORRUPT` / `NOTADB`：旧库文件改名备份（文件名带时间戳、保留原名可读）
+///   → 建全新空库继续启动 → 写 `settings.db_recovered_at`（RFC3339）与
+///   `settings.db_backup_path`（备份文件名）。**绝不静默**：这两个键是给
+///   前端横幅的数据源（前端 T7 另做），用户必须知道「记忆是空的，旧库在这儿」。
+/// - `SQLITE_BUSY`（文件锁）：按 1s/2s/4s 重试 3 次再报错，不进自愈。
+/// - 其余错误原样上抛（`setup` Err → 应用起不来，维持现状语义）。
+///
+/// 只在调用侧改：memory/db.rs 的 schema/迁移代码一字不动。
+fn open_memory_store(path: &std::path::Path) -> rusqlite::Result<MemoryStore> {
+    let mut busy_retry = 0usize;
+    loop {
+        match MemoryStore::open(path) {
+            Ok(store) => return Ok(store),
+            Err(e) if failure::is_busy_db(&e) && busy_retry < BUSY_RETRY_DELAYS.len() => {
+                let delay = BUSY_RETRY_DELAYS[busy_retry];
+                busy_retry += 1;
+                log::warn!(
+                    "db busy（被别的进程锁着？）— retry {busy_retry}/{} in {delay:?}: {e}",
+                    BUSY_RETRY_DELAYS.len()
+                );
+                std::thread::sleep(delay);
+            }
+            Err(e) if failure::is_corrupt_db(&e) => {
+                log::error!("db corrupt（{e}）— 走第二出口：改名备份 + 建新库（plan-retry D5=A）");
+                let backup = backup_corrupt_db(path).map_err(|io| {
+                    rusqlite::Error::SqliteFailure(
+                        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CANTOPEN),
+                        Some(format!("备份损坏库失败（拒绝静默重建）: {io}")),
+                    )
+                })?;
+                let store = MemoryStore::open(path)?;
+                {
+                    let conn = store.0.lock().map_err(|_| {
+                        rusqlite::Error::SqliteFailure(
+                            rusqlite::ffi::Error::new(1),
+                            Some("internal_poisoned: memory store mutex poisoned".into()),
+                        )
+                    })?;
+                    // 写失败只 warn 不阻断：库已经建好了，横幅少个键好过起不来。
+                    // 但绝不静默——日志里必须有这条 error 级的事实。
+                    let recovered_at = chrono::Local::now().to_rfc3339();
+                    if let Err(e) = memory::db::set_setting(&conn, "db_recovered_at", &recovered_at) {
+                        log::error!("db recovery: 写 db_recovered_at 失败: {e}");
+                    }
+                    let backup_name = backup
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    if let Err(e) = memory::db::set_setting(&conn, "db_backup_path", &backup_name) {
+                        log::error!("db recovery: 写 db_backup_path 失败: {e}");
+                    }
+                    log::warn!(
+                        "db recovery 完成：旧库备份在 {}，新库为空（A10：用户必须被告知）",
+                        backup.display()
+                    );
+                }
+                return Ok(store);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// 把损坏的库（连同可能存在的 `-wal` / `-shm` 兄弟文件）改名备份。
+/// 文件名形如 `bonsai.sqlite3.corrupt-20261124-153000.bak`：保留原名可读，
+/// 时间戳防同名覆盖（同秒内第二次损坏会重定向失败——那种情况下本来
+/// 也该停下来让人看一眼）。
+fn backup_corrupt_db(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "bonsai.sqlite3".into());
+    let dir = path.parent().unwrap_or(std::path::Path::new("."));
+    let backup = dir.join(format!("{name}.corrupt-{ts}.bak"));
+    std::fs::rename(path, &backup)?;
+    for suffix in ["-wal", "-shm"] {
+        let sibling = dir.join(format!("{name}{suffix}"));
+        if sibling.exists() {
+            let _ = std::fs::rename(&sibling, dir.join(format!("{name}{suffix}.corrupt-{ts}.bak")));
+        }
+    }
+    Ok(backup)
+}
+
+/// 启动清残留（§5.6）：把 `created_at` 早于 24h 前且仍 `running` 的任务行
+/// 标 `interrupted`。`created_at` 与 cutoff 都是同一格式的 UTC RFC3339 串，
+/// 字典序即时间序。24h 内的不动——崩溃刚发生，保守。
+fn mark_stale_running_interrupted(conn: &rusqlite::Connection) -> rusqlite::Result<usize> {
+    let cutoff = (chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
+    conn.execute(
+        "UPDATE tasks SET status = 'interrupted'
+          WHERE status = 'running' AND created_at < ?1",
+        [cutoff],
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("bonsai-t6-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    // ---------------- DB 第二出口（A10）
+
+    #[test]
+    fn corrupt_db_gets_backed_up_and_replaced_with_fresh() {
+        // A10：手工造一个损坏库（垃圾字节 ≠ sqlite 头），应用必须起得来。
+        let dir = tmp_dir("corrupt");
+        let db = dir.join("bonsai.sqlite3");
+        std::fs::write(&db, b"definitely not a sqlite database, just noise bytes").unwrap();
+
+        let store = open_memory_store(&db).expect("损坏库必须走第二出口而不是报错");
+
+        // 旧库被改名保留，文件名带时间戳、保留原名可读。
+        let entries: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok().and_then(|e| e.file_name().into_string().ok()))
+            .collect();
+        let backup = entries
+            .iter()
+            .find(|n| n.starts_with("bonsai.sqlite3.corrupt-") && n.ends_with(".bak"))
+            .expect("改名备份的文件必须在");
+        assert!(!entries.contains(&"bonsai.sqlite3.corrupt.bak".to_string()));
+
+        // 全新空库 + settings 两键（前端横幅的数据源，绝不静默）。
+        let conn = store.0.lock().unwrap();
+        let recovered_at = memory::db::get_setting(&conn, "db_recovered_at")
+            .unwrap()
+            .expect("db_recovered_at 必须有值");
+        assert!(chrono::DateTime::parse_from_rfc3339(&recovered_at).is_ok(), "必须是 RFC3339");
+        assert_eq!(
+            memory::db::get_setting(&conn, "db_backup_path").unwrap().as_deref(),
+            Some(backup.as_str()),
+            "db_backup_path 存备份文件名"
+        );
+    }
+
+    #[test]
+    fn healthy_db_is_opened_without_any_recovery() {
+        // 正常路径：不产生任何备份文件，也不写恢复键。
+        let dir = tmp_dir("healthy");
+        let db = dir.join("bonsai.sqlite3");
+
+        let store = open_memory_store(&db).unwrap();
+        let entries: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok().and_then(|e| e.file_name().into_string().ok()))
+            .collect();
+        assert!(!entries.iter().any(|n| n.contains(".corrupt-")));
+        let conn = store.0.lock().unwrap();
+        assert_eq!(memory::db::get_setting(&conn, "db_recovered_at").unwrap(), None);
+    }
+
+    // ---------------- 启动清残留 running
+
+    #[test]
+    fn stale_running_tasks_are_marked_interrupted() {
+        let dir = tmp_dir("stale");
+        let store = open_memory_store(&dir.join("bonsai.sqlite3")).unwrap();
+        let conn = store.0.lock().unwrap();
+
+        let old = (chrono::Utc::now() - chrono::Duration::hours(30)).to_rfc3339();
+        let fresh = chrono::Utc::now().to_rfc3339();
+        for (id, created_at, status) in [
+            ("old-running", &old, "running"),
+            ("fresh-running", &fresh, "running"),
+            ("old-done", &old, "done"),
+            ("fresh-failed", &fresh, "failed"),
+        ] {
+            conn.execute(
+                "INSERT INTO tasks (id, created_at, goal, status) VALUES (?1, ?2, 'g', ?3)",
+                [id, created_at, status],
+            )
+            .unwrap();
+        }
+
+        let n = mark_stale_running_interrupted(&conn).unwrap();
+        assert_eq!(n, 1, "只有超 24h 的 running 被动");
+        let status_of = |id: &str| -> String {
+            conn.query_row("SELECT status FROM tasks WHERE id = ?1", [id], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(status_of("old-running"), "interrupted");
+        assert_eq!(status_of("fresh-running"), "running", "24h 内保守不动");
+        assert_eq!(status_of("old-done"), "done", "非 running 不动");
+        assert_eq!(status_of("fresh-failed"), "failed");
+    }
 }

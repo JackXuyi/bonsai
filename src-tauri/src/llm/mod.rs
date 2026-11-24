@@ -29,6 +29,7 @@ pub mod anthropic;
 pub mod cloud;
 pub mod ollama;
 pub mod serve;
+pub mod watchdog;
 
 pub use anthropic::{parse_anthropic_sse_line, AnthropicClient};
 pub use cloud::{parse_sse_line, CloudClient};
