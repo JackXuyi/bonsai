@@ -1,5 +1,7 @@
 # bonsai × 通用 Agent 能力差距分析与 Roadmap
 
+> **并行文档**：现有能力的可靠性闭环（Forget / 检索质量 / Decision 配额 / Durable Agent）见 [`roadmap-architecture-r2/v1`](./roadmap-architecture-r2/v1/index.md)。与本文能力扩展并行时，**以 R2 Phase 1（Reliability）阻塞项优先于新能力开工**。
+
 | 文档信息 | 内容 |
 |---|---|
 | 版本 | v1.0 |

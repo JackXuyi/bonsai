@@ -10,15 +10,18 @@
 //!   ignored notification is a strong negative sample.
 //! - The decision layer is independent of the generation layer: whether to
 //!   speak ≠ what to say.
+//!
+//! Quota（plan-reliability-phase1 R4）：权威在 SQLite `proactive_daily_usage`，
+//! 本地日历日；`try_reserve` → 成功发出后 `commit_speak`，失败 `release_reserve`。
 
+use rusqlite::Connection;
 use serde::Serialize;
 
-/// Daily proactivity budget (L4 runtime state).
+use crate::memory::clock;
+
+/// 进程内单飞锁占位（配额权威在 SQLite；此结构避免双线程同时过 Gate）。
 #[derive(Debug, Default)]
-pub struct ProactivityState {
-    pub used_today: u32,
-    pub day: Option<chrono::NaiveDate>,
-}
+pub struct ProactivityState;
 
 #[derive(Debug, Clone)]
 pub struct DecisionInput {
@@ -55,46 +58,95 @@ const MIN_IDLE_MINUTES: u32 = 5;
 /// Default daily proactivity cap (report §6.4: 1 proactive message per day).
 pub const DEFAULT_DAILY_LIMIT: u32 = 1;
 
-pub fn should_speak(
-    input: &DecisionInput,
-    state: &mut ProactivityState,
-    daily_limit: u32,
-) -> Decision {
-    // Roll over the daily quota.
-    let today = chrono::Utc::now().date_naive();
-    if state.day != Some(today) {
-        state.day = Some(today);
-        state.used_today = 0;
-    }
-
-    if input.is_typing || input.is_fullscreen || input.in_meeting {
-        return Decision::Silent(SilentReason::Busy);
-    }
-    if state.used_today >= daily_limit.max(0) {
-        return Decision::Silent(SilentReason::QuotaExhausted);
-    }
-    if input.idle_minutes < MIN_IDLE_MINUTES {
-        return Decision::Silent(SilentReason::UserActive);
-    }
-    if input.value - input.interruption_cost <= 0.0 {
-        return Decision::Silent(SilentReason::NotWorthIt);
-    }
-
-    state.used_today += 1;
-    Decision::Speak
+fn local_date_key() -> String {
+    clock::now_local().date_naive().format("%Y-%m-%d").to_string()
 }
 
-// ---------------------------------------------------------------- command
+/// 忙碌 / 空闲 / 价值闸（不碰配额）。
+pub fn gate_interruptibility(input: &DecisionInput) -> Option<SilentReason> {
+    if input.is_typing || input.is_fullscreen || input.in_meeting {
+        return Some(SilentReason::Busy);
+    }
+    if input.idle_minutes < MIN_IDLE_MINUTES {
+        return Some(SilentReason::UserActive);
+    }
+    if input.value - input.interruption_cost <= 0.0 {
+        return Some(SilentReason::NotWorthIt);
+    }
+    None
+}
+
+/// 原子预留一日配额。成功返回 true（已 reserved+1）。
+pub fn try_reserve(conn: &Connection, daily_limit: u32) -> rusqlite::Result<bool> {
+    let day = local_date_key();
+    let limit = daily_limit.max(1) as i64;
+    conn.execute(
+        "INSERT INTO proactive_daily_usage (local_date, used_count, reserved)
+         VALUES (?1, 0, 1)
+         ON CONFLICT(local_date) DO UPDATE SET
+           reserved = reserved + 1
+         WHERE used_count + reserved < ?2",
+        rusqlite::params![day, limit],
+    )?;
+    Ok(conn.changes() > 0)
+}
+
+/// 主动消息已成功落库/发出后提交消耗。
+pub fn commit_speak(conn: &Connection) -> rusqlite::Result<()> {
+    let day = local_date_key();
+    let now = clock::now_iso();
+    conn.execute(
+        "UPDATE proactive_daily_usage
+            SET used_count = used_count + 1,
+                reserved = CASE WHEN reserved > 0 THEN reserved - 1 ELSE 0 END,
+                last_spoken_at = ?2
+          WHERE local_date = ?1",
+        rusqlite::params![day, now],
+    )?;
+    Ok(())
+}
+
+/// 生成失败时释放预留。
+pub fn release_reserve(conn: &Connection) -> rusqlite::Result<()> {
+    let day = local_date_key();
+    conn.execute(
+        "UPDATE proactive_daily_usage
+            SET reserved = CASE WHEN reserved > 0 THEN reserved - 1 ELSE 0 END
+          WHERE local_date = ?1",
+        rusqlite::params![day],
+    )?;
+    Ok(())
+}
+
+/// 启动时作废未提交预留（崩溃残留）。
+pub fn clear_stale_reserves(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute("UPDATE proactive_daily_usage SET reserved = 0", [])?;
+    Ok(())
+}
+
+/// Gate + 配额预留。`Speak` 表示已预留，调用方必须 commit 或 release。
+pub fn should_speak(
+    input: &DecisionInput,
+    conn: &Connection,
+    daily_limit: u32,
+) -> rusqlite::Result<Decision> {
+    if let Some(reason) = gate_interruptibility(input) {
+        return Ok(Decision::Silent(reason));
+    }
+    if !try_reserve(conn, daily_limit)? {
+        return Ok(Decision::Silent(SilentReason::QuotaExhausted));
+    }
+    Ok(Decision::Speak)
+}
 
 /// Shared L4 evaluation: latest L1 signals + today's perception volume →
-/// `should_speak`. Used by the command below and by the proactive loop
-/// (dialogue.rs). The quota lives in the passed `ProactivityState`.
+/// `should_speak`. Used by the command below and by the proactive loop.
 pub fn evaluate_live(
-    conn: &rusqlite::Connection,
+    conn: &Connection,
     signals: &crate::perception::LatestSignals,
-    proactivity: &mut ProactivityState,
+    _proactivity: &mut ProactivityState,
 ) -> Decision {
-    let day = chrono::Local::now().date_naive();
+    let day = clock::now_local().date_naive();
     let signals_today = crate::report::local_day_window(day)
         .and_then(|(start, end)| {
             crate::memory::db::events_in_window(conn, &start, &end).ok()
@@ -104,14 +156,12 @@ pub fn evaluate_live(
     let input = crate::perception::decision_input(
         signals,
         signals_today,
-        crate::calendar::in_meeting_now(conn, chrono::Local::now()),
+        crate::calendar::in_meeting_now(conn, clock::now_local()),
     );
-    should_speak(&input, proactivity, DEFAULT_DAILY_LIMIT)
+    should_speak(&input, conn, DEFAULT_DAILY_LIMIT).unwrap_or(Decision::Silent(SilentReason::Busy))
 }
 
-/// L4 entry: run `should_speak` on the latest L1 signals. The frontend (or a
-/// future proactive loop) calls this; the daily quota lives in `AppState`, so
-/// repeated calls respect the 1-per-day cap. L1 never decides on its own.
+/// L4 entry: run `should_speak` on the latest L1 signals.
 #[tauri::command]
 pub fn evaluate(
     store: tauri::State<'_, crate::memory::MemoryStore>,
@@ -127,16 +177,19 @@ pub fn evaluate(
     let mut proactivity = app_state.proactivity.lock().map_err(|e| e.to_string())?;
     store
         .inner()
-        .with_read(|conn| Ok(evaluate_live(conn, &signals, &mut proactivity)))
+        .with_write(|conn| Ok(evaluate_live(conn, &signals, &mut proactivity)))
         .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::memory::db;
 
-    fn state() -> ProactivityState {
-        ProactivityState::default()
+    fn mem() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        db::init_schema_for_test(&conn).unwrap();
+        conn
     }
 
     fn input(idle: u32, value: f32, cost: f32) -> DecisionInput {
@@ -152,40 +205,94 @@ mod tests {
 
     #[test]
     fn busy_beats_everything() {
-        let mut s = state();
+        let conn = mem();
         let mut i = input(30, 0.9, 0.0);
         i.is_typing = true;
-        assert_eq!(should_speak(&i, &mut s, 1), Decision::Silent(SilentReason::Busy));
+        assert_eq!(
+            should_speak(&i, &conn, 1).unwrap(),
+            Decision::Silent(SilentReason::Busy)
+        );
     }
 
     #[test]
     fn quota_limits_to_one_per_day() {
-        let mut s = state();
+        let conn = mem();
         let i = input(10, 0.9, 0.0);
-        assert_eq!(should_speak(&i, &mut s, DEFAULT_DAILY_LIMIT), Decision::Speak);
         assert_eq!(
-            should_speak(&i, &mut s, DEFAULT_DAILY_LIMIT),
+            should_speak(&i, &conn, DEFAULT_DAILY_LIMIT).unwrap(),
+            Decision::Speak
+        );
+        assert_eq!(
+            should_speak(&i, &conn, DEFAULT_DAILY_LIMIT).unwrap(),
             Decision::Silent(SilentReason::QuotaExhausted)
         );
     }
 
     #[test]
     fn requires_idle_over_five_minutes() {
-        let mut s = state();
+        let conn = mem();
         assert_eq!(
-            should_speak(&input(4, 0.9, 0.0), &mut s, 1),
+            should_speak(&input(4, 0.9, 0.0), &conn, 1).unwrap(),
             Decision::Silent(SilentReason::UserActive)
         );
-        assert_eq!(should_speak(&input(5, 0.9, 0.0), &mut s, 1), Decision::Speak);
+        assert_eq!(
+            should_speak(&input(5, 0.9, 0.0), &conn, 1).unwrap(),
+            Decision::Speak
+        );
     }
 
     #[test]
     fn value_must_outweigh_cost() {
-        let mut s = state();
+        let conn = mem();
         assert_eq!(
-            should_speak(&input(30, 0.3, 0.5), &mut s, 1),
+            should_speak(&input(30, 0.3, 0.5), &conn, 1).unwrap(),
             Decision::Silent(SilentReason::NotWorthIt)
         );
-        assert_eq!(should_speak(&input(30, 0.8, 0.2), &mut s, 1), Decision::Speak);
+        assert_eq!(
+            should_speak(&input(30, 0.8, 0.2), &conn, 1).unwrap(),
+            Decision::Speak
+        );
+    }
+
+    /// D01：配额键为本地日（pin 时钟）。
+    #[test]
+    fn d01_quota_uses_local_calendar_day() {
+        let _g = clock::pinned("2026-11-23T16:00:00Z"); // 本地 11-24 00:00 CST
+        let conn = mem();
+        let i = input(10, 0.9, 0.0);
+        assert_eq!(should_speak(&i, &conn, 1).unwrap(), Decision::Speak);
+        let day: String = conn
+            .query_row(
+                "SELECT local_date FROM proactive_daily_usage LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(day, clock::now_local().date_naive().format("%Y-%m-%d").to_string());
+    }
+
+    /// D02：提交后「重启」（新连接读同库文件语义：同表）不可再 Speak。
+    #[test]
+    fn d02_quota_persists_across_state_reset() {
+        let conn = mem();
+        let i = input(10, 0.9, 0.0);
+        assert_eq!(should_speak(&i, &conn, 1).unwrap(), Decision::Speak);
+        commit_speak(&conn).unwrap();
+        // 新 ProactivityState 不影响 SQLite 权威。
+        let _fresh = ProactivityState::default();
+        assert_eq!(
+            should_speak(&i, &conn, 1).unwrap(),
+            Decision::Silent(SilentReason::QuotaExhausted)
+        );
+    }
+
+    /// D03：reserve 后失败 release，仍可再次 Speak。
+    #[test]
+    fn d03_release_allows_retry() {
+        let conn = mem();
+        let i = input(10, 0.9, 0.0);
+        assert_eq!(should_speak(&i, &conn, 1).unwrap(), Decision::Speak);
+        release_reserve(&conn).unwrap();
+        assert_eq!(should_speak(&i, &conn, 1).unwrap(), Decision::Speak);
     }
 }

@@ -615,6 +615,10 @@ fn beyond_window(
     };
     let mut out_rows = Vec::new();
     for hit in rows {
+        // R2：失效事实不得作为「当前事实」混入 beyond-window。
+        if hit.invalidated {
+            continue;
+        }
         // 长期记忆才跨时间翻；旧对话行只在窗口里看（跨时间翻对话噪声太大）。
         if hit.kind == "event" || hit.ts.as_str() >= window_start_iso {
             continue;
@@ -1285,5 +1289,35 @@ mod tests {
         ] {
             assert!(!might_recall(t), "gate must stay quiet on: {t}");
         }
+    }
+
+    /// M10：失效 Fact 不得作为当前事实进入 beyond-window。
+    #[test]
+    fn m10_invalidated_fact_not_in_beyond_window() {
+        let _g = crate::memory::clock::pinned("2026-12-01T02:00:00Z");
+        let conn = mem();
+        conn.execute(
+            "INSERT INTO facts (ts, content, confidence, invalid_at)
+             VALUES ('2026-09-01T03:00:00+00:00', '用户使用 React', 0.8, '2026-11-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO facts (ts, content, confidence)
+             VALUES ('2026-09-02T03:00:00+00:00', '用户已经转向 Vue', 0.85)",
+            [],
+        )
+        .unwrap();
+        let r = recall(&conn, "我现在主要使用什么前端框架");
+        assert!(
+            !r.beyond.iter().any(|(_, c)| c.contains("React")),
+            "失效 React 不得进 beyond: {:?}",
+            r.beyond
+        );
+        assert!(
+            !r.facts.iter().any(|f| f.contains("React") && !f.contains("Vue")),
+            "窗口内也不该把失效 React 当当前事实: {:?}",
+            r.facts
+        );
     }
 }

@@ -104,6 +104,14 @@ pub fn apply(
             params![key, value, source, source_event_id, confidence, clock::now_iso()],
         )?;
     }
+    if let Some(eid) = source_event_id {
+        let rel = if source == "manual" {
+            crate::memory::evidence::REL_MANUAL_LINK
+        } else {
+            crate::memory::evidence::REL_EXTRACTED
+        };
+        crate::memory::evidence::link_profile(conn, key, eid, rel)?;
+    }
     Ok(true)
 }
 

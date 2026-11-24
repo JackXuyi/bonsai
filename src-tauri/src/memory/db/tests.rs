@@ -26,10 +26,10 @@ use crate::memory::clock;
 
         invalidate_fact(&conn, fact).unwrap();
         let hits = search(&conn, "rainy", 10, true).unwrap();
-        // Invalidated fact sinks (0.1 penalty): the active event ranks first,
-        // the superseded fact trails.
+        // R2：失效 fact 硬排除，只剩 event。
+        assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].kind, "event");
-        assert!(hits[1].invalidated);
+        assert!(!hits.iter().any(|h| h.invalidated));
 
         forget_event(&conn, ev).unwrap();
         let hits = search(&conn, "rainy", 10, true).unwrap();
@@ -591,8 +591,9 @@ use crate::memory::clock;
     #[test]
     fn promotion_is_idempotent() {
         let conn = mem();
-        assert!(promote_fact(&conn, "like", "user loves rainy days", 0.9).unwrap());
-        assert!(!promote_fact(&conn, "like", "user loves rainy days", 0.9).unwrap());
+        let e = add_event(&conn, "chat", "rain").unwrap();
+        assert!(promote_fact(&conn, "like", "user loves rainy days", 0.9, &[e]).unwrap());
+        assert!(!promote_fact(&conn, "like", "user loves rainy days", 0.9, &[e]).unwrap());
     }
 
     #[test]

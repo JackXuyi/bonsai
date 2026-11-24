@@ -148,7 +148,8 @@ const TOPICS: [Topic; 12] = [
         expect: "二手房",
         literal: "二手房预算多少",
         colloquial: "之前那个二手房的预算还记得吗",
-        synonym: "看中的房子总价上限",
+        // R3：房子/二手房 为上下位，不再扩腿；改走「看房/预算」真近义桥。
+        synonym: "看房预算上限卡在哪儿",
     },
     Topic {
         utterance: "周末想和女朋友自驾去舟山",
@@ -156,7 +157,8 @@ const TOPICS: [Topic; 12] = [
         expect: "自驾去舟山",
         literal: "自驾去舟山要多久",
         colloquial: "上次说的自驾去舟山还去吗",
-        synonym: "开车带对象去海边玩",
+        // R3：舟山/海边 不再扩；改走 开车/对象 真近义。
+        synonym: "开车带对象出游那事怎样了",
     },
     Topic {
         utterance: "我在做一个复盘小程序，用毛泽东方法论",
@@ -164,7 +166,8 @@ const TOPICS: [Topic; 12] = [
         expect: "复盘小程序",
         literal: "复盘小程序用什么方法论",
         colloquial: "那个复盘小程序做到哪了",
-        synonym: "毛选式反思那个应用进度",
+        // R3：小程序/应用 不再扩；毛选+反思仍为 EntityAlias/Synonym。
+        synonym: "毛选式反思做到哪一步了",
     },
     Topic {
         utterance: "我对花生过敏，点菜要避开",
@@ -172,7 +175,10 @@ const TOPICS: [Topic; 12] = [
         expect: "花生过敏",
         literal: "花生过敏点菜注意什么",
         colloquial: "上次说的花生过敏还记得吧",
-        synonym: "坚果类不能吃，外食要提醒",
+        // R3：花生/坚果、过敏/不能吃 禁止当同义扩；改写为仍无公共二字
+        // 切片、但靠其它真近义无法桥接的问法——本条近义命中预期下降，
+        // 见 baseline_numbers 棘轮注释。
+        synonym: "坚果敏感受不了外出点餐怎么办",
     },
     Topic {
         utterance: "我每天早上喝一杯黑咖啡，不加糖",
@@ -180,7 +186,8 @@ const TOPICS: [Topic; 12] = [
         expect: "黑咖啡",
         literal: "黑咖啡加不加糖",
         colloquial: "之前说的黑咖啡怎么喝来着",
-        synonym: "起床后那杯深色饮品不放蔗糖",
+        // R3：蔗糖不得与不加糖共簇；深色饮品→黑咖啡仍为 Synonym。
+        synonym: "起床后那杯深色饮品还在喝吗",
     },
     Topic {
         utterance: "我家猫叫团子，今年三岁",
@@ -599,14 +606,14 @@ mod tests {
             .iter()
             .map(|c| (*c, report.score(*c).hits))
             .collect();
-        // 2026-11-24 S3 后测得（用例数 12/12/12/12/4/4）。只许上调，永不为了
-        // 「让测试过」而下调。近义改写 12/12（查询侧同义簇）；纯指代留 0——
-        // 它得靠 facts 常驻注入或上下文，不靠检索腿。
+        // 2026-11-24 S3：近义 12/12。2026-11-24 R3（plan-reliability-phase1）：
+        // 拆除对立/因果/上下位假同义后，花生过敏条近义问法不再靠错误扩腿命中，
+        // Synonym 地板改为 11（只许因正确性修复下调这一次，并写明原因）。
         let floor: [(Class, usize); 6] = [
             (Class::ExactSlice, 12),
             (Class::Literal, 12),
             (Class::Colloquial, 12),
-            (Class::Synonym, 12),
+            (Class::Synonym, 11),
             (Class::Anaphora, 0),
             (Class::LongAgo, 4),
         ];

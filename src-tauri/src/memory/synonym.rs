@@ -1,66 +1,171 @@
-//! 近义召回：查询侧同义簇展开（plan 优化盘点 P1-8 / S3）。
+//! 近义召回：查询侧语义关系展开（plan-reliability-phase1 R3）。
 //!
 //! 不做 embedding：在 LIKE / FTS 查询侧，把「问法用词」展开成「库里更常
-//! 见的说法」。OR 进腿——只多召回不漏，宁脏勿漏与 memory_search 一致。
+//! 见的说法」。OR 进腿——只多召回不漏，与 memory_search 一致。
 //!
-//! 簇是**双向**的生活记忆常用近义，不为某一道基线题特制；基线近义问法
-//! 恰好落在这些通用桥上是预期收益，不是作弊。
+//! R3：不再维护「大同义簇」。仅 `Synonym` / `EntityAlias` 直接扩腿；
+//! Parent/Child/Related 本阶段不扩；Opposite / CauseEffect **禁止**扩。
 
-/// 同义簇。词长必须 ≥2（与 LIKE 腿下限一致）。
-const CLUSTERS: &[&[&str]] = &[
-    // 财务 / 流程
-    &["报销", "退钱", "报账", "财务报销"],
-    &["手续", "审批", "流程"],
-    // 家装
-    &["封窗", "外推", "封阳台"],
-    &["阳台", "外推玻璃"],
-    // 运动 / 天气
-    &["跑步", "慢跑"],
-    &["雨天", "下雨", "下着雨"],
-    // 房产
-    &["二手房", "看房", "购房"],
-    &["预算", "总价", "房价"],
-    &["房子", "二手房"],
-    // 出行 / 关系
-    &["自驾", "开车"],
-    &["女朋友", "对象", "女友"],
-    &["舟山", "海边"],
-    // 工作产物
-    &["复盘", "反思"],
-    &["小程序", "应用"],
-    &["毛泽东", "毛选"],
-    // 过敏 / 饮食
-    &["花生", "坚果"],
-    &["过敏", "不能吃"],
-    &["黑咖啡", "深色饮品"],
-    &["咖啡", "黑咖啡"],
-    &["蔗糖", "加糖", "不加糖"],
-    // 宠物
-    &["小动物", "宠物", "养猫"],
-    &["猫", "小猫"],
-    // 技术学习
-    &["系统编程", "Rust", "rust"],
-    &["所有权", "借用"],
-    // 家电 / 家人
-    &["扫地机器人", "扫地机", "自动清洁"],
-    &["爸妈", "父母"],
-    &["家电", "扫地机器人"],
-    // 沟通偏好
-    &["开会", "当面讨论", "当面聊"],
-    &["写文档", "书面沟通", "书面"],
+/// 语义关系（计划 §6.1）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SemanticRelation {
+    Synonym,
+    EntityAlias,
+    ParentCategory,
+    ChildCategory,
+    RelatedConcept,
+    Opposite,
+    CauseEffect,
+}
+
+struct RelationEdge {
+    terms: &'static [&'static str],
+    relation: SemanticRelation,
+}
+
+/// 可扩腿的关系。
+fn expands(rel: SemanticRelation) -> bool {
+    matches!(
+        rel,
+        SemanticRelation::Synonym | SemanticRelation::EntityAlias
+    )
+}
+
+/// 生活记忆常用边。词长必须 ≥2（与 LIKE 腿下限一致）。
+const EDGES: &[RelationEdge] = &[
+    // —— Synonym / EntityAlias（直接扩）——
+    RelationEdge {
+        terms: &["报销", "退钱", "报账", "财务报销"],
+        relation: SemanticRelation::Synonym,
+    },
+    RelationEdge {
+        terms: &["手续", "审批", "流程"],
+        relation: SemanticRelation::Synonym,
+    },
+    RelationEdge {
+        terms: &["封窗", "外推", "封阳台"],
+        relation: SemanticRelation::Synonym,
+    },
+    RelationEdge {
+        terms: &["阳台", "外推玻璃"],
+        relation: SemanticRelation::Synonym,
+    },
+    RelationEdge {
+        terms: &["跑步", "慢跑"],
+        relation: SemanticRelation::Synonym,
+    },
+    RelationEdge {
+        terms: &["雨天", "下雨", "下着雨"],
+        relation: SemanticRelation::Synonym,
+    },
+    RelationEdge {
+        terms: &["二手房", "看房", "购房"],
+        relation: SemanticRelation::Synonym,
+    },
+    RelationEdge {
+        terms: &["预算", "总价", "房价"],
+        relation: SemanticRelation::Synonym,
+    },
+    RelationEdge {
+        terms: &["自驾", "开车"],
+        relation: SemanticRelation::Synonym,
+    },
+    RelationEdge {
+        terms: &["女朋友", "对象", "女友"],
+        relation: SemanticRelation::Synonym,
+    },
+    RelationEdge {
+        terms: &["复盘", "反思"],
+        relation: SemanticRelation::Synonym,
+    },
+    RelationEdge {
+        terms: &["毛泽东", "毛选"],
+        relation: SemanticRelation::EntityAlias,
+    },
+    RelationEdge {
+        terms: &["黑咖啡", "深色饮品"],
+        relation: SemanticRelation::Synonym,
+    },
+    RelationEdge {
+        terms: &["咖啡", "黑咖啡"],
+        relation: SemanticRelation::Synonym,
+    },
+    RelationEdge {
+        terms: &["小动物", "宠物", "养猫"],
+        relation: SemanticRelation::Synonym,
+    },
+    RelationEdge {
+        terms: &["猫", "小猫"],
+        relation: SemanticRelation::Synonym,
+    },
+    RelationEdge {
+        terms: &["系统编程", "Rust", "rust"],
+        relation: SemanticRelation::EntityAlias,
+    },
+    RelationEdge {
+        terms: &["扫地机器人", "扫地机", "自动清洁"],
+        relation: SemanticRelation::Synonym,
+    },
+    RelationEdge {
+        terms: &["爸妈", "父母"],
+        relation: SemanticRelation::Synonym,
+    },
+    RelationEdge {
+        terms: &["家电", "扫地机器人"],
+        relation: SemanticRelation::Synonym,
+    },
+    RelationEdge {
+        terms: &["开会", "当面讨论", "当面聊"],
+        relation: SemanticRelation::Synonym,
+    },
+    RelationEdge {
+        terms: &["写文档", "书面沟通", "书面"],
+        relation: SemanticRelation::Synonym,
+    },
+    // —— 记录但不扩（止血上下位 / 相关）——
+    RelationEdge {
+        terms: &["房子", "二手房"],
+        relation: SemanticRelation::ParentCategory,
+    },
+    RelationEdge {
+        terms: &["花生", "坚果"],
+        relation: SemanticRelation::ChildCategory,
+    },
+    RelationEdge {
+        terms: &["小程序", "应用"],
+        relation: SemanticRelation::ChildCategory,
+    },
+    RelationEdge {
+        terms: &["舟山", "海边"],
+        relation: SemanticRelation::RelatedConcept,
+    },
+    RelationEdge {
+        terms: &["所有权", "借用"],
+        relation: SemanticRelation::RelatedConcept,
+    },
+    // —— 禁止扩：对立 / 因果 ——
+    RelationEdge {
+        terms: &["加糖", "不加糖"],
+        relation: SemanticRelation::Opposite,
+    },
+    RelationEdge {
+        terms: &["过敏", "不能吃"],
+        relation: SemanticRelation::CauseEffect,
+    },
 ];
 
 /// 查询裸文本 + 已有腿 → 追加同义腿（去重，保序：原腿在前）。
-///
-/// 命中规则：裸文本或任一原腿包含簇内某词 → 整簇其余词进腿。
 pub fn expand_legs(bare_query: &str, base: &[String]) -> Vec<String> {
     let hay = normalise(bare_query);
     let mut out: Vec<String> = Vec::new();
     for leg in base {
         push_unique(&mut out, leg.clone());
     }
-    for cluster in CLUSTERS {
-        let hit = cluster.iter().any(|t| {
+    for edge in EDGES {
+        if !expands(edge.relation) {
+            continue;
+        }
+        let hit = edge.terms.iter().any(|t| {
             let n = normalise(t);
             n.chars().count() >= 2
                 && (hay.contains(&n) || base.iter().any(|leg| normalise(leg).contains(&n)))
@@ -68,7 +173,7 @@ pub fn expand_legs(bare_query: &str, base: &[String]) -> Vec<String> {
         if !hit {
             continue;
         }
-        for t in *cluster {
+        for t in edge.terms {
             if t.chars().count() >= 2 {
                 push_unique(&mut out, normalise(t));
             }
@@ -148,5 +253,33 @@ mod tests {
     fn expand_query_appends_terms() {
         let q = expand_query("退钱的手续");
         assert!(q.contains("报销"), "{q}");
+    }
+
+    /// S01：对立词不得因同簇扩腿。
+    #[test]
+    fn s01_opposite_sugar_not_expanded() {
+        let got = expand_legs("不加糖咖啡", &[]);
+        assert!(
+            !got.iter().any(|g| g == "加糖"),
+            "不加糖 不得扩出 加糖: {got:?}"
+        );
+    }
+
+    #[test]
+    fn cause_effect_allergy_not_expanded() {
+        let got = expand_legs("花生过敏", &[]);
+        assert!(
+            !got.iter().any(|g| g == "不能吃"),
+            "过敏 不得扩出 不能吃: {got:?}"
+        );
+    }
+
+    #[test]
+    fn parent_child_peanut_nut_not_expanded() {
+        let got = expand_legs("坚果过敏", &[]);
+        assert!(
+            !got.iter().any(|g| g == "花生"),
+            "坚果 不得扩出 花生: {got:?}"
+        );
     }
 }

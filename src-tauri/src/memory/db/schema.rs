@@ -6,6 +6,11 @@ use rusqlite::{params, Connection};
 
 use crate::memory::clock;
 
+/// SCHEMA_VERSION = 18（2026-11-24）：Reliability Phase 1
+/// （docs/zh/plan-reliability-phase1/v1）——
+/// `memory_evidence`（派生记忆统一溯源）+ `proactive_daily_usage`（主动搭话
+/// 本地日配额）。Forget Session/Event 经 evidence 级联；无源历史 preference
+/// 不假装已溯源。
 /// SCHEMA_VERSION = 17（2026-11-24）：失败观测列（docs/zh/plan-retry.md §6）——
 /// turn_trace 加 `error_kind`（这一轮为什么失败，可 GROUP BY 出失败分布）
 /// 与 `attempts`（重试了几次，含成功前的失败次数）；consolidate_runs 加
@@ -44,7 +49,7 @@ use crate::memory::clock;
 /// EXISTS 不会给已有表加列；v9→v9 不触发 migrate，INSERT 带 user_text 直接
 /// 报 "table turn_trace has no column named user_text"。教训：改 SCHEMA 必
 /// 须同时 bump 此版本号。
-pub(crate) const SCHEMA_VERSION: i64 = 17;
+pub(crate) const SCHEMA_VERSION: i64 = 18;
 
 /// 不进会话列表的保留 session id：主动搭话（bubble 照旧实时显示，但不占
 /// 用户能切换的对话窗口）。sessions 里**永不建行**（plan-context D6）。
@@ -462,6 +467,27 @@ END;
 
 -- vector leg 仍未做：G-13/P5-1 的触发条件是「S2 之后近义改写仍 <75%」，
 -- 基线与跑法见 memory/eval_recall.rs。
+
+-- v18：派生记忆统一溯源（plan-reliability-phase1 R1）。
+-- memory_id 用 TEXT：fact/preference/boundary 存十进制 id，profile 存 key。
+CREATE TABLE IF NOT EXISTS memory_evidence (
+    memory_type TEXT NOT NULL,   -- 'fact' | 'preference' | 'boundary' | 'profile'
+    memory_id   TEXT NOT NULL,
+    event_id    INTEGER NOT NULL REFERENCES events(id),
+    relation    TEXT NOT NULL,   -- 'extracted' | 'promoted' | 'derived' | 'manual_link'
+    created_at  TEXT NOT NULL,
+    PRIMARY KEY (memory_type, memory_id, event_id, relation)
+);
+CREATE INDEX IF NOT EXISTS idx_evidence_event ON memory_evidence(event_id);
+CREATE INDEX IF NOT EXISTS idx_evidence_memory ON memory_evidence(memory_type, memory_id);
+
+-- v18：主动搭话本地日配额（plan-reliability-phase1 R4）。
+CREATE TABLE IF NOT EXISTS proactive_daily_usage (
+    local_date     TEXT PRIMARY KEY,  -- YYYY-MM-DD（本地日历日）
+    used_count     INTEGER NOT NULL DEFAULT 0,
+    reserved       INTEGER NOT NULL DEFAULT 0,
+    last_spoken_at TEXT
+);
 "#;
 
 pub(super) fn user_version(conn: &Connection) -> rusqlite::Result<i64> {
@@ -569,8 +595,43 @@ pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     add_column_if_missing(conn, "turn_trace", "attempts", "INTEGER")?;
     add_column_if_missing(conn, "consolidate_runs", "error", "TEXT")?;
     backfill_default_session(conn)?;
+    // v18：evidence / 配额表由 SCHEMA IF NOT EXISTS 建出；这里只回填可追溯行。
+    backfill_memory_evidence(conn)?;
+    clear_stale_proactive_reserves(conn)?;
 
     set_user_version_if_behind(conn)?;
+    Ok(())
+}
+
+/// v18 回填：能从现有列可靠推出的 evidence 写入；preference 历史无源不造假。
+fn backfill_memory_evidence(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO memory_evidence (memory_type, memory_id, event_id, relation, created_at)
+         SELECT 'fact', CAST(id AS TEXT), source_event_id, 'extracted', ts
+           FROM facts WHERE source_event_id IS NOT NULL",
+        [],
+    )?;
+    // 用 f.ts：极老库的 boundaries 可能缺 ts 列，facts.ts 从 v1 起就有。
+    conn.execute(
+        "INSERT OR IGNORE INTO memory_evidence (memory_type, memory_id, event_id, relation, created_at)
+         SELECT 'boundary', CAST(b.id AS TEXT), f.source_event_id, 'derived', f.ts
+           FROM boundaries b
+           JOIN facts f ON f.id = b.source_fact_id
+          WHERE f.source_event_id IS NOT NULL",
+        [],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO memory_evidence (memory_type, memory_id, event_id, relation, created_at)
+         SELECT 'profile', key, source_event_id, 'extracted', updated_at
+           FROM user_profile WHERE source_event_id IS NOT NULL",
+        [],
+    )?;
+    Ok(())
+}
+
+/// 启动/迁移时作废未提交的配额预留（崩溃残留），避免吞掉当日额度。
+fn clear_stale_proactive_reserves(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute("UPDATE proactive_daily_usage SET reserved = 0", [])?;
     Ok(())
 }
 

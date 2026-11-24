@@ -176,17 +176,36 @@ pub fn apply_answers(conn: &rusqlite::Connection, answers: &[SubmitAnswer]) -> r
         let Some(q) = question(&a.question) else {
             continue; // unknown question id: audited, not applied
         };
+        // 每条有效回答落一条 onboarding 事件，供 memory_evidence 溯源
+        // （plan-reliability-phase1 D3：禁止无源升格）。
+        // 内容只记题号，不写入答案原文——答案可能命中「不准记录」词，
+        // 且 onboarding 事件本就不进 consolidate 抽取。
+        let eid = db::add_event_meta(
+            conn,
+            "onboarding",
+            &format!("onboarding:{}", a.question),
+            Some("user"),
+            Some("onboarding"),
+        )?;
         if q.kind == "choice" {
             // q3/q5: single-choice preference. content = the chosen option.
             let category = if a.question == "q3" { "habit" } else { "context" };
-            if db::promote_fact(conn, category, a.answer.trim(), 0.9)? {
+            if db::promote_fact(conn, category, a.answer.trim(), 0.9, &[eid])? {
                 report.preferences_added += 1;
             }
         } else {
             for item in split_items(&a.answer) {
                 let content = format!("{}{}", boundary_prefix(&a.question), item);
                 if !db::boundary_exists(conn, &content)? {
-                    db::add_boundary(conn, &content, None)?;
+                    // 无 fact 可挂时用 manual_link 直接挂到 onboarding 事件。
+                    let bid = db::add_boundary(conn, &content, None)?;
+                    crate::memory::evidence::link(
+                        conn,
+                        crate::memory::evidence::TYPE_BOUNDARY,
+                        &bid.to_string(),
+                        eid,
+                        crate::memory::evidence::REL_MANUAL_LINK,
+                    )?;
                     report.boundaries_added += 1;
                 }
             }

@@ -142,9 +142,10 @@ fn read_phase(
     let no_record = crate::onboarding::no_record_items(conn)?;
     let mut blocked = 0usize;
     // plan-loop-supervisor：`kind=system` 是运维留痕，永不进抽取（宁漏勿误）。
+    // onboarding 事件只作 evidence 锚点，不进抽取（plan-reliability-phase1）。
     let user_events: Vec<db::EventRow> = events
         .iter()
-        .filter(|e| e.kind != "system")
+        .filter(|e| e.kind != "system" && e.kind != "onboarding")
         .filter(|e| e.role.as_deref() != Some("assistant"))
         .filter(|e| {
             let hit = no_record.iter().any(|item| e.content.contains(item));
@@ -269,10 +270,17 @@ fn apply_candidates(
             .find(|f| f.id == fact_id)
             .map(|f| f.confidence)
             .unwrap_or(cand.confidence);
-        if conf >= PROMOTION_THRESHOLD
-            && db::promote_fact(conn, cand.category.as_str(), &cand.content, conf)?
-        {
-            report.promoted += 1;
+        if conf >= PROMOTION_THRESHOLD {
+            let mut eids: Vec<i64> = Vec::new();
+            if let Some(eid) = cand.source_event_id {
+                eids.push(eid);
+            }
+            // 升格必须挂源；无 event 的候选跳过（D3），不造孤儿 preference。
+            if !eids.is_empty()
+                && db::promote_fact(conn, cand.category.as_str(), &cand.content, conf, &eids)?
+            {
+                report.promoted += 1;
+            }
         }
     }
     Ok(())

@@ -76,7 +76,11 @@ pub fn add_fact_confident(
         "INSERT INTO facts (ts, content, source_event_id, confidence) VALUES (?1, ?2, ?3, ?4)",
         params![clock::now_iso(), content, source_event_id, confidence],
     )?;
-    Ok(conn.last_insert_rowid())
+    let id = conn.last_insert_rowid();
+    if let Some(eid) = source_event_id {
+        crate::memory::evidence::link_fact(conn, id, eid)?;
+    }
+    Ok(id)
 }
 
 /// Quantize confidence to two decimals — `0.7 + 0.1` must land exactly on
@@ -120,7 +124,20 @@ pub fn add_boundary(
         "INSERT INTO boundaries (ts, content, source_fact_id) VALUES (?1, ?2, ?3)",
         params![clock::now_iso(), content, source_fact_id],
     )?;
-    Ok(conn.last_insert_rowid())
+    let id = conn.last_insert_rowid();
+    if let Some(fid) = source_fact_id {
+        let event_id: Option<i64> = conn
+            .query_row(
+                "SELECT source_event_id FROM facts WHERE id = ?1",
+                params![fid],
+                |r| r.get(0),
+            )
+            .unwrap_or(None);
+        if let Some(eid) = event_id {
+            crate::memory::evidence::link_boundary(conn, id, eid)?;
+        }
+    }
+    Ok(id)
 }
 
 /// Normalized-equality guard so repeated boundary phrasings don't pile up.
@@ -136,7 +153,7 @@ pub fn boundary_exists(conn: &Connection, content: &str) -> rusqlite::Result<boo
     Ok(false)
 }
 
-/// Preference write (used by consolidate promotion, stage ⑤).
+/// Preference write（可无源——历史/测试孤儿；升格请走 `promote_fact`）。
 pub fn add_preference(
     conn: &Connection,
     category: &str,
@@ -150,70 +167,53 @@ pub fn add_preference(
     Ok(conn.last_insert_rowid())
 }
 
-/// Promote a fact only if no active preference holds the same content
-/// (dedup guard — promotion is idempotent across nightly runs).
+/// Promote a fact only if no active preference holds the same content.
+/// `source_event_ids` 至少 1 个（D3：禁止无源升格）；已存在同 content 时
+/// 合并补写 evidence，返回 false（未新建行）。
 pub fn promote_fact(
     conn: &Connection,
     category: &str,
     content: &str,
     confidence: f64,
+    source_event_ids: &[i64],
 ) -> rusqlite::Result<bool> {
-    let exists: bool = conn
-        .query_row(
-            "SELECT COUNT(*) FROM preferences WHERE content = ?1 AND invalid_at IS NULL",
-            params![content],
-            |r| r.get::<_, i64>(0),
-        )
-        .map(|c| c > 0)?;
-    if exists {
-        return Ok(false);
+    if source_event_ids.is_empty() {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(1),
+            Some("promote_fact requires at least one source_event_id".into()),
+        ));
     }
-    add_preference(conn, category, content, confidence)?;
-    Ok(true)
+    let existing_id: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM preferences WHERE content = ?1 AND invalid_at IS NULL LIMIT 1",
+            params![content],
+            |r| r.get(0),
+        )
+        .ok();
+    let pref_id = match existing_id {
+        Some(id) => id,
+        None => add_preference(conn, category, content, confidence)?,
+    };
+    for eid in source_event_ids {
+        crate::memory::evidence::link_preference(conn, pref_id, *eid)?;
+    }
+    Ok(existing_id.is_none())
 }
 
 // --------------------------------------------------- forget (compliance Art. 16)
+// 权威实现：`memory::forget`（plan-reliability-phase1 R1）。
 
-/// User: "forget this" → truly delete, cleanly: the event and every fact
-/// derived from it.
 pub fn forget_event(conn: &Connection, event_id: i64) -> rusqlite::Result<usize> {
-    conn.execute("DELETE FROM facts WHERE source_event_id = ?1", params![event_id])?;
-    conn.execute("DELETE FROM events WHERE id = ?1", params![event_id])
+    crate::memory::forget::forget_event(conn, event_id)
 }
 
-/// User: "forget that whole conversation" → cascade by session.
-///
-/// v15 补全（plan-context §5.5，合规 P0）：`trace_steps.prompt` 存的是
-/// **未截断的 system 全文**，`turn_trace` 存用户原话与回复原文，`tasks.goal`
-/// 存用户原话——只删 events/facts 等于「说忘了其实没忘」。这里同事务把
-/// 会话的 trace、任务、会话行一起清掉。
-///
-/// 返回删除的 events 行数（沿用旧语义，调用方按它报「清掉了几条」）。
+/// 返回删除的 events 行数（沿用旧语义）。
 pub fn forget_session(conn: &Connection, session_id: &str) -> rusqlite::Result<usize> {
-    // 老库未必开着 FK 级联，trace_steps 显式按 turn 删（不依赖 ON DELETE CASCADE）。
-    conn.execute(
-        "DELETE FROM trace_steps WHERE turn_id IN
-             (SELECT id FROM turn_trace WHERE session_id = ?1)",
-        params![session_id],
-    )?;
-    conn.execute("DELETE FROM turn_trace WHERE session_id = ?1", params![session_id])?;
-    conn.execute("DELETE FROM tasks WHERE session_id = ?1", params![session_id])?;
-    conn.execute("DELETE FROM facts WHERE source_event_id IN
-             (SELECT id FROM events WHERE session_id = ?1)", params![session_id])?;
-    conn.execute("DELETE FROM sessions WHERE id = ?1", params![session_id])?;
-    conn.execute("DELETE FROM events WHERE session_id = ?1", params![session_id])
+    crate::memory::forget::forget_session(conn, session_id)
 }
 
-/// User: "forget everything" → the nuclear option. Wipes all three layers
-/// plus the prediction audit (plan-predict.md §7) and the growth tables
-/// (plan-morph.md §7: compliance extends to growth too — starting over IS
-/// the honest interpretation of "forget everything").
-/// v15：trace / 任务 / 会话索引一并清（此前漏删，等于把原话留在库里）。
 pub fn forget_all(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(
-        "DELETE FROM trace_steps; DELETE FROM turn_trace; DELETE FROM tasks; DELETE FROM sessions; DELETE FROM tool_calls; DELETE FROM calendar_cache; DELETE FROM user_profile_history; DELETE FROM user_profile; DELETE FROM relationship_log; DELETE FROM relationship_progress; DELETE FROM relationship; DELETE FROM onboarding_answers; DELETE FROM settings; DELETE FROM growth_log; DELETE FROM growth; DELETE FROM predictions; DELETE FROM boundaries; DELETE FROM preferences; DELETE FROM facts; DELETE FROM events;",
-    )?;
-    Ok(())
+    crate::memory::forget::forget_all(conn)
 }
 
 /// Reset ONLY the relationship line (tool-page button, plan §3.8): the user
@@ -522,17 +522,21 @@ pub fn search(
                 content: row.get(2)?,
                 invalidated: row.get::<_, Option<String>>(3)?.is_some(),
             };
-            let score = if hit.invalidated { 0.1 } else { 0.9 };
-            Ok((score, hit))
+            // R2：默认硬排除失效记忆（不再 ×0.1 混入当前召回）。
+            if hit.invalidated {
+                return Ok(None);
+            }
+            Ok(Some((0.9, hit)))
         })?;
         for row in rows {
-            scored.push(row?);
+            if let Some(pair) = row? {
+                scored.push(pair);
+            }
         }
     }
 
-    // Facts: importance/3 × (0.5 + 0.5·confidence) × decay; invalidated facts
-    // take a 0.1 penalty so a superseded value never outranks its successor
-    // (v1 semantics, kept in v2 — see eval 误记率 metric).
+    // Facts: importance/3 × (0.5 + 0.5·confidence) × decay.
+    // R2：invalidated 硬排除（plan-reliability-phase1）。
     let ids = ids_of("fact");
     if !ids.is_empty() {
         let sql = format!(
@@ -543,20 +547,25 @@ pub fn search(
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |row| {
             let invalidated = row.get::<_, Option<String>>(3)?.is_some();
+            if invalidated {
+                return Ok(None);
+            }
             let hit = crate::memory::MemoryHit {
                 kind: "fact".into(),
                 id: row.get(0)?,
                 ts: row.get(1)?,
                 content: row.get(2)?,
-                invalidated,
+                invalidated: false,
             };
             let confidence: f64 = row.get(4)?;
             let importance: i64 = row.get(5)?;
-            let score = fact_score(importance, confidence, &hit.ts, invalidated, with_decayed);
-            Ok((score, hit))
+            let score = fact_score(importance, confidence, &hit.ts, false, with_decayed);
+            Ok(Some((score, hit)))
         })?;
         for row in rows {
-            scored.push(row?);
+            if let Some(pair) = row? {
+                scored.push(pair);
+            }
         }
     }
 

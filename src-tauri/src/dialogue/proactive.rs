@@ -145,9 +145,12 @@ pub fn spawn_proactive(app: tauri::AppHandle) {
                 }
 
                 let Some(store) = app.try_state::<MemoryStore>() else {
-                    return;
+                    return; // evaluate 已持有同一 store；此处失败极端罕见
                 };
                 let Ok(mut backend) = crate::persona::backend() else {
+                    let _ = store.inner().with_write(|conn| {
+                        crate::decision::release_reserve(conn)
+                    });
                     return;
                 };
                 let hour = chrono::Local::now().hour() as u32;
@@ -160,11 +163,18 @@ pub fn spawn_proactive(app: tauri::AppHandle) {
                 })();
 
                 if let Some((text, turn_id)) = message {
+                    let _ = store.inner().with_write(|conn| {
+                        crate::decision::commit_speak(conn)
+                    });
                     use tauri::Emitter;
                     let _ = app.emit(
                         "proactive:message",
                         serde_json::json!({ "text": text, "turn_id": turn_id }),
                     );
+                } else {
+                    let _ = store.inner().with_write(|conn| {
+                        crate::decision::release_reserve(conn)
+                    });
                 }
             });
             if guard.stopped() {
