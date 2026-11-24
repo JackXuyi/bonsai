@@ -657,19 +657,39 @@ fn bridge_plan_step(
 /// 实测一次 DDG 搜索在国内网络下先等 IPv6 连接失败再走 IPv4，单次 9s；同
 /// query 立即重试只会把一轮翻到 16s+，而且大概率再失败一次。站点慢/反爬是
 /// 常态而非瞬时抖动，把错误如实回给模型换策略更划算。
-fn should_retry(err: &str, access: crate::agent_tools::ToolAccess, name: &str) -> bool {
+/// T4 §5.4：重试判定从「错误串前缀排除表」升级为「Failure kind 判定」——
+/// 分类只此一处（`Failure::from_tool`），这里只看 kind 与档位。
+/// 规则：Read 档且 kind 可重试 → 重试；web 工具从「永不重试」放宽到
+/// 「**传输层**失败重试 1 次」（Transport / Timeout）——语义失败（空结果、
+/// 抓取不到正文）在工具内部返回 Ok，不走这里，仍不重试。
+fn should_retry(f: &crate::failure::Failure, access: crate::agent_tools::ToolAccess, name: &str) -> bool {
     use crate::agent_tools::ToolAccess;
     if matches!(name, "web_search" | "web_fetch") {
-        return false;
+        return matches!(
+            f.kind,
+            crate::failure::FailureKind::Transport | crate::failure::FailureKind::Timeout
+        );
     }
-    if access != ToolAccess::Read {
-        return false;
+    access == ToolAccess::Read && f.retryable
+}
+
+/// T4 §5.4：工具失败回传给模型的文案。Write（Ask）档失败固定带
+/// 「可能已部分生效，不要重复调用」——明确告诉模型不要重试，比指望它
+/// 自己克制可靠；门禁拒绝（denied/forbidden）意味着根本没执行，不带这句。
+fn tool_failure_reply(access: crate::agent_tools::ToolAccess, err: &str) -> String {
+    let masked = crate::agent_tools::mask_secrets(err);
+    let clipped = crate::agent_tools::clip_chars(&masked, 200);
+    let kind = crate::failure::Failure::from_tool(err).kind;
+    if access != crate::agent_tools::ToolAccess::Read
+        && !matches!(
+            kind,
+            crate::failure::FailureKind::Denied | crate::failure::FailureKind::BadRequest
+        )
+    {
+        format!("执行失败（该操作可能已部分生效，不要重复调用）：{clipped}")
+    } else {
+        format!("执行失败：{clipped}")
     }
-    !(err.starts_with("bad_args")
-        || err == "denied"
-        || err == "forbidden"
-        || err == "unsupported"
-        || err == "unknown_tool")
 }
 
 /// T4：从 kit catalog 查工具权限档（catalog_all 公开且含 access；
@@ -1155,17 +1175,17 @@ fn cloud_tool_loop(
                     Err(e) => {
                         let outcome = if e == "denied" { "denied" } else { "error" };
                         rec.tool_call(&call.name, &args_text, "", outcome, Some(&e), t_tool.elapsed());
-                        if should_retry(&e, access, &call.name) && attempts < 2 {
+                        // T4 §5.4：分类只此一处——错误串先过 Failure::from_tool。
+                        let f = crate::failure::Failure::from_tool(&e)
+                            .with_attempts(attempts as u32);
+                        if should_retry(&f, access, &call.name) && attempts < 2 {
                             rec.simple("retry", "工具重试", "pending", Some(&e));
                             std::thread::sleep(RETRY_BACKOFF);
                             continue;
                         }
                         // 不重试 / 重试耗尽：失败事实回传（脱敏），不编造。
-                        let masked = crate::agent_tools::mask_secrets(&e);
-                        break (
-                            outcome,
-                            format!("执行失败：{}", crate::agent_tools::clip_chars(&masked, 200)),
-                        );
+                        // Write 档固定带「不要重复调用」措辞（§5.4）。
+                        break (outcome, tool_failure_reply(access, &e));
                     }
                 }
             };
@@ -3249,13 +3269,36 @@ mod tests {
         }
     }
 
+    /// Ask 门全放行（T4 A6：验证 Write 档真的执行并失败时的措辞）。
+    struct AllowAllAskGate;
+    impl crate::agent_tools::ApprovalGate for AllowAllAskGate {
+        fn check(
+            &self,
+            _c: &crate::agent_tools::ToolCall,
+            _s: &str,
+            _r: bool,
+        ) -> crate::agent_tools::ApprovalDecision {
+            crate::agent_tools::ApprovalDecision::Allow
+        }
+    }
+
     fn flaky_kit(fail_times: usize, fail_kind: &'static str) -> crate::mcp_admin::AgentKit {
         flaky_kit_named("weather", fail_times, fail_kind)
     }
 
-    /// 同 flaky_kit，但可指定工具名（验证「外部网络类不重试」等按名分流）。
+    /// 同 flaky_kit，但可指定工具名（验证「web 传输层重试」等按名分流）。
     fn flaky_kit_named(
         name: &str,
+        fail_times: usize,
+        fail_kind: &'static str,
+    ) -> crate::mcp_admin::AgentKit {
+        flaky_kit_named_access(name, crate::agent_tools::ToolAccess::Read, fail_times, fail_kind)
+    }
+
+    /// 再加 access 档位（T4 §5.4：Write/Ask 档措辞与不重试验证）。
+    fn flaky_kit_named_access(
+        name: &str,
+        access: crate::agent_tools::ToolAccess,
         fail_times: usize,
         fail_kind: &'static str,
     ) -> crate::mcp_admin::AgentKit {
@@ -3265,7 +3308,7 @@ mod tests {
             detail: r#"{"type":"object"}"#.into(),
             kind: crate::agent_tools::ToolKind::Mcp,
             remote: false,
-            access: crate::agent_tools::ToolAccess::Read,
+            access,
         };
         let p = FlakyProvider {
             descriptor,
@@ -3451,10 +3494,11 @@ mod tests {
         assert_eq!(audit, 2, "两次尝试各落一条审计");
     }
 
-    /// P2（T4.1）：外部网络类工具失败**不重试**——实测 DDG 一次搜索 9s，
-    /// 同 query 立即重试把一轮翻到 16s+，还大概率再失败一次。
+    /// T4 §5.4（放宽）：web 工具从「永不重试」改为「传输层失败重试 1 次」
+    /// ——mcp_timeout 归 Timeout，重试 1 次成功 → done / attempts=2。
+    /// （原 P2 裁决「DDG 9s 重试翻倍」被 plan-retry 推翻：传输抖动值得 1 次。）
     #[test]
-    fn external_network_tool_failure_is_not_retried() {
+    fn web_transport_failure_retries_once() {
         let s = mem();
         let c = card();
         let submit = tool_calls_reply(&[(
@@ -3477,8 +3521,120 @@ mod tests {
         .unwrap();
         let tasks = with_conn(&s, |conn| db::task_list(conn, 5).unwrap());
         let plan = tasks[0].plan.as_ref().unwrap();
+        assert_eq!(plan.steps[0].status, "done", "传输层失败重试 1 次后成功");
+        assert_eq!(plan.steps[0].attempts, 2);
+        let audit = with_conn(&s, |conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM tool_calls WHERE task_id = ?1",
+                [&tasks[0].id], |r| r.get::<_, i64>(0),
+            ).unwrap()
+        });
+        assert_eq!(audit, 2, "两次尝试各落一条审计");
+    }
+
+    /// T4 §5.4（不变）：web 工具的**非传输层**失败仍不重试——bad_args 是
+    /// 模型臆造参数，重试一百次也一样。
+    #[test]
+    fn web_non_transport_failure_never_retries() {
+        let s = mem();
+        let c = card();
+        let submit = tool_calls_reply(&[(
+            "submit_plan",
+            serde_json::json!({
+                "goal": "查黄山天气",
+                "steps": [{"intent": "搜一下黄山天气", "tool_hint": "web_search"}]
+            }),
+        )]);
+        let mut backend = cloud_backend(vec![
+            submit,
+            tool_calls_reply(&[("web_search", serde_json::json!({"query": "黄山 天气"}))]),
+            content_reply("没搜到。"),
+        ]);
+        let mut kit = flaky_kit_named("web_search", 1, "bad_args_query");
+        chat_turn_with_kit(
+            &s, &mut backend, &c, "s-web2", "帮我规划一下查黄山天气", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit,
+        )
+        .unwrap();
+        let tasks = with_conn(&s, |conn| db::task_list(conn, 5).unwrap());
+        let plan = tasks[0].plan.as_ref().unwrap();
         assert_eq!(plan.steps[0].status, "failed");
-        assert_eq!(plan.steps[0].attempts, 1, "外部网络类失败不重试");
+        assert_eq!(plan.steps[0].attempts, 1, "语义/参数失败不重试");
+    }
+
+    /// A6：Write（Ask）档工具失败 → 不重试；回传给模型的文案固定含
+    /// 「可能已部分生效，不要重复调用」。
+    #[test]
+    fn a6_write_tool_failure_says_do_not_repeat() {
+        let s = mem();
+        let c = card();
+        let (client, seen) = tool_client(vec![
+            tool_calls_reply(&[("send_note", serde_json::json!({}))]),
+            content_reply("写失败了。"),
+        ]);
+        let mut backend = crate::persona::eval::LocalBackend::with_client(
+            client,
+            crate::llm::ClientKind::Cloud,
+        );
+        // Ask 档 + 全放行门：工具真的会执行并失败（模拟写到一半断了）。
+        let mut kit = flaky_kit_named_access(
+            "send_note", crate::agent_tools::ToolAccess::Ask, 2, "mcp_unreachable",
+        );
+        kit.ask_gate = Box::new(AllowAllAskGate);
+        chat_turn_with_kit(
+            &s, &mut backend, &c, "s-a6", "记一条笔记", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit,
+        )
+        .unwrap();
+        // 单步任务（无计划轮）：审计只 1 条 = 没重试。
+        let audit = with_conn(&s, |conn| db::tool_call_records(conn, 10).unwrap());
+        assert_eq!(audit.len(), 1, "Write 档失败不重试：{audit:?}");
+        // 第二轮请求（失败事实回传）里带副作用警告。
+        let cap = seen.lock().unwrap();
+        assert_eq!(cap.len(), 2);
+        assert!(
+            cap[1].2.contains("可能已部分生效") && cap[1].2.contains("不要重复调用"),
+            "Write 档回传文案要警告副作用：{}",
+            cap[1].2
+        );
+        // Read 档对照（同错误）：不带副作用警告。
+        assert!(
+            !cap[1].2.contains("denied"),
+            "门禁拒绝之外的失败原文照回传：{}",
+            cap[1].2
+        );
+    }
+
+    /// A7：Read 档传输失败 → 重试 1 次；trace 有 `retry` 步，成功则 `ok`。
+    /// （read_step_retries_once_then_succeeds 已钉 DB 侧；这里钉 trace 步。）
+    #[test]
+    fn a7_read_transport_retry_leaves_a_trace_step() {
+        let s = mem();
+        let c = card();
+        let mut backend = cloud_backend(vec![
+            tool_calls_reply(&[("weather", serde_json::json!({}))]),
+            content_reply("查好了。"),
+        ]);
+        let mut kit = flaky_kit(1, "mcp_timeout");
+        chat_turn_with_kit(
+            &s, &mut backend, &c, "s-a7", "天气", 10, false,
+            crate::calendar::CalendarAccess::Denied, &mut kit,
+        )
+        .unwrap();
+        let retries: Vec<(String, i64)> = with_conn(&s, |conn| -> rusqlite::Result<Vec<(String, i64)>> {
+            let mut st = conn
+                .prepare("SELECT outcome, COUNT(*) FROM trace_steps WHERE step_kind='retry' GROUP BY outcome")?;
+            let rows = st
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+        .unwrap();
+        assert_eq!(
+            retries,
+            vec![("ok".to_string(), 1), ("pending".to_string(), 1)],
+            "「工具重试」pending + 「工具重试成功」ok：{retries:?}"
+        );
     }
 
     /// A4（不重试）：bad_args 是模型臆造参数，重试无意义 → attempts=1、
@@ -3910,7 +4066,7 @@ mod tests {
         let s = mem();
         let c = card();
         // 空脚本 = 首请求即 Decode 失败（不可重试、无已执行工具）→ 完全失败。
-        let (mut backend, seen) = flaky_backend(vec![]);
+        let (mut backend, _seen) = flaky_backend(vec![]);
         let mut kit = weather_kit();
         let out = chat_turn_with_kit(
             &s, &mut backend, &c, "s-a11", "在吗", 10, false,
