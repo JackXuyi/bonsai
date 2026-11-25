@@ -8,6 +8,7 @@
 | 上游输入 | `docs/zh/roadmap-agent-capabilities.md`（G-09 任务模式 / G-08 常驻任务 / C5 规划与长任务）、`docs/zh/plan-task-card.md`（v0.2 工具分流裁决）、能力盘点（2026-11-23） |
 | 定位约束 | 桌面养成系 AI 搭档；本地 LLM 优先、零工具调用；助手非伴侣；危险动作 Ask-first；能力不重复实现；一切以 AI 优先 |
 | 用户裁决 | **D1**：计划默认确认（auto 直接执行，先干活）；**D6**：做进度面板（计划/进度进独立管理面，不进对话气泡）。两项均为 2026-11-23 用户拍板 |
+| 后续修订 | **D6 已被推翻**：见 [`plan-chat-agent-inline/v1`](./plan-chat-agent-inline/v1/index.md)（2026-11-25）——计划进度入聊；本文件历史锚点保留 |
 
 ---
 

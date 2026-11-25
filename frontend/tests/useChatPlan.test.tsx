@@ -1,4 +1,4 @@
-// A15 锁定：计划过程只进 planStore，绝不进 chatStore.messages。
+// plan-chat-agent-inline：planned 任务进 kind=plan 气泡；bot 正文仍只有最终回复。
 // 用最小 harness 驱动真实 useChat：mock Channel 拿到 onmessage，再模拟后端
 // 在流里发 task_start / task_step / task_done。
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -75,29 +75,26 @@ beforeEach(() => {
 });
 
 describe("useChat × 计划事件", () => {
-  it("task_* 只转 planStore：气泡只有用户话 + 最终回复", async () => {
+  it("planned task_start → kind=plan 气泡；bot 正文只有最终回复", async () => {
     render(<Harness />);
     fireEvent.click(screen.getByText("发"));
 
     await waitFor(() => {
       const msgs = useChatStore.getState().messages;
-      expect(msgs.map((m) => m.kind)).toEqual(["user", "bot"]);
+      expect(msgs.map((m) => m.kind)).toEqual(["user", "plan", "bot"]);
     });
     const msgs = useChatStore.getState().messages;
     expect(msgs[0].text).toBe("先查日程再写摘要");
-    expect(msgs[1].text).toBe("好啦，摘要写完了。");
-    // 过程痕迹一个都不许出现在盆栽回复里（目标 / 步骤 / 进度字样）
+    expect(msgs[1].planTaskId).toBe("t1");
+    expect(msgs[2].text).toBe("好啦，摘要写完了。");
     const botText = msgs
       .filter((m) => m.kind === "bot")
       .map((m) => m.text)
       .join("|");
     expect(botText).toBe("好啦，摘要写完了。");
-    expect(botText).not.toContain("查日程再写摘要");
-    expect(botText).not.toContain("步骤");
-    expect(botText).not.toContain("计划");
   });
 
-  it("同一条流里 planStore 收到事件（面板有数据，气泡没有）", async () => {
+  it("同一条流里 planStore 与 plan 气泡同时有数据", async () => {
     render(<Harness />);
     fireEvent.click(screen.getByText("发"));
 
@@ -105,8 +102,10 @@ describe("useChat × 计划事件", () => {
     const cur = usePlanStore.getState().current!;
     expect(cur.id).toBe("t1");
     expect(cur.steps[0].status).toBe("done");
-    // task_start / task_done 各触发一次基线刷新
     expect(planListMock).toHaveBeenCalled();
+    expect(
+      useChatStore.getState().messages.some((m) => m.kind === "plan" && m.planTaskId === "t1"),
+    ).toBe(true);
   });
 
   it("IPC 等超时：已流出的字不撤，失败挂在 failure 行", async () => {

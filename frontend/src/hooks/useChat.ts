@@ -5,7 +5,7 @@
 // 结果通过同一 Channel 的 `turn_done` / `turn_error` 事件回传。这样一轮真的
 // 跑几分钟也不会被 IPC 兜底超时误判（旧实现是「命令整轮才 resolve」）。
 // 兜底改为**事件静默看门狗**：超过 IDLE_TIMEOUT_MS 没有任何事件才算断。
-// 工具调用过程不进消息流（2026-11-22 裁决）：task_* 只转 planStore。
+// task_* → planStore；planned 任务另插 kind=plan 气泡（plan-chat-agent-inline）。
 import { useCallback, useRef, useState } from "react";
 import { Channel } from "@tauri-apps/api/core";
 import { dialogueCancel, dialogueChatStream, facePreview } from "@/lib/commands";
@@ -94,12 +94,16 @@ export function useChat() {
     const sessionId = useSessionStore.getState().currentId;
     chattingRef.current = true;
     setChatting(true);
-    const typingId = store.add({ kind: "typing", text: "" });
+    let typingId = store.add({ kind: "typing", text: "" });
 
     const plan = usePlanStore.getState();
     let bubbleId: number | null = null;
     let settled = false;
     let idle: ReturnType<typeof setTimeout> | undefined;
+
+    const clearTyping = () => {
+      store.remove(typingId);
+    };
 
     const endTurn = () => {
       activeTaskRef.current = null;
@@ -113,7 +117,7 @@ export function useChat() {
     // 读 messages 必须用 chat.getState() 新快照——beginTurn 开头缓存的
     // store.messages 在 appendText 之后是过期的。
     const fail = (reason: string | TurnFailure) => {
-      store.remove(typingId);
+      clearTyping();
       const f = turnErrorFailure(reason);
       const msg = turnErrorText(reason);
       if (bubbleId !== null) {
@@ -155,9 +159,30 @@ export function useChat() {
       armIdle();
 
       if (msg?.task_step) {
-        const ev = msg.task_step as { event?: string; id?: string };
+        const ev = msg.task_step as {
+          event?: string;
+          id?: string;
+          planned?: boolean;
+          goal?: string;
+        };
         if (ev?.event === "task_start" && typeof ev.id === "string") {
           activeTaskRef.current = ev.id;
+          if (ev.planned) {
+            const snap = chat.getState().messages;
+            const existing = snap.find(
+              (m) => m.kind === "plan" && m.planTaskId === ev.id,
+            );
+            if (!existing) {
+              // 插在 typing 之前，避免计划卡跑到流式气泡后面
+              clearTyping();
+              store.add({
+                kind: "plan",
+                text: ev.goal ?? "",
+                planTaskId: ev.id,
+              });
+              typingId = store.add({ kind: "typing", text: "" });
+            }
+          }
         }
         plan.applyTaskEvent(msg.task_step);
         if (
@@ -182,12 +207,14 @@ export function useChat() {
         settled = true;
         const outcome = msg.turn_done;
         if (bubbleId === null) {
-          store.remove(typingId);
+          clearTyping();
           bubbleId = store.add({
             kind: "bot",
             text: "",
             ts: new Date().toISOString(),
           });
+        } else {
+          clearTyping();
         }
         const local =
           chat.getState().messages.find((m) => m.id === bubbleId)?.text ?? "";
@@ -221,7 +248,7 @@ export function useChat() {
 
       if (!msg?.delta) return;
       if (bubbleId === null) {
-        store.remove(typingId);
+        clearTyping();
         bubbleId = store.add({
           kind: "bot",
           text: "",

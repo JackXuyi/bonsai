@@ -397,6 +397,88 @@
 .composer-dock {
   flex: none;
   padding: 0 2px 2px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* 聊天内授权条（plan-chat-agent-inline）：非模态，贴 composer 上方 */
+.inline-approval {
+  flex: none;
+  padding: 10px 12px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+}
+
+.inline-approval-toast {
+  position: fixed;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  z-index: 40;
+  max-width: 520px;
+  margin: 0 auto;
+}
+
+.inline-approval-title {
+  margin: 0 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.inline-approval-sub {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.inline-approval-args {
+  margin: 0 0 8px;
+  max-height: 72px;
+  overflow: auto;
+  font-size: 11px;
+}
+
+.inline-approval-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+/* 聊天内计划进度 */
+.plan-inline {
+  margin: 4px 0 10px;
+  padding: 10px 12px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+}
+
+.plan-inline-toggle {
+  display: block;
+  margin: 0 0 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.plan-inline-toggle:hover {
+  color: var(--ink);
+}
+
+.plan-inline-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
 }
 
 .composer {

@@ -28,33 +28,51 @@ pub(crate) const RETRY_BACKOFF: Duration = Duration::from_millis(500);
 // 段 + skill 段）——2B「人格稀释 JSON」的教训不适用于 DeepSeek；循环自然
 // 结束时模型直接以阿盆口吻作答，不再需要 pass-C 润色轮。
 
-/// 单轮对话工具调用总次数上限（v0.2 §4 D2）。超出即强制收尾。
-pub(crate) const CLOUD_TOOL_CALL_CAP: usize = 8;
-/// 单轮对话 HTTP 请求次数上限（含最终作答轮）。网络往返比本地推理贵。
-pub(crate) const CLOUD_REQUEST_CAP: usize = 6;
+/// 单轮工具调用上限（plan-chat-agent-inline：产品开关开 / 逃生顶同值 32）。
+pub(crate) const CLOUD_TOOL_CALL_CAP: usize = 32;
+/// 单轮 HTTP 请求上限（含作答轮；开关开 / 逃生顶同值 32）。
+pub(crate) const CLOUD_REQUEST_CAP: usize = 32;
+
+/// settings：限制工具次数（默认关；关时仍受 [`CLOUD_TOOL_CALL_CAP`] 逃生顶约束）。
+pub(crate) const SETTING_TOOL_CAP: &str = "cloud_tool_call_cap_enabled";
+/// settings：限制 HTTP 次数（默认关；关时仍受 [`CLOUD_REQUEST_CAP`] 逃生顶约束）。
+pub(crate) const SETTING_REQUEST_CAP: &str = "cloud_request_cap_enabled";
 
 /// 规划意图判定（Phase 3 A3：权威在 `intent_gate`；此处薄封装保持原调用点）。
 pub(crate) fn plan_intent(user_text: &str, kit: &crate::mcp_admin::AgentKit) -> bool {
     crate::intent_gate::wants_plan(user_text, kit, false)
 }
 
-/// 计划步数上限（plan-planning §7）：低于 CLOUD_TOOL_CALL_CAP=8，留 2 步
-/// 给「计划外步骤」与收尾。
-pub(crate) const MAX_PLAN_STEPS: usize = 6;
+/// 计划步数安全软顶（plan-chat-agent-inline：取代原 MAX_PLAN_STEPS=6）。
+pub(crate) const SOFT_PLAN_STEPS_CAP: usize = 32;
+
+/// 是否触达工具/HTTP 预算（逃生顶与产品上限同为 32，开关只影响收尾文案）。
+pub(crate) fn cloud_budget_hit(executed: usize, requests: usize) -> bool {
+    executed >= CLOUD_TOOL_CALL_CAP || requests + 1 >= CLOUD_REQUEST_CAP
+}
+
+fn setting_flag_true(store: &MemoryStore, key: &str) -> bool {
+    store
+        .read_guard()
+        .ok()
+        .and_then(|conn| db::get_setting(&conn, key).ok().flatten())
+        .as_deref()
+        == Some("true")
+}
 
 /// `submit_plan` 协议工具 spec——只在计划轮传给模型，**不进 provider catalog**
 /// （D5 裁决：它是协议工具，不是能力）。
 pub(crate) fn submit_plan_spec() -> crate::llm::ToolSpec {
     crate::llm::ToolSpec {
         name: "submit_plan".into(),
-        description: "提交本轮多步执行计划。仅在规划轮调用一次；steps 不超过 6 步。".into(),
+        description: "提交本轮多步执行计划。仅在规划轮调用一次；steps 不超过 32 步。".into(),
         parameters: Some(serde_json::json!({
             "type": "object",
             "properties": {
                 "goal": { "type": "string", "description": "一句话目标" },
                 "steps": {
                     "type": "array",
-                    "description": "扁平步骤列表，最多 6 步",
+                    "description": "扁平步骤列表，最多 32 步",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -71,7 +89,7 @@ pub(crate) fn submit_plan_spec() -> crate::llm::ToolSpec {
 }
 
 /// 把模型提交的 `submit_plan` 参数解析为 PlanJson。
-/// 校验：goal 非空、steps 1..=6、每步 intent 非空；tool_hint 缺省填 "*"
+/// 校验：goal 非空、steps 1..=32、每步 intent 非空；tool_hint 缺省填 "*"
 /// （表示「计划外/未指定」）。任一不满足 → None（降级为无计划循环）。
 pub(crate) fn parse_submitted_plan(args: &serde_json::Value) -> Option<db::PlanJson> {
     let goal = args.get("goal")?.as_str()?.trim().to_string();
@@ -79,7 +97,7 @@ pub(crate) fn parse_submitted_plan(args: &serde_json::Value) -> Option<db::PlanJ
         return None;
     }
     let raw_steps = args.get("steps")?.as_array()?;
-    if raw_steps.is_empty() || raw_steps.len() > MAX_PLAN_STEPS {
+    if raw_steps.is_empty() || raw_steps.len() > SOFT_PLAN_STEPS_CAP {
         return None;
     }
     let mut steps = Vec::with_capacity(raw_steps.len());
@@ -453,6 +471,11 @@ pub(crate) fn cloud_tool_loop(
     let mut reply;
     // 整轮最终仍失败时带出（含「本地拼装」路径）——轮层用 hint 说话。
     let mut last_failure: Option<crate::failure::Failure> = None;
+    // 预算开关：默认关；与逃生顶同为 32，只影响强制收尾文案（产品上限 vs 安全上限）。
+    // 读失败 → false（不收紧文案），不得静默当成「已开启限制」。
+    let tool_cap_on = setting_flag_true(store, SETTING_TOOL_CAP);
+    let request_cap_on = setting_flag_true(store, SETTING_REQUEST_CAP);
+    let product_cap_on = tool_cap_on || request_cap_on;
 
     // ---- L1 规划入口（plan-planning v0.2 §5.2）：云端专属 ----
     // plan_intent 只在云端循环内调用——本地路径永不走到这里（A9 零工具硬约束）。
@@ -554,12 +577,11 @@ pub(crate) fn cloud_tool_loop(
         }
 
         // 护栏触发 → 强制收尾：去掉 tools（协议默认 tool_choice=none），
-        // 模型只能基于已有结果散文作答。
-        let budget_hit =
-            executed >= CLOUD_TOOL_CALL_CAP || requests + 1 >= CLOUD_REQUEST_CAP;
+        // 模型只能基于已有结果散文作答。逃生顶恒 32（与产品上限同值）。
+        let budget_hit = cloud_budget_hit(executed, requests);
         let force_answer = budget_hit || cancel_reason.is_some();
         if budget_hit && cancel_reason.is_none() {
-            // A7：预算耗尽 → 剩余步骤 skipped + cancel_reason='budget'。
+            // A7：预算/安全顶耗尽 → 剩余步骤 skipped + cancel_reason='budget'。
             cancel_reason = Some("budget");
             if task_open.get() {
                 skip_remaining_steps(store, &task.borrow().id, "budget");
@@ -567,10 +589,19 @@ pub(crate) fn cloud_tool_loop(
         }
         if force_answer && !forced_note_sent {
             forced_note_sent = true;
-            let note = if cancel_reason.is_some() {
-                "（系统注入的一次性指令：用户已取消/触及上限。请基于上面已获得的工具结果，简短说明现状并收尾，不要再调用工具。）"
-            } else {
-                "（系统注入的一次性指令：工具调用已达上限。请基于上面已获得的工具结果，直接面向用户作答；不要再调用工具。）"
+            let note = match cancel_reason {
+                Some("user") | Some("external") => {
+                    "（系统注入的一次性指令：用户已取消。请基于上面已获得的工具结果，简短说明现状并收尾，不要再调用工具。）"
+                }
+                Some("budget") if product_cap_on => {
+                    "（系统注入的一次性指令：工具调用已达上限。请基于上面已获得的工具结果，直接面向用户作答；不要再调用工具。）"
+                }
+                Some("budget") => {
+                    "（系统注入的一次性指令：已达安全上限。请基于上面已获得的工具结果，直接面向用户作答；不要再调用工具。）"
+                }
+                _ => {
+                    "（系统注入的一次性指令：请基于上面已获得的工具结果，直接面向用户作答；不要再调用工具。）"
+                }
             };
             msgs.push(crate::llm::ToolMsg::user(note));
         }

@@ -345,7 +345,7 @@ export const jobList = () => call<JobRow[]>("job_list");
 export const jobSetEnabled = (name: string, enabled: boolean) =>
   call<boolean>("job_set_enabled", { name, enabled });
 
-/** 审批回执：返回 false 表示该请求已过期（30s 超时已拒绝或已答复过）。 */
+/** 审批回执：返回 false 表示该请求已过期（60s 超时已拒绝或已答复过）。 */
 export const mcpApprovalReply = (id: number, allow: boolean) =>
   call<boolean>("mcp_approval_reply", { id, allow });
 
@@ -353,6 +353,17 @@ export const mcpApprovalReply = (id: number, allow: boolean) =>
 export const agentApprovalGet = () => call<"auto" | "ask">("agent_approval_get");
 export const agentApprovalSet = (mode: "auto" | "ask") =>
   call<void>("agent_approval_set", { mode });
+
+/** 云端循环预算开关（默认关；上限固定 32）。 */
+export interface AgentBudgetCaps {
+  toolCapEnabled: boolean;
+  requestCapEnabled: boolean;
+  toolCap: number;
+  requestCap: number;
+}
+export const agentBudgetGet = () => call<AgentBudgetCaps>("agent_budget_get");
+export const agentBudgetSet = (toolCapEnabled: boolean, requestCapEnabled: boolean) =>
+  call<void>("agent_budget_set", { toolCapEnabled, requestCapEnabled });
 
 /** agent 错误码 → 用户能懂的一句话（humanizeLlmError 同风格）。 */
 export function humanizeAgentError(err: unknown): string {

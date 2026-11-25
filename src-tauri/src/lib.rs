@@ -388,6 +388,8 @@ pub fn run() {
             mcp_admin::mcp_approval_reply,
             mcp_admin::agent_approval_get,
             mcp_admin::agent_approval_set,
+            mcp_admin::agent_budget_get,
+            mcp_admin::agent_budget_set,
             filetools::fs_status,
             filetools::fs_set_config,
             filetools::fs_root_add,

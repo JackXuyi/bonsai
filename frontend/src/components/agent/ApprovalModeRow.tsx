@@ -51,7 +51,7 @@ export function ApprovalModeRow({ onError }: ApprovalModeRowProps) {
       </button>
       <p className="hint-line agent-approval-note" data-testid="approval-mode-hint">
         {approval === "ask"
-          ? "只读工具也会先弹确认卡；写类工具本来就会询问。30 秒不回应视为拒绝。"
+          ? "只读工具也会在聊天里确认；写类工具本来就会询问。1 分钟不回应视为拒绝。"
           : "只读工具直接执行；写类仍强制询问，禁止类永不执行。"}
       </p>
     </div>

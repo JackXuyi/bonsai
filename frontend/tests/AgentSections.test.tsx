@@ -24,6 +24,13 @@ const skillListMock = vi.fn().mockResolvedValue<SkillView[]>([]);
 const recordsMock = vi.fn().mockResolvedValue<ToolCallRecord[]>([]);
 const approvalGetMock = vi.fn().mockResolvedValue<"auto" | "ask">("auto");
 const approvalSetMock = vi.fn().mockResolvedValue(undefined);
+const budgetGetMock = vi.fn().mockResolvedValue({
+  toolCapEnabled: false,
+  requestCapEnabled: false,
+  toolCap: 32,
+  requestCap: 32,
+});
+const budgetSetMock = vi.fn().mockResolvedValue(undefined);
 const scanMock = vi.fn().mockResolvedValue<DiscoveredServer[]>([]);
 const importMock = vi.fn().mockResolvedValue({ inserted: 0, skipped: 0 });
 const toolsMock = vi.fn().mockResolvedValue<
@@ -55,6 +62,8 @@ vi.mock("@/lib/commands", async (importOriginal) => {
     toolCallRecords: (...args: unknown[]) => recordsMock(...args),
     agentApprovalGet: (...args: unknown[]) => approvalGetMock(...args),
     agentApprovalSet: (...args: unknown[]) => approvalSetMock(...args),
+    agentBudgetGet: (...args: unknown[]) => budgetGetMock(...args),
+    agentBudgetSet: (...args: unknown[]) => budgetSetMock(...args),
     mcpDiscoverScan: (...args: unknown[]) => scanMock(...args),
     mcpDiscoverImport: (...args: unknown[]) => importMock(...args),
   };
@@ -66,6 +75,13 @@ beforeEach(() => {
   saveMock.mockClear();
   approvalGetMock.mockClear().mockResolvedValue("auto");
   approvalSetMock.mockClear();
+  budgetGetMock.mockClear().mockResolvedValue({
+    toolCapEnabled: false,
+    requestCapEnabled: false,
+    toolCap: 32,
+    requestCap: 32,
+  });
+  budgetSetMock.mockClear();
   scanMock.mockClear().mockResolvedValue<DiscoveredServer[]>([]);
   importMock.mockClear().mockResolvedValue({ inserted: 0, skipped: 0 });
   toolsMock.mockClear().mockResolvedValue([
@@ -251,7 +267,7 @@ describe("PermissionTiersCard + AuditTimeline", () => {
     fireEvent.click(screen.getByText("每次询问"));
     await waitFor(() => expect(approvalSetMock).toHaveBeenCalledWith("ask"));
     await waitFor(() =>
-      expect(screen.getByTestId("approval-mode-hint").textContent).toContain("30 秒不回应视为拒绝")
+      expect(screen.getByTestId("approval-mode-hint").textContent).toContain("1 分钟不回应视为拒绝")
     );
   });
 

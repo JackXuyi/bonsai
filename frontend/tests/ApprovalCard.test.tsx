@@ -1,10 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
-import { ApprovalCard } from "@/components/agent/ApprovalCard";
+import { InlineApprovalBar } from "@/components/agent/InlineApprovalBar";
 
 const replyMock = vi.fn();
-// useTauriEvent mock: capture the handler so the test can "emit" an event.
 let emit: ((p: unknown) => void) | null = null;
 
 vi.mock("@/lib/commands", async (importOriginal) => {
@@ -39,25 +38,27 @@ beforeEach(() => {
   emit = null;
 });
 
-describe("ApprovalCard", () => {
+describe("InlineApprovalBar", () => {
   it("无事件时不渲染（auto 模式零开销）", () => {
-    render(<ApprovalCard />);
+    render(<InlineApprovalBar />);
     expect(screen.queryByTestId("approval-card")).toBeNull();
   });
 
-  it("事件到达 → 弹卡并标注远程/参数摘要", async () => {
-    render(<ApprovalCard />);
+  it("事件到达 → 非模态条并标注远程/参数摘要", async () => {
+    render(<InlineApprovalBar />);
     act(() => emit?.(request()));
-    expect(await screen.findByTestId("approval-card")).toBeTruthy();
-    const text = screen.getByTestId("approval-card").textContent ?? "";
+    const card = await screen.findByTestId("approval-card");
+    expect(card).toBeTruthy();
+    expect(card.getAttribute("aria-modal")).toBeNull();
+    const text = card.textContent ?? "";
     expect(text).toContain("weather");
     expect(text).toContain("参数会出设备");
-    expect(text).toContain("30 秒内不回应视为拒绝");
+    expect(text).toMatch(/秒内不回应视为拒绝/);
     expect(text).toContain("杭州");
   });
 
   it("允许 → 回执 id+allow=true，卡片关闭", async () => {
-    render(<ApprovalCard />);
+    render(<InlineApprovalBar />);
     act(() => emit?.(request()));
     fireEvent.click(await screen.findByText("允许本次"));
     await waitFor(() => expect(replyMock).toHaveBeenCalledWith(7, true));
@@ -65,19 +66,28 @@ describe("ApprovalCard", () => {
   });
 
   it("拒绝 → 回执 allow=false", async () => {
-    render(<ApprovalCard />);
+    render(<InlineApprovalBar />);
     act(() => emit?.(request()));
     fireEvent.click(await screen.findByText("拒绝"));
     await waitFor(() => expect(replyMock).toHaveBeenCalledWith(7, false));
   });
 
+  it("Esc → 拒绝", async () => {
+    render(<InlineApprovalBar />);
+    act(() => emit?.(request()));
+    await screen.findByText("允许本次");
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    });
+    await waitFor(() => expect(replyMock).toHaveBeenCalledWith(7, false));
+  });
+
   it("回执返回 false（已超时/已回答）→ 卡片留显过期提示", async () => {
     replyMock.mockResolvedValue(false);
-    render(<ApprovalCard />);
+    render(<InlineApprovalBar />);
     act(() => emit?.(request()));
     fireEvent.click(await screen.findByText("允许本次"));
     expect(await screen.findByText(/这次请求已经过期/)).toBeTruthy();
-    // 过期态只剩「知道了」，不再能重复回执
     expect(screen.queryByText("允许本次")).toBeNull();
     fireEvent.click(screen.getByText("知道了"));
     await waitFor(() => expect(screen.queryByTestId("approval-card")).toBeNull());

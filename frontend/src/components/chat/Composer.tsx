@@ -1,9 +1,11 @@
 "use client";
 
 // composer：浮起条 + ModelChip + IME guard + 发送/停（plan-chat-first-ui v2）。
+// 授权条挂在 dock 顶部（plan-chat-agent-inline）。
 import { useRef, useState } from "react";
 import { shouldBlockSubmit } from "@/lib/ime";
 import { ModelChip } from "@/components/chat/ModelChip";
+import { InlineApprovalBar } from "@/components/agent/InlineApprovalBar";
 
 export function Composer({
   onSend,
@@ -38,6 +40,7 @@ export function Composer({
 
   return (
     <div className="composer-dock">
+      <InlineApprovalBar placement="dock" />
       <form
         className="composer"
         onSubmit={(e) => {

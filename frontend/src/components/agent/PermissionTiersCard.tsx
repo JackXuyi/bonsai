@@ -4,6 +4,7 @@
 // 档位权威在 Rust ToolDescriptor.access，本卡只展示。
 import { useEffect, useState } from "react";
 import { ApprovalModeRow } from "@/components/agent/ApprovalModeRow";
+import { BudgetCapsRow } from "@/components/agent/BudgetCapsRow";
 import { ToolAccessBadge } from "@/components/agent/ToolAccessBadge";
 import { builtinToolsList, humanizeAgentError } from "@/lib/commands";
 import {
@@ -47,6 +48,7 @@ export function PermissionTiersCard() {
 
       {error && <p className="model-error">{error}</p>}
       <ApprovalModeRow onError={setError} />
+      <BudgetCapsRow onError={setError} />
 
       <div className="agent-card-head" style={{ marginTop: 10 }}>
         <p className="card-title" style={{ marginBottom: 0, fontSize: 14 }}>

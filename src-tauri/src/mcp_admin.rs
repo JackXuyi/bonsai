@@ -23,7 +23,8 @@ use crate::mcp::{McpClient, McpManager, McpTransport, ERR_UNREACHABLE};
 
 pub const TOOL_CACHE_TTL_SECS: i64 = 300; // calendar_cache 惯例
 /// How long `ask` mode waits for the user before treating silence as denial.
-pub const APPROVAL_WAIT: Duration = Duration::from_secs(30);
+/// 授权等待（plan-chat-agent-inline v1.2）：默认 1 分钟；超时视为拒绝。
+pub const APPROVAL_WAIT: Duration = Duration::from_secs(60);
 
 // ---------------------------------------------------------------- rows
 
@@ -929,8 +930,8 @@ impl ApprovalBroker {
 }
 
 /// Ask-first gate (spec-s4): emits `tool:approval_required` and waits up to
-/// `APPROVAL_WAIT` for the card. No app handle (headless / unit tests) or a
-/// timeout ⇒ Deny — silence never becomes consent.
+/// `APPROVAL_WAIT`（60s）for the inline bar. No app handle (headless / unit
+/// tests) or a timeout ⇒ Deny — silence never becomes consent.
 pub struct AskFirstGate {
     broker: Arc<ApprovalBroker>,
     app: Option<tauri::AppHandle>,
@@ -1500,6 +1501,61 @@ pub fn agent_approval_set(
     }
     let conn = now_conn(&store)?;
     db::set_setting(&conn, "approval_mode", &mode).map_err(|e| e.to_string())
+}
+
+/// 云端循环预算开关（plan-chat-agent-inline）：默认均关；上限数字固定 32。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentBudgetCaps {
+    pub tool_cap_enabled: bool,
+    pub request_cap_enabled: bool,
+    pub tool_cap: usize,
+    pub request_cap: usize,
+}
+
+#[tauri::command]
+pub fn agent_budget_get(
+    store: tauri::State<'_, crate::memory::MemoryStore>,
+) -> Result<AgentBudgetCaps, String> {
+    let conn = now_conn(&store)?;
+    let tool = db::get_setting(&conn, crate::dialogue::SETTING_TOOL_CAP)
+        .ok()
+        .flatten()
+        .as_deref()
+        == Some("true");
+    let request = db::get_setting(&conn, crate::dialogue::SETTING_REQUEST_CAP)
+        .ok()
+        .flatten()
+        .as_deref()
+        == Some("true");
+    Ok(AgentBudgetCaps {
+        tool_cap_enabled: tool,
+        request_cap_enabled: request,
+        tool_cap: crate::dialogue::CLOUD_TOOL_CALL_CAP,
+        request_cap: crate::dialogue::CLOUD_REQUEST_CAP,
+    })
+}
+
+#[tauri::command]
+pub fn agent_budget_set(
+    store: tauri::State<'_, crate::memory::MemoryStore>,
+    tool_cap_enabled: bool,
+    request_cap_enabled: bool,
+) -> Result<(), String> {
+    let conn = now_conn(&store)?;
+    db::set_setting(
+        &conn,
+        crate::dialogue::SETTING_TOOL_CAP,
+        if tool_cap_enabled { "true" } else { "false" },
+    )
+    .map_err(|e| e.to_string())?;
+    db::set_setting(
+        &conn,
+        crate::dialogue::SETTING_REQUEST_CAP,
+        if request_cap_enabled { "true" } else { "false" },
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------- tests

@@ -4,6 +4,7 @@
 import type { ChatMessage } from "@/lib/stores/chatStore";
 import { PredictionCard } from "./PredictionCard";
 import { ReminderBubble } from "./ReminderBubble";
+import { PlanInlineBubble } from "./PlanInlineBubble";
 import { MessageActions } from "./MessageActions";
 import { MarkdownText } from "./MarkdownText";
 
@@ -41,8 +42,11 @@ export function MessageBubble({
     return <ReminderBubble message={message} onStick={onStick} />;
   }
 
-  // 工具调用过程不进消息流（2026-11-22 用户裁决）：调用明细只在
-  // 「查看详情」/trace 页展示，消息气泡只展示结果 + 🔧 徽标注。
+  if (message.kind === "plan" && message.planTaskId) {
+    return <PlanInlineBubble planTaskId={message.planTaskId} />;
+  }
+
+  // 工具原文不进气泡；计划进度见 kind=plan。明细仍走「查看详情」/trace。
 
   const isUser = message.kind === "user";
   const variant =

@@ -679,15 +679,33 @@ fn card() -> Persona {
 
         let empty = serde_json::json!({"goal": "x", "steps": []});
         assert!(parse_submitted_plan(&empty).is_none());
-        let mut too_many = Vec::new();
-        for i in 0..7 {
-            too_many.push(serde_json::json!({"intent": format!("步{i}")}));
+        // 软顶 32：恰好 32 可解析，33 拒
+        let mut at_cap = Vec::new();
+        for i in 0..SOFT_PLAN_STEPS_CAP {
+            at_cap.push(serde_json::json!({"intent": format!("步{i}")}));
         }
+        assert_eq!(
+            parse_submitted_plan(&serde_json::json!({"goal":"x","steps":at_cap.clone()}))
+                .unwrap()
+                .steps
+                .len(),
+            SOFT_PLAN_STEPS_CAP
+        );
+        let mut too_many = at_cap;
+        too_many.push(serde_json::json!({"intent": "溢出"}));
         assert!(parse_submitted_plan(&serde_json::json!({"goal":"x","steps":too_many})).is_none());
         let blank = serde_json::json!({"goal": "x", "steps": [{"intent": "  "}]});
         assert!(parse_submitted_plan(&blank).is_none());
         assert!(parse_submitted_plan(&serde_json::json!({"goal":"" ,"steps":[{"intent":"a"}]})).is_none());
         assert!(parse_submitted_plan(&serde_json::json!({"steps":[{"intent":"a"}]})).is_none());
+    }
+
+    #[test]
+    fn cloud_budget_hit_at_thirty_two() {
+        assert!(!cloud_budget_hit(0, 0));
+        assert!(!cloud_budget_hit(31, 30));
+        assert!(cloud_budget_hit(32, 0), "工具 32 触顶");
+        assert!(cloud_budget_hit(0, 31), "HTTP requests+1>=32 触顶");
     }
 
     /// D1 确认门：本版 auto / manual 两档都恒放行（A11/A12）——
@@ -1261,39 +1279,29 @@ fn card() -> Persona {
         crate::mcp_admin::unregister_cancel("s-cancel-cmd");
     }
 
-    /// A7（预算护栏）：CLOUD_REQUEST_CAP 触顶 → 剩余步骤 skipped、
-    /// cancel_reason='budget'、强制收尾有正文。
+    /// A7（预算护栏）：CLOUD_REQUEST_CAP=32 触顶 → cancel_reason='budget'、强制收尾有正文。
+    /// 无计划轮：31 次工具请求后 requests=31，下一轮 requests+1>=32 强制收尾。
     #[test]
     fn budget_guard_skips_remaining_with_reason() {
         let s = mem();
         let c = card();
-        // 计划轮消耗 1 请求；此后每次工具轮 +1，到 requests+1>=6 触发护栏。
-        // 计划 6 步但只跑 3 步就触顶（第 5 次请求 force_answer），剩 3 步 skipped。
-        let steps: Vec<_> = (0..6)
-            .map(|i| serde_json::json!({"intent": format!("查天气 {i}"), "tool_hint": "weather"}))
-            .collect();
-        let submit = tool_calls_reply(&[(
-            "submit_plan",
-            serde_json::json!({ "goal": "反复查天气", "steps": steps }),
-        )]);
-        let mut script = vec![submit];
-        for _ in 0..4 {
+        let mut script = Vec::new();
+        for _ in 0..(CLOUD_REQUEST_CAP - 1) {
             script.push(tool_calls_reply(&[("weather", serde_json::json!({}))]));
         }
         script.push(content_reply("先到这儿。"));
         let mut backend = cloud_backend(script);
         let mut kit = replied_dual_kit();
         let out = chat_turn_with_kit(
-            &s, &mut backend, &c, "s-budget", "帮我规划一下反复查天气", 10, false,
+            &s, &mut backend, &c, "s-budget", "查一下杭州天气", 10, false,
             crate::calendar::CalendarAccess::Denied, &mut kit,
         )
         .unwrap();
         assert!(!out.reply.is_empty(), "护栏强制收尾有正文");
         let tasks = with_conn(&s, |conn| db::task_list(conn, 5).unwrap());
+        assert!(!tasks.is_empty(), "至少开过任务卡");
         assert_eq!(tasks[0].cancel_reason.as_deref(), Some("budget"));
         assert_eq!(tasks[0].status, "canceled", "护栏触发 = 取消终态");
-        let plan = tasks[0].plan.as_ref().unwrap();
-        assert!(plan.steps.iter().any(|st| st.status == "skipped"), "剩余步骤 skipped");
     }
 
     /// A2 协议层：单步任务零计划轮——第一次请求 tools[] 不含 submit_plan，

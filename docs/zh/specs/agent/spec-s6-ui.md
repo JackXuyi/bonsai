@@ -29,13 +29,15 @@
 
 - `DialogueOutcome.tool` 前缀 `mcp:` / `skill:` → 气泡 meta 行显示「🔧 经 <name>」（日历 tool 标注同款样式，不区分本地/远程颜色，远程在记录卡看）。
 
-## 5. 审批确认卡（ApprovalCard.tsx）与模式开关
+## 5. 审批确认条（InlineApprovalBar）与模式开关
 
-- 监听 `tool:approval_required` 事件：卡片显示 tool / 来源 / remote 提示 / 参数摘要 + 「允许本次 / 拒绝」。
-- 回执走 `mcp_approval_reply(id, allow)`；30s 无操作为后端超时拒绝。
-- 回执返回 `false`（已超时或已答复）→ 卡片留在「已过期」态，只留「知道了」，不再重复回执。
-- 模式开关在 **设置页 MCP 卡片顶部**（`agent_approval_get` / `agent_approval_set`，取值仅 `auto|ask`）；默认 `auto`，卡片不弹。
-  **偏差**：原设计的第三按钮「本会话不再询问」未实现——它等价于把 `ask` 悄悄改回 `auto`，会造成「我明明选了每次询问」的落差；当前只保留单次允许/拒绝，会话级免打扰等 P4 权限分级时一起做。
+> 权威形态见 [`plan-chat-agent-inline/v1`](../../plan-chat-agent-inline/v1/index.md)：全屏 `ApprovalCard` 已退役。
+
+- 监听 `tool:approval_required`：聊天 Composer 上方 sticky 条（非聊天页为底部 toast 条）；显示 tool / 来源 / remote / 参数摘要 + 「允许本次 / 拒绝」；Esc = 拒绝。
+- 回执走 `mcp_approval_reply(id, allow)`；**60s** 无操作为后端超时拒绝。
+- 回执返回 `false`（已超时或已答复）→ 条留在「已过期」态，只留「知道了」，不再重复回执。
+- 模式开关在权限分级卡（`agent_approval_get` / `agent_approval_set`，取值仅 `auto|ask`）；默认 `auto`，条不出现。
+  **偏差**：原设计的第三按钮「本会话不再询问」未实现——它等价于把 `ask` 悄悄改回 `auto`，会造成「我明明选了每次询问」的落差；当前只保留单次允许/拒绝。
 
 ## 6. 测试清单（vitest + RTL，~6 测）
 
