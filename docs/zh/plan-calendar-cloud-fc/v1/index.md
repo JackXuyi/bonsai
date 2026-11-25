@@ -24,6 +24,8 @@
 
 本版显式修订：用户已开云端且打开日历时，**摘要可进当次云端 tool 结果**（与 mail 元数据同级）；不写 facts。
 
+邮件对称约束见 [plan-mail-cloud-fc/v1](../../plan-mail-cloud-fc/v1/index.md)。
+
 ## 变更记录
 
 | 版本 | 日期 | 说明 |

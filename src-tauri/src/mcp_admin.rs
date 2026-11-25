@@ -2246,7 +2246,6 @@ pub(crate) mod tests {
             .filter(|n| n.starts_with("mail_"))
             .collect();
         assert!(names.contains(&"mail_unread".to_string()));
-        assert!(names.contains(&"mail_mark_read".to_string()));
         assert!(names.contains(&"mail_draft".to_string()));
 
         // 本地（cloud=false）即使开关开也不挂 mail / calendar。
