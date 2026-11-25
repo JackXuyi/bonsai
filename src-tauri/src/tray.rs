@@ -25,10 +25,9 @@ const SIZE_SETTING: &str = "window_size_px";
 
 pub fn setup(app: &mut App) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "Show bonsai", true, None::<&str>)?;
-    let redo = MenuItem::with_id(app, "redo-onboarding", "重新做一次引导", true, None::<&str>)?;
     let hide = MenuItem::with_id(app, "hide", "Hide to tray", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &redo, &hide, &quit])?;
+    let menu = Menu::with_items(app, &[&show, &hide, &quit])?;
 
     TrayIconBuilder::with_id("bonsai-tray")
         .icon(tauri::image::Image::from_bytes(include_bytes!(
@@ -39,16 +38,6 @@ pub fn setup(app: &mut App) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => show_main_window(app),
-            "redo-onboarding" => {
-                // Drop only the done flag; answers stay for pre-filling.
-                use tauri::Manager;
-                if let Some(store) = app.try_state::<crate::memory::MemoryStore>() {
-                    if let Ok(conn) = store.inner().write_guard() {
-                        let _ = crate::memory::db::remove_setting(&conn, "onboarding_done");
-                    }
-                }
-                show_main_window(app);
-            }
             "hide" => hide_main_window(app),
             "quit" => {
                 // Last chance to remember the size: the window may still be
