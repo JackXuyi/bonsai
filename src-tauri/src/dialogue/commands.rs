@@ -39,6 +39,7 @@ pub async fn dialogue_chat(
         let calendar = app.state::<crate::calendar::CalendarState>();
         let agent = app.state::<crate::mcp_admin::AgentState>();
         let session = session_id.unwrap_or_else(|| "default".to_string());
+        agent.inner().session_allow.bind_session(&session);
         let hour = chrono::Local::now().hour() as u32;
         let mut backend = crate::persona::backend().map_err(|e| e.to_string())?;
         // Short lock for the gate + kit build; the turn locks per phase.
@@ -96,6 +97,7 @@ pub async fn dialogue_chat_stream(
             let calendar = app.state::<crate::calendar::CalendarState>();
             let agent = app.state::<crate::mcp_admin::AgentState>();
             let session = session_id.unwrap_or_else(|| "default".to_string());
+            agent.inner().session_allow.bind_session(&session);
             let hour = chrono::Local::now().hour() as u32;
             let mut backend = crate::persona::backend().map_err(|e| e.to_string())?;
             // Short lock for the gate + kit build; the turn locks per phase.

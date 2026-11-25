@@ -15,9 +15,10 @@ use serde::Serialize;
 use tauri::{Emitter, Manager};
 
 use crate::agent_tools::{
-    clip_chars, mask_secrets, ApprovalDecision, ApprovalGate, ToolCall, ToolDescriptor, ToolOutput,
-    ToolProvider,
+    format_args_summary, mask_secrets, ApprovalDecision, ApprovalGate, ToolCall, ToolDescriptor,
+    ToolOutput, ToolProvider,
 };
+use std::collections::HashSet;
 use crate::memory::db;
 use crate::mcp::{McpClient, McpManager, McpTransport, ERR_UNREACHABLE};
 
@@ -280,8 +281,48 @@ pub struct AgentState {
     /// `approval_mode=ask` handshake slots (spec-s4). Separate from the DB
     /// on purpose: the chat turn holds the store mutex while it waits.
     pub approvals: Arc<ApprovalBroker>,
+    /// 本会话「同工具批量授权」白名单（plan-chat-agent-inline v2）。
+    pub session_allow: Arc<SessionToolAllow>,
     /// `None` in unit tests → ask mode denies instead of waiting forever.
     pub app: Option<tauri::AppHandle>,
+}
+
+/// 按会话记住用户点过「本会话允许此工具」的工具名；换会话清空。
+#[derive(Default)]
+pub struct SessionToolAllow {
+    inner: Mutex<SessionAllowInner>,
+}
+
+#[derive(Default)]
+struct SessionAllowInner {
+    session_id: String,
+    tools: HashSet<String>,
+}
+
+impl SessionToolAllow {
+    fn lock(&self) -> std::sync::MutexGuard<'_, SessionAllowInner> {
+        self.inner.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// 对话命令进入时绑定会话；换会话则清空白名单。
+    pub fn bind_session(&self, session_id: &str) {
+        let mut g = self.lock();
+        if g.session_id != session_id {
+            g.session_id = session_id.to_string();
+            g.tools.clear();
+        }
+    }
+
+    pub fn allows(&self, tool: &str) -> bool {
+        self.lock().tools.contains(tool)
+    }
+
+    pub fn grant(&self, tool: &str) {
+        if tool.is_empty() {
+            return;
+        }
+        self.lock().tools.insert(tool.to_string());
+    }
 }
 
 /// Refresh tool_cache for one server row (shared by toggle / test / startup
@@ -482,7 +523,11 @@ impl AgentKit {
         AgentKit {
             providers: Vec::new(),
             gate: Box::new(crate::agent_tools::AutoAllowGate),
-            ask_gate: Box::new(AskFirstGate::new(Arc::new(ApprovalBroker::default()), None)),
+            ask_gate: Box::new(AskFirstGate::new(
+                Arc::new(ApprovalBroker::default()),
+                None,
+                Arc::new(SessionToolAllow::default()),
+            )),
             task_id: Mutex::new(None),
             prompt_trace: Mutex::new(Vec::new()),
             engine_skills: Vec::new(),
@@ -569,7 +614,7 @@ pub fn execute_audited(
 ) -> Result<ToolOutput, String> {
     let (_idx, provider, descriptor) =
         find_owner(kit, name).ok_or_else(|| "unknown_tool".to_string())?;
-    let args_summary = crate::agent_tools::clip_chars(&mask_secrets(&args.to_string()), 200);
+    let args_summary = format_args_summary(name, &args);
     log::debug!(
         "agent_tool_call: tool={} kind={} args={} trace={}",
         name,
@@ -854,12 +899,19 @@ pub fn build_agent_kit(conn: &Connection, state: &AgentState, user_text: &str) -
     }
 
     let gate: Box<dyn ApprovalGate> = match db::get_setting(conn, "approval_mode").ok().flatten().as_deref() {
-        Some("ask") => Box::new(AskFirstGate::new(state.approvals.clone(), state.app.clone())),
+        Some("ask") => Box::new(AskFirstGate::new(
+            state.approvals.clone(),
+            state.app.clone(),
+            state.session_allow.clone(),
+        )),
         _ => Box::new(crate::agent_tools::AutoAllowGate),
     };
     // ask 档专用门永远存在（write 工具无视 approval_mode 强制询问）。
-    let ask_gate: Box<dyn ApprovalGate> =
-        Box::new(AskFirstGate::new(state.approvals.clone(), state.app.clone()));
+    let ask_gate: Box<dyn ApprovalGate> = Box::new(AskFirstGate::new(
+        state.approvals.clone(),
+        state.app.clone(),
+        state.session_allow.clone(),
+    ));
 
     AgentKit { providers, gate, ask_gate, task_id: Mutex::new(None), prompt_trace: Mutex::new(Vec::new()), engine_skills, tool_cache: crate::tool_cache::TurnToolCache::new(), canceled: Arc::new(AtomicBool::new(false)) }
 }
@@ -879,6 +931,7 @@ struct BrokerInner {
 
 struct Pending {
     id: u64,
+    tool: String,
     slot: Arc<(Mutex<Option<bool>>, Condvar)>,
 }
 
@@ -892,13 +945,29 @@ impl ApprovalBroker {
     }
 
     /// Reserve the slot; returns the id shown on the card plus the wait slot.
-    fn register(&self) -> (u64, Slot) {
+    fn register(&self, tool: &str) -> (u64, Slot) {
         let mut inner = self.lock();
         inner.seq += 1;
         let id = inner.seq;
         let slot: Slot = Arc::new((Mutex::new(None), Condvar::new()));
-        inner.pending = Some(Pending { id, slot: slot.clone() });
+        inner.pending = Some(Pending {
+            id,
+            tool: tool.to_string(),
+            slot: slot.clone(),
+        });
         (id, slot)
+    }
+
+    /// Peek the pending tool name if `id` matches (or id is None).
+    pub fn peek_tool(&self, id: Option<u64>) -> Option<String> {
+        let inner = self.lock();
+        let pending = inner.pending.as_ref()?;
+        if let Some(want) = id {
+            if want != pending.id {
+                return None;
+            }
+        }
+        Some(pending.tool.clone())
     }
 
     /// UI answer. `false` means nothing was waiting (stale card, double click,
@@ -932,25 +1001,39 @@ impl ApprovalBroker {
 /// Ask-first gate (spec-s4): emits `tool:approval_required` and waits up to
 /// `APPROVAL_WAIT`（60s）for the inline bar. No app handle (headless / unit
 /// tests) or a timeout ⇒ Deny — silence never becomes consent.
+/// 本会话白名单命中时跳过弹卡（plan-chat-agent-inline v2）。
 pub struct AskFirstGate {
     broker: Arc<ApprovalBroker>,
     app: Option<tauri::AppHandle>,
+    session_allow: Arc<SessionToolAllow>,
 }
 
 impl AskFirstGate {
-    pub fn new(broker: Arc<ApprovalBroker>, app: Option<tauri::AppHandle>) -> Self {
-        AskFirstGate { broker, app }
+    pub fn new(
+        broker: Arc<ApprovalBroker>,
+        app: Option<tauri::AppHandle>,
+        session_allow: Arc<SessionToolAllow>,
+    ) -> Self {
+        AskFirstGate {
+            broker,
+            app,
+            session_allow,
+        }
     }
 }
 
 impl ApprovalGate for AskFirstGate {
     fn check(&self, call: &ToolCall, source: &str, remote: bool) -> ApprovalDecision {
+        if self.session_allow.allows(&call.name) {
+            log::info!("approval_session_allow: tool={} → allow", call.name);
+            return ApprovalDecision::Allow;
+        }
         let Some(app) = self.app.as_ref() else {
             log::info!("approval_required(no-ui): tool={} → denied", call.name);
             return ApprovalDecision::Deny;
         };
-        let (id, slot) = self.broker.register();
-        let args_summary = clip_chars(&mask_secrets(&call.args.to_string()), 200);
+        let (id, slot) = self.broker.register(&call.name);
+        let args_summary = format_args_summary(&call.name, &call.args);
         let _ = app.emit(
             "tool:approval_required",
             serde_json::json!({
@@ -1467,13 +1550,24 @@ pub fn task_list_resumable(
 /// actually waiting — a stale card (timeout already fired) gets `false` and
 /// changes nothing. Deliberately touches no DB: the chat turn holds the store
 /// mutex while it waits for exactly this reply.
+///
+/// `scope`: `"once"`（默认）只放行本次；`"session"` 同时把该工具记入本会话
+/// 白名单，后续同会话同工具不再弹卡（Forbidden 仍在 execute_audited 拦）。
 #[tauri::command]
 pub fn mcp_approval_reply(
     agent: tauri::State<'_, AgentState>,
     id: Option<u64>,
     allow: bool,
+    scope: Option<String>,
 ) -> Result<bool, String> {
-    Ok(agent.approvals.reply(id, allow))
+    let tool = agent.approvals.peek_tool(id);
+    let ok = agent.approvals.reply(id, allow);
+    if ok && allow && scope.as_deref() == Some("session") {
+        if let Some(name) = tool {
+            agent.session_allow.grant(&name);
+        }
+    }
+    Ok(ok)
 }
 
 /// Current tool-approval mode: `auto` (default) or `ask` (spec-s4 §1).
@@ -1724,7 +1818,7 @@ pub(crate) mod tests {
         let call = ToolCall { name: "t".into(), args: serde_json::json!({}) };
         assert_eq!(AutoAllowGate.check(&call, "s", false), ApprovalDecision::Allow);
         // No app handle → no one can answer → Deny (never a silent allow).
-        let headless = AskFirstGate::new(Arc::new(ApprovalBroker::default()), None);
+        let headless = AskFirstGate::new(Arc::new(ApprovalBroker::default()), None, Arc::new(SessionToolAllow::default()));
         assert_eq!(headless.check(&call, "s", false), ApprovalDecision::Deny);
     }
 
@@ -1733,7 +1827,8 @@ pub(crate) mod tests {
         let broker = Arc::new(ApprovalBroker::default());
         assert!(!broker.reply(Some(1), true), "nothing pending → stale reply");
 
-        let (id, slot) = broker.register();
+        let (id, slot) = broker.register("t");
+        assert_eq!(broker.peek_tool(Some(id)).as_deref(), Some("t"));
         assert!(!broker.reply(Some(id + 99), true), "id mismatch is ignored");
         assert!(
             broker.lock().pending.is_some(),
@@ -1743,6 +1838,29 @@ pub(crate) mod tests {
         let (lock, _) = &*slot;
         assert_eq!(*lock.lock().unwrap(), Some(true));
         assert!(!broker.reply(Some(id), true), "second reply is a no-op");
+    }
+
+    #[test]
+    fn session_allow_skips_ask_and_clears_on_session_switch() {
+        let allow = Arc::new(SessionToolAllow::default());
+        allow.bind_session("s1");
+        allow.grant("fs_write");
+        let gate = AskFirstGate::new(Arc::new(ApprovalBroker::default()), None, allow.clone());
+        let call = ToolCall {
+            name: "fs_write".into(),
+            args: serde_json::json!({"path": "/tmp/a.md", "content": "x"}),
+        };
+        // headless 本应拒；白名单命中则放行
+        assert_eq!(gate.check(&call, "fs_write", false), ApprovalDecision::Allow);
+        let other = ToolCall {
+            name: "fs_copy".into(),
+            args: serde_json::json!({"from": "/a", "to": "/b"}),
+        };
+        assert_eq!(gate.check(&other, "fs_copy", false), ApprovalDecision::Deny);
+
+        allow.bind_session("s2");
+        assert!(!allow.allows("fs_write"), "换会话清空白名单");
+        assert_eq!(gate.check(&call, "fs_write", false), ApprovalDecision::Deny);
     }
 
     #[test]
@@ -1763,7 +1881,7 @@ pub(crate) mod tests {
         let kit = AgentKit {
             providers: vec![Box::new(ok)],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
-            ask_gate: Box::new(AskFirstGate::new(std::sync::Arc::new(ApprovalBroker::default()), None)),
+            ask_gate: Box::new(AskFirstGate::new(std::sync::Arc::new(ApprovalBroker::default()), None, std::sync::Arc::new(SessionToolAllow::default()))),
             task_id: Mutex::new(None),            prompt_trace: Mutex::new(Vec::new()),            tool_cache: Default::default(),
             ..AgentKit::empty()
         };
@@ -1794,7 +1912,7 @@ pub(crate) mod tests {
         let kit_broken = AgentKit {
             providers: vec![Box::new(broken)],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
-            ask_gate: Box::new(AskFirstGate::new(std::sync::Arc::new(ApprovalBroker::default()), None)),
+            ask_gate: Box::new(AskFirstGate::new(std::sync::Arc::new(ApprovalBroker::default()), None, std::sync::Arc::new(SessionToolAllow::default()))),
             task_id: Mutex::new(None),            prompt_trace: Mutex::new(Vec::new()),            tool_cache: Default::default(),
             ..AgentKit::empty()
         };
@@ -1818,7 +1936,7 @@ pub(crate) mod tests {
         let kit = AgentKit {
             providers: vec![Box::new(provider)],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
-            ask_gate: Box::new(AskFirstGate::new(std::sync::Arc::new(ApprovalBroker::default()), None)),
+            ask_gate: Box::new(AskFirstGate::new(std::sync::Arc::new(ApprovalBroker::default()), None, std::sync::Arc::new(SessionToolAllow::default()))),
             task_id: Mutex::new(None),            prompt_trace: Mutex::new(Vec::new()),            tool_cache: Default::default(),
             ..AgentKit::empty()
         };
@@ -1865,6 +1983,7 @@ pub(crate) mod tests {
             manager: crate::mcp::McpManager::default(),
             skills_dir: std::env::temp_dir(),
             approvals: Arc::new(ApprovalBroker::default()),
+            session_allow: Arc::new(SessionToolAllow::default()),
             app: None,
         };
         let conn = store.write_guard().unwrap();
@@ -1912,6 +2031,7 @@ pub(crate) mod tests {
             manager: crate::mcp::McpManager::default(),
             skills_dir: std::env::temp_dir(),
             approvals: Arc::new(ApprovalBroker::default()),
+            session_allow: Arc::new(SessionToolAllow::default()),
             app: None,
         };
         // Separate scopes: execute_audited locks internally, so no guard may
@@ -1935,7 +2055,7 @@ pub(crate) mod tests {
                 Box::new(crate::mcp::MockMcpProvider::with_tool("alpha", "a", "{}")),
             ],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
-            ask_gate: Box::new(AskFirstGate::new(std::sync::Arc::new(ApprovalBroker::default()), None)),
+            ask_gate: Box::new(AskFirstGate::new(std::sync::Arc::new(ApprovalBroker::default()), None, std::sync::Arc::new(SessionToolAllow::default()))),
             task_id: Mutex::new(None),            prompt_trace: Mutex::new(Vec::new()),            tool_cache: Default::default(),
             ..AgentKit::empty()
         };
@@ -1964,7 +2084,7 @@ pub(crate) mod tests {
         AgentKit {
             providers: vec![Box::new(p)],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
-            ask_gate: Box::new(AskFirstGate::new(std::sync::Arc::new(ApprovalBroker::default()), None)),
+            ask_gate: Box::new(AskFirstGate::new(std::sync::Arc::new(ApprovalBroker::default()), None, std::sync::Arc::new(SessionToolAllow::default()))),
             task_id: Mutex::new(None),            prompt_trace: Mutex::new(Vec::new()),            tool_cache: Default::default(),
             ..AgentKit::empty()
         }
@@ -2036,7 +2156,7 @@ pub(crate) mod tests {
         let kit = AgentKit {
             providers: vec![Box::new(p)],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
-            ask_gate: Box::new(AskFirstGate::new(std::sync::Arc::new(ApprovalBroker::default()), None)),
+            ask_gate: Box::new(AskFirstGate::new(std::sync::Arc::new(ApprovalBroker::default()), None, std::sync::Arc::new(SessionToolAllow::default()))),
             task_id: Mutex::new(None),            prompt_trace: Mutex::new(Vec::new()),            tool_cache: Default::default(),
             ..AgentKit::empty()
         };
@@ -2094,6 +2214,7 @@ pub(crate) mod tests {
             manager: crate::mcp::McpManager::default(),
             skills_dir: std::env::temp_dir(),
             approvals: Arc::new(ApprovalBroker::default()),
+            session_allow: Arc::new(SessionToolAllow::default()),
             app: None,
         };
         let off = with_conn(&s, |conn| build_agent_kit(conn, &state, "今天有什么邮件"));

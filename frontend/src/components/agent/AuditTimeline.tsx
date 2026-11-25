@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toolCallRecords } from "@/lib/commands";
 import type { ToolCallRecord } from "@/lib/types";
+import { ToolArgsView } from "@/components/agent/ToolArgsView";
 
 const FETCH_LIMIT = 200;
 
@@ -178,7 +179,12 @@ export function AuditTimeline({ variant = "full" }: AuditTimelineProps) {
                 </button>
                 {open === r.id && (
                   <div className="agent-record-detail">
-                    {r.paramsSummary && <p>参数：{r.paramsSummary}</p>}
+                    {r.paramsSummary && (
+                      <div className="audit-args">
+                        <p className="hint-line">参数</p>
+                        <ToolArgsView raw={r.paramsSummary} />
+                      </div>
+                    )}
                     <p>状态：{r.resultStatus ?? r.outcome}</p>
                     {r.promptTrace && <p className="hint-line">trace：{r.promptTrace}</p>}
                   </div>

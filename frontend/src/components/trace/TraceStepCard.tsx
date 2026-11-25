@@ -2,6 +2,7 @@
 
 // 时间线单步卡（spec-s8 S8-d）：标题 + outcome/耗时行，可展开标记。
 import type { TraceStep } from "@/lib/types";
+import { toolArgsPreview } from "@/lib/formatToolArgs";
 
 /** 折叠态摘要：计划卡显示目标，步骤卡显示状态。坏 JSON 返回 null 不显示。 */
 function planHint(output?: string | null): string | null {
@@ -60,7 +61,7 @@ export function TraceStepCard({
         <p className="trace-hint">输入：{step.userText?.slice(0, 120)}</p>
       )}
       {step.stepKind === "tool_call" && !open && step.argsJson && (
-        <p className="trace-hint">参数：{step.argsJson.slice(0, 120)}</p>
+        <p className="trace-hint">参数：{toolArgsPreview(step.argsJson)}</p>
       )}
       {step.stepKind === "plan_submit" && !open && planHint(step.output) && (
         <p className="trace-hint">目标：{planHint(step.output)}</p>

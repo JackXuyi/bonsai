@@ -348,9 +348,15 @@ export const jobList = () => call<JobRow[]>("job_list");
 export const jobSetEnabled = (name: string, enabled: boolean) =>
   call<boolean>("job_set_enabled", { name, enabled });
 
+/** 审批范围：once=仅本次；session=本会话同工具批量放行。 */
+export type ApprovalReplyScope = "once" | "session";
+
 /** 审批回执：返回 false 表示该请求已过期（60s 超时已拒绝或已答复过）。 */
-export const mcpApprovalReply = (id: number, allow: boolean) =>
-  call<boolean>("mcp_approval_reply", { id, allow });
+export const mcpApprovalReply = (
+  id: number,
+  allow: boolean,
+  scope: ApprovalReplyScope = "once",
+) => call<boolean>("mcp_approval_reply", { id, allow, scope });
 
 /** 工具调用确认模式：auto（默认放行）/ ask（每次询问）。 */
 export const agentApprovalGet = () => call<"auto" | "ask">("agent_approval_get");

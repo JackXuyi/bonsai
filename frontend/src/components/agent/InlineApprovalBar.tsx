@@ -3,8 +3,9 @@
 // 聊天内授权条（plan-chat-agent-inline）：替代全屏 ApprovalCard。
 // 事件仍是 tool:approval_required；回执 mcp_approval_reply；等待 60s。
 import { useEffect, useRef, useState } from "react";
-import { mcpApprovalReply } from "@/lib/commands";
+import { mcpApprovalReply, type ApprovalReplyScope } from "@/lib/commands";
 import { useTauriEvent } from "@/lib/tauriListen";
+import { ToolArgsView } from "@/components/agent/ToolArgsView";
 
 /** 与 Rust `APPROVAL_WAIT` 对齐（秒）。 */
 export const APPROVAL_WAIT_SECS = 60;
@@ -22,12 +23,17 @@ export type InlineApprovalPlacement = "dock" | "toast";
 export interface InlineApprovalBarProps {
   /** dock = composer 上方；toast = 非聊天页底部非模态条 */
   placement?: InlineApprovalPlacement;
+  /** 有待批请求时通知（Composer 用来藏 ChatPet，避免遮挡授权钮） */
+  onActiveChange?: (active: boolean) => void;
 }
 
 /**
  * 单槽待批：后端同一时刻只有一个请求。Esc = 拒绝（Q1）。
  */
-export function InlineApprovalBar({ placement = "dock" }: InlineApprovalBarProps) {
+export function InlineApprovalBar({
+  placement = "dock",
+  onActiveChange,
+}: InlineApprovalBarProps) {
   const [req, setReq] = useState<ApprovalRequest | null>(null);
   const [stale, setStale] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -42,6 +48,11 @@ export function InlineApprovalBar({ placement = "dock" }: InlineApprovalBarProps
     startedAt.current = Date.now();
     setLeftSecs(APPROVAL_WAIT_SECS);
   });
+
+  useEffect(() => {
+    onActiveChange?.(req != null);
+    return () => onActiveChange?.(false);
+  }, [req, onActiveChange]);
 
   useEffect(() => {
     if (!req || stale) return;
@@ -79,12 +90,12 @@ export function InlineApprovalBar({ placement = "dock" }: InlineApprovalBarProps
 
   if (!req) return null;
 
-  async function reply(allow: boolean) {
+  async function reply(allow: boolean, scope: ApprovalReplyScope = "once") {
     const r = req;
     if (!r || busy) return;
     setBusy(true);
     try {
-      const accepted = await mcpApprovalReply(r.id, allow);
+      const accepted = await mcpApprovalReply(r.id, allow, allow ? scope : "once");
       if (accepted) {
         setReq(null);
         setStale(false);
@@ -114,7 +125,7 @@ export function InlineApprovalBar({ placement = "dock" }: InlineApprovalBarProps
         来源：{req.source}
         {req.remote ? "（远程服务，参数会出设备）" : "（本机）"}
       </p>
-      <pre className="agent-args inline-approval-args">{req.argsSummary}</pre>
+      <ToolArgsView raw={req.argsSummary} className="tool-args inline-approval-args" />
       {stale ? (
         <>
           <p className="inline-approval-sub">
@@ -149,10 +160,19 @@ export function InlineApprovalBar({ placement = "dock" }: InlineApprovalBarProps
             </button>
             <button
               type="button"
+              className="btn-ghost"
+              disabled={busy}
+              title="本会话内再次调用同一工具不再询问"
+              onClick={() => void reply(true, "session")}
+            >
+              本会话允许
+            </button>
+            <button
+              type="button"
               className="btn"
               ref={allowRef}
               disabled={busy}
-              onClick={() => void reply(true)}
+              onClick={() => void reply(true, "once")}
             >
               允许本次
             </button>

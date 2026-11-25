@@ -192,6 +192,7 @@ pub fn run() {
                 manager: mcp::McpManager::default(),
                 skills_dir,
                 approvals: std::sync::Arc::new(mcp_admin::ApprovalBroker::default()),
+                session_allow: std::sync::Arc::new(mcp_admin::SessionToolAllow::default()),
                 app: Some(app.handle().clone()),
             });
 

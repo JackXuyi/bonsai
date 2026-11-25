@@ -102,9 +102,10 @@ describe("TraceView（spec-s8 追踪页）", () => {
     expect(screen.getByText(/当前输入（user message/)).toBeTruthy();
     expect(screen.getAllByText("帮我看看明天上午有什么安排").length).toBeGreaterThan(0);
 
-    // 展开工具步
+    // 展开工具步（参数键值可读化，不再整坨 JSON）
     fireEvent.click(screen.getByText(/工具调用 · builtin:agenda_tomorrow/));
-    expect(screen.getByText('{"date_offset":1}')).toBeTruthy();
+    expect(screen.getByText("date_offset")).toBeTruthy();
+    expect(screen.getByText("1")).toBeTruthy();
     expect(screen.getByText("明天上午 2 条日程")).toBeTruthy();
   });
 

@@ -3,7 +3,7 @@
 // composer：浮起条 + ModelChip + IME guard + 发送/停（plan-chat-first-ui v2）。
 // 授权条挂在 dock 顶部（plan-chat-agent-inline）。
 // ChatPet 贴在输入框右上角（注视感）。
-import { useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { shouldBlockSubmit } from "@/lib/ime";
 import { ModelChip } from "@/components/chat/ModelChip";
 import { ChatPet } from "@/components/chat/ChatPet";
@@ -27,7 +27,13 @@ export function Composer({
   const innerRef = useRef<HTMLTextAreaElement>(null);
   const ref = inputRef ?? innerRef;
   const [value, setValue] = useState("");
+  /** 待批时藏偷看脸，避免盖住允许/拒绝 */
+  const [approvalActive, setApprovalActive] = useState(false);
+  const onApprovalActive = useCallback((active: boolean) => {
+    setApprovalActive(active);
+  }, []);
   const canSend = value.trim().length > 0 && !chatBusy;
+  const petVisible = showPet && !approvalActive;
 
   function autosize() {
     const el = ref.current;
@@ -45,9 +51,9 @@ export function Composer({
 
   return (
     <div className="composer-dock">
-      <InlineApprovalBar placement="dock" />
+      <InlineApprovalBar placement="dock" onActiveChange={onApprovalActive} />
       <div className="composer-stage">
-        {showPet ? <ChatPet chatting={chatBusy} /> : null}
+        {petVisible ? <ChatPet chatting={chatBusy} /> : null}
         <form
           className="composer"
           onSubmit={(e) => {

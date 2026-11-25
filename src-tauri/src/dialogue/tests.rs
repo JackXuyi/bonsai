@@ -567,7 +567,7 @@ fn card() -> Persona {
         crate::mcp_admin::AgentKit {
             providers: vec![Box::new(p)],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
-            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
+            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None, std::sync::Arc::new(crate::mcp_admin::SessionToolAllow::default()))),
             task_id: std::sync::Mutex::new(None),            prompt_trace: std::sync::Mutex::new(Vec::new()),
             ..crate::mcp_admin::AgentKit::empty()
         }
@@ -580,7 +580,7 @@ fn card() -> Persona {
         crate::mcp_admin::AgentKit {
             providers: vec![Box::new(a), Box::new(b)],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
-            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
+            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None, std::sync::Arc::new(crate::mcp_admin::SessionToolAllow::default()))),
             task_id: std::sync::Mutex::new(None),
             prompt_trace: std::sync::Mutex::new(Vec::new()),
             ..crate::mcp_admin::AgentKit::empty()
@@ -825,7 +825,7 @@ fn card() -> Persona {
         crate::mcp_admin::AgentKit {
             providers: vec![Box::new(a), Box::new(b)],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
-            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
+            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None, std::sync::Arc::new(crate::mcp_admin::SessionToolAllow::default()))),
             task_id: std::sync::Mutex::new(None),
             prompt_trace: std::sync::Mutex::new(Vec::new()),
             ..crate::mcp_admin::AgentKit::empty()
@@ -906,7 +906,7 @@ fn card() -> Persona {
         crate::mcp_admin::AgentKit {
             providers: vec![Box::new(p)],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
-            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
+            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None, std::sync::Arc::new(crate::mcp_admin::SessionToolAllow::default()))),
             task_id: std::sync::Mutex::new(None),
             prompt_trace: std::sync::Mutex::new(Vec::new()),
             ..crate::mcp_admin::AgentKit::empty()
@@ -1021,7 +1021,9 @@ fn card() -> Persona {
             providers: vec![Box::new(p)],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
             ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(
-                std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None,
+                std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()),
+                None,
+                std::sync::Arc::new(crate::mcp_admin::SessionToolAllow::default()),
             )),
             task_id: std::sync::Mutex::new(None),
             prompt_trace: std::sync::Mutex::new(Vec::new()),
@@ -1726,7 +1728,7 @@ fn card() -> Persona {
         crate::mcp_admin::AgentKit {
             providers: vec![Box::new(VerboseProvider { descriptor, text: text.into() })],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
-            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
+            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None, std::sync::Arc::new(crate::mcp_admin::SessionToolAllow::default()))),
             task_id: std::sync::Mutex::new(None),
             prompt_trace: std::sync::Mutex::new(Vec::new()),
             ..crate::mcp_admin::AgentKit::empty()
@@ -1746,7 +1748,7 @@ fn card() -> Persona {
         crate::mcp_admin::AgentKit {
             providers,
             gate: Box::new(crate::agent_tools::AutoAllowGate),
-            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
+            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None, std::sync::Arc::new(crate::mcp_admin::SessionToolAllow::default()))),
             task_id: std::sync::Mutex::new(None),
             prompt_trace: std::sync::Mutex::new(Vec::new()),
             ..crate::mcp_admin::AgentKit::empty()
@@ -1849,7 +1851,7 @@ fn card() -> Persona {
                 }],
             })],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
-            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
+            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None, std::sync::Arc::new(crate::mcp_admin::SessionToolAllow::default()))),
             task_id: std::sync::Mutex::new(None),            prompt_trace: std::sync::Mutex::new(Vec::new()),
             ..crate::mcp_admin::AgentKit::empty()
         };
@@ -1898,7 +1900,7 @@ fn card() -> Persona {
         let mut kit = crate::mcp_admin::AgentKit {
             providers: vec![Box::new(crate::skill::SkillProvider { packs: vec![pack] })],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
-            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
+            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None, std::sync::Arc::new(crate::mcp_admin::SessionToolAllow::default()))),
             task_id: std::sync::Mutex::new(None),            prompt_trace: std::sync::Mutex::new(Vec::new()),
             ..crate::mcp_admin::AgentKit::empty()
         };
@@ -1943,7 +1945,7 @@ fn card() -> Persona {
                 packs: vec![pack("a"), pack("b"), pack("c")],
             })],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
-            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
+            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None, std::sync::Arc::new(crate::mcp_admin::SessionToolAllow::default()))),
             task_id: std::sync::Mutex::new(None),            prompt_trace: std::sync::Mutex::new(Vec::new()),
             ..crate::mcp_admin::AgentKit::empty()
         };
@@ -2027,6 +2029,7 @@ fn card() -> Persona {
             ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(
                 std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()),
                 None,
+                std::sync::Arc::new(crate::mcp_admin::SessionToolAllow::default()),
             )),
             task_id: std::sync::Mutex::new(None),            prompt_trace: std::sync::Mutex::new(Vec::new()),
             ..crate::mcp_admin::AgentKit::empty()
@@ -2055,7 +2058,7 @@ fn card() -> Persona {
         crate::mcp_admin::AgentKit {
             providers: vec![Box::new(crate::memory_search::MemorySearchProvider)],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
-            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
+            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None, std::sync::Arc::new(crate::mcp_admin::SessionToolAllow::default()))),
             task_id: std::sync::Mutex::new(None),            prompt_trace: std::sync::Mutex::new(Vec::new()),
             ..crate::mcp_admin::AgentKit::empty()
         }
@@ -2065,7 +2068,7 @@ fn card() -> Persona {
         crate::mcp_admin::AgentKit {
             providers: vec![Box::new(crate::perception_search::PerceptionSearchProvider)],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
-            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
+            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None, std::sync::Arc::new(crate::mcp_admin::SessionToolAllow::default()))),
             task_id: std::sync::Mutex::new(None),            prompt_trace: std::sync::Mutex::new(Vec::new()),
             ..crate::mcp_admin::AgentKit::empty()
         }
@@ -2192,7 +2195,7 @@ fn card() -> Persona {
                 r#"{"type":"object"}"#,
             ))],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
-            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
+            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None, std::sync::Arc::new(crate::mcp_admin::SessionToolAllow::default()))),
             task_id: std::sync::Mutex::new(None),            prompt_trace: std::sync::Mutex::new(Vec::new()),
             ..crate::mcp_admin::AgentKit::empty()
         };
@@ -2228,6 +2231,7 @@ fn card() -> Persona {
             manager: crate::mcp::McpManager::default(),
             skills_dir: std::env::temp_dir(),
             approvals: std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()),
+            session_allow: std::sync::Arc::new(crate::mcp_admin::SessionToolAllow::default()),
             app: None,
         };
         assert!(
@@ -2380,7 +2384,7 @@ fn card() -> Persona {
         let mut kit = crate::mcp_admin::AgentKit {
             providers: vec![Box::new(p)],
             gate: Box::new(crate::agent_tools::AutoAllowGate),
-            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
+            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None, std::sync::Arc::new(crate::mcp_admin::SessionToolAllow::default()))),
             task_id: std::sync::Mutex::new(None),            prompt_trace: std::sync::Mutex::new(Vec::new()),
             ..crate::mcp_admin::AgentKit::empty()
         };
@@ -2438,7 +2442,7 @@ fn card() -> Persona {
         let mut kit = crate::mcp_admin::AgentKit {
             providers,
             gate: Box::new(crate::agent_tools::AutoAllowGate),
-            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None)),
+            ask_gate: Box::new(crate::mcp_admin::AskFirstGate::new(std::sync::Arc::new(crate::mcp_admin::ApprovalBroker::default()), None, std::sync::Arc::new(crate::mcp_admin::SessionToolAllow::default()))),
             task_id: std::sync::Mutex::new(None),            prompt_trace: std::sync::Mutex::new(Vec::new()),
             ..crate::mcp_admin::AgentKit::empty()
         };

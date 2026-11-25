@@ -8,6 +8,7 @@ import { useState } from "react";
 import { renderMarkdown } from "@/lib/markdown";
 import type { TraceStep } from "@/lib/types";
 import { TraceStepCard } from "./TraceStepCard";
+import { ToolArgsView } from "@/components/agent/ToolArgsView";
 
 const STEP_TONE: Record<TraceStep["stepKind"], string> = {
   user_input: "tone-ok",
@@ -116,7 +117,12 @@ function TraceStepDetail({ step }: { step: TraceStep }) {
       {step.output && !isPlan && step.stepKind !== "user_input" && step.stepKind !== "context_budget" && (
         <PreBlock label="模型原始输出" text={step.output} />
       )}
-      {step.argsJson && <PreBlock label="工具请求参数" text={step.argsJson} />}
+      {step.argsJson && (
+        <div className="trace-pre-block">
+          <p className="trace-pre-label">工具请求参数</p>
+          <ToolArgsView raw={step.argsJson} />
+        </div>
+      )}
       {step.summary && step.stepKind === "tool_call" && <ToolResultBlock text={step.summary} />}
       {step.summary && step.stepKind !== "tool_call" && <PreBlock label="工具返回摘要" text={step.summary} />}
     </div>

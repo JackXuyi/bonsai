@@ -453,8 +453,11 @@
   object-fit: contain;
 }
 
-/* 聊天内授权条（plan-chat-agent-inline）：非模态，贴 composer 上方 */
+/* 聊天内授权条（plan-chat-agent-inline）：非模态，贴 composer 上方；
+ * z-index 高于 ChatPet，防止偷看脸盖住允许/拒绝（待批时 Composer 也会藏脸）。 */
 .inline-approval {
+  position: relative;
+  z-index: 10;
   flex: none;
   padding: 10px 12px;
   background: var(--card);
@@ -488,15 +491,66 @@
 
 .inline-approval-args {
   margin: 0 0 8px;
-  max-height: 72px;
+  max-height: 120px;
   overflow: auto;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .inline-approval-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   justify-content: flex-end;
+}
+
+/* 工具参数键值展示（授权条 / 审计 / 追踪） */
+.tool-args {
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(30, 36, 51, 0.04);
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--ink);
+}
+
+.tool-args-pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+
+.tool-args-row {
+  display: grid;
+  grid-template-columns: minmax(4.5rem, auto) 1fr;
+  gap: 4px 10px;
+  margin: 0 0 4px;
+}
+
+.tool-args-row:last-child {
+  margin-bottom: 0;
+}
+
+.tool-args-row dt {
+  margin: 0;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.tool-args-row dd {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.audit-args {
+  margin: 0 0 6px;
+}
+
+.trace-pre-block .tool-args {
+  margin-top: 4px;
 }
 
 /* 聊天内计划进度 */
