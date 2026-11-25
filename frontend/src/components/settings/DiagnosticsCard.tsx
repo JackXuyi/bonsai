@@ -1,12 +1,11 @@
 "use client";
 
-// 设置页 · 诊断（plan-retry §7.4）：最近失败只读列表。
-// 数据源 turn_trace.error_kind + consolidate_runs.error；本版不做重跑。
+// 设置页 · 诊断（plan-retry §7.4 + plan-store-lock T4）：最近失败 + 写锁采样。
 import { useCallback, useEffect, useState } from "react";
-import { failuresRecent } from "@/lib/commands";
+import { failuresRecent, storeLockStats } from "@/lib/commands";
 import { inTauri } from "@/lib/tauriInvoke";
 import { toast } from "@/lib/stores/uiStore";
-import type { FailureRecent } from "@/lib/types";
+import type { FailureRecent, StoreLockStats } from "@/lib/types";
 
 const SOURCE_LABEL: Record<string, string> = {
   turn: "对话",
@@ -23,17 +22,23 @@ function fmtAt(iso: string) {
 
 export function DiagnosticsCard() {
   const [rows, setRows] = useState<FailureRecent[]>([]);
+  const [locks, setLocks] = useState<StoreLockStats | null>(null);
   const [loading, setLoading] = useState(true);
 
   const refresh = useCallback(async () => {
     if (!inTauri) {
       setRows([]);
+      setLocks(null);
       setLoading(false);
       return;
     }
     try {
-      const list = await failuresRecent(10);
+      const [list, stats] = await Promise.all([
+        failuresRecent(10),
+        storeLockStats().catch(() => null),
+      ]);
       setRows(list);
+      setLocks(stats);
     } catch {
       toast("诊断列表读不到");
     } finally {
@@ -50,13 +55,20 @@ export function DiagnosticsCard() {
       <div className="card-head">
         <div className="card-titles">
           <span className="card-title">诊断</span>
-          <span className="card-sub">最近失败 · 只读</span>
+          <span className="card-sub">最近失败 · 写锁采样 · 只读</span>
         </div>
       </div>
 
       <p className="hint-line diagnostics-hint">
         对话失败轮与夜间整理失败会落在这里；不弹 toast，也不在此重跑。
       </p>
+
+      {locks ? (
+        <p className="hint-line" data-testid="diagnostics-lock-stats">
+          写锁 · 获取 {locks.write_acquires} · 均等待 {locks.write_wait_ms_avg}ms ·
+          慢等待(&gt;50ms) {locks.write_wait_slow} · 均持锁 {locks.write_hold_ms_avg}ms
+        </p>
+      ) : null}
 
       {loading && rows.length === 0 ? (
         <p className="hint-line">读取中…</p>

@@ -4,7 +4,7 @@
 |---|---|
 | 版本 | v0.3（已实施） |
 | 日期 | 2026-11-24 |
-| 状态 | **已实施**（T1–T3；T4 观测可选未做）；D1–D5 按推荐闭合 |
+| 状态 | **已实施**（T1–T4 采样；巩固分片按 D4 不做）；D1–D5 按推荐闭合 |
 | 上游输入 | 优化盘点 P0「MemoryStore 单 Mutex 瓶颈」、`plan-memory.md` §5.4/§10、`plan-retry.md` §5.6（中毒出口）、`plan-loop-supervisor.md`（8 条 loop 齐套）、2026-11-20 lock-narrowing |
 | 定位约束 | 本地优先；失败不伪装成功；能力不重复实现；**MUST NOT** 擅自新增依赖；变更最小化；长任务不得持锁 |
 | 一句话 | WAL 已经开了，但一把进程内 Mutex 把读写全串死——先收对话热路径锁点，再让只读旁路真正并发 |
@@ -238,7 +238,7 @@ impl MemoryStore {
 | **T1** | `MemoryStore` API：`with_write` / `with_read`（read 暂降级）；`db::open` 加 `busy_timeout`；全仓裸 lock 迁入口（行为不变） | `cargo test --lib` 全绿；A1–A2 |
 | **T2** | 对话锁点收敛 C1–C5；直答路径 `lock_count≤4`；cloud 步内 ≤2 | dialogue 单测全绿；A3–A5 |
 | **T3** | 真正 ReadPool（N=D2）；只读命令与装配读段切 `with_read`；写仍 Mutex | A6–A8；巩固与对话交叉压测（手工） |
-| **T4**（可选） | 持锁采样进 `turn_trace` / settings 诊断；巩固 write_phase 分片让步（D4） | A9；无产品必达可不排 |
+| **T4**（可选） | 持锁采样进 settings 诊断（`store_lock_stats`）；巩固 write_phase 分片让步（D4 仍不做） | 采样落地；分片按 D4 不做 |
 
 > 顺序理由：T1 把「入口」收束，T2 降对话抖动且不动并发，T3 才吃 WAL 红利。禁止 T1 未完就开 T3。
 
@@ -307,7 +307,7 @@ impl MemoryStore {
 | T1 | `cargo test --lib` **587 passed** | `MemoryStore` 改为 write Mutex + ReadPool；`busy_timeout=5s`；全仓 `.0.lock` / `lock_conn` / `lock_store` 退役 |
 | T2 | 同上 | C1 日历答+落库合并；C2 disagreement 并入 `persist_model_turn`；C3 cloud 计划 confirm+开卡合并 |
 | T3 | 同上 + store_lock 单测 | N=2 `query_only` readers；history / search / status / overview 等只读命令走 `with_read` |
-| T4 | 未做 | 持锁采样进 trace 可选；consolidate 分片按 D4 不做 |
+| T4 | 采样已做（2026-11-25） | `MemoryStore` 原子计数 + `store_lock_stats` + 诊断卡；consolidate 分片按 D4 不做；未进 turn_trace |
 
 ---
 
@@ -315,6 +315,7 @@ impl MemoryStore {
 
 | 版本 | 日期 | 说明 |
 |---|---|---|
+| v0.4 | 2026-11-25 | T4 写锁采样：`store_lock_stats` + 诊断卡；D4 分片仍不做 |
 | v0.3 | 2026-11-24 | T1–T3 落地：读写分离 + 对话锁点收敛；`cargo test --lib` 587 passed；T4 观测未做 |
 | v0.2 | 2026-11-24 | 实施中：D1–D5 按推荐闭合 |
 | v0.1 | 2026-11-24 | 初稿：实测 ~119 全仓锁点 / 对话 ~34；lock-narrowing 已到位；提议 T1 统一入口+busy_timeout → T2 对话收点 → T3 手写 ReadPool；D1–D5 待裁决 |

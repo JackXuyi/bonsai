@@ -31,13 +31,17 @@ pub mod scheduler;
 pub mod synonym;
 
 use std::ops::Deref;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
+use std::time::Instant;
 
 use rusqlite::Connection;
 use serde::Serialize;
 
 /// plan-store-lock D2：两条只读连接——对话装配与 UI/后台 tick 互不堵。
 pub const READER_COUNT: usize = 2;
+/// plan-store-lock T4：写锁等待超过该毫秒记为 slow，并打 debug 日志。
+pub const WRITE_WAIT_SLOW_MS: u64 = 50;
 
 fn poison_err() -> rusqlite::Error {
     // plan-retry §5.6 / plan-store-lock：中毒不做 unsafe 恢复；前缀让前端可辨。
@@ -86,10 +90,36 @@ impl ReadPool {
     }
 }
 
+/// plan-store-lock T4：进程内写锁采样（原子计数；无密钥、可进诊断卡）。
+#[derive(Debug, Default)]
+struct LockCounters {
+    write_acquires: AtomicU64,
+    write_wait_ms_total: AtomicU64,
+    write_wait_slow: AtomicU64,
+    write_hold_ms_total: AtomicU64,
+    write_hold_samples: AtomicU64,
+}
+
+/// 诊断快照（`store_lock_stats` / 设置页）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct StoreLockStats {
+    pub write_acquires: u64,
+    pub write_wait_ms_total: u64,
+    pub write_wait_slow: u64,
+    pub write_hold_ms_total: u64,
+    pub write_hold_samples: u64,
+    /// 平均等待（ms）；acquires=0 时为 0。
+    pub write_wait_ms_avg: u64,
+    /// 平均持锁（ms，仅 `with_write*` 采样）；samples=0 时为 0。
+    pub write_hold_ms_avg: u64,
+}
+
 /// 进程内记忆库入口（plan-store-lock）：写走 `write`，只读走 `read`。
 pub struct MemoryStore {
     write: Mutex<Connection>,
     read: ReadPool,
+    locks: LockCounters,
 }
 
 /// 只读守卫：deref → `&Connection`；drop 即还池。
@@ -114,6 +144,7 @@ impl MemoryStore {
         Ok(MemoryStore {
             write: Mutex::new(write),
             read,
+            locks: LockCounters::default(),
         })
     }
 
@@ -122,12 +153,59 @@ impl MemoryStore {
         MemoryStore {
             write: Mutex::new(conn),
             read: ReadPool::empty(),
+            locks: LockCounters::default(),
+        }
+    }
+
+    fn record_write_wait(&self, wait_ms: u64) {
+        self.locks.write_acquires.fetch_add(1, Ordering::Relaxed);
+        self.locks
+            .write_wait_ms_total
+            .fetch_add(wait_ms, Ordering::Relaxed);
+        if wait_ms >= WRITE_WAIT_SLOW_MS {
+            self.locks.write_wait_slow.fetch_add(1, Ordering::Relaxed);
+            log::debug!(target: "bonsai_store_lock", "write_wait_ms={wait_ms}");
+        }
+    }
+
+    fn record_write_hold(&self, hold_ms: u64) {
+        self.locks
+            .write_hold_ms_total
+            .fetch_add(hold_ms, Ordering::Relaxed);
+        self.locks.write_hold_samples.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// plan-store-lock T4：读当前采样（不重置）。
+    pub fn lock_stats(&self) -> StoreLockStats {
+        let acquires = self.locks.write_acquires.load(Ordering::Relaxed);
+        let wait_total = self.locks.write_wait_ms_total.load(Ordering::Relaxed);
+        let hold_samples = self.locks.write_hold_samples.load(Ordering::Relaxed);
+        let hold_total = self.locks.write_hold_ms_total.load(Ordering::Relaxed);
+        StoreLockStats {
+            write_acquires: acquires,
+            write_wait_ms_total: wait_total,
+            write_wait_slow: self.locks.write_wait_slow.load(Ordering::Relaxed),
+            write_hold_ms_total: hold_total,
+            write_hold_samples: hold_samples,
+            write_wait_ms_avg: if acquires == 0 {
+                0
+            } else {
+                wait_total / acquires
+            },
+            write_hold_ms_avg: if hold_samples == 0 {
+                0
+            } else {
+                hold_total / hold_samples
+            },
         }
     }
 
     /// 写锁守卫。复杂多语句块用这个；能收成闭包的优先 [`with_write`]。
     pub fn write_guard(&self) -> rusqlite::Result<MutexGuard<'_, Connection>> {
-        self.write.lock().map_err(|_| poison_err())
+        let t0 = Instant::now();
+        let guard = self.write.lock().map_err(|_| poison_err())?;
+        self.record_write_wait(t0.elapsed().as_millis() as u64);
+        Ok(guard)
     }
 
     /// 非阻塞写锁（测试：断言推理期间零持锁）。毒锁同样映射为 `internal_poisoned`。
@@ -156,7 +234,11 @@ impl MemoryStore {
         f: impl FnOnce(&Connection) -> rusqlite::Result<T>,
     ) -> rusqlite::Result<T> {
         let guard = self.write_guard()?;
-        f(&*guard)
+        let held_from = Instant::now();
+        let out = f(&*guard);
+        drop(guard);
+        self.record_write_hold(held_from.elapsed().as_millis() as u64);
+        out
     }
 
     pub fn with_write_mut<T>(
@@ -164,7 +246,11 @@ impl MemoryStore {
         f: impl FnOnce(&mut Connection) -> rusqlite::Result<T>,
     ) -> rusqlite::Result<T> {
         let mut guard = self.write_guard()?;
-        f(&mut *guard)
+        let held_from = Instant::now();
+        let out = f(&mut *guard);
+        drop(guard);
+        self.record_write_hold(held_from.elapsed().as_millis() as u64);
+        out
     }
 
     pub fn with_read<T>(
@@ -285,6 +371,12 @@ pub fn memory_overview(
         .map_err(|e| e.to_string())
 }
 
+/// plan-store-lock T4：写锁等待/持锁采样（设置页诊断；不重置）。
+#[tauri::command]
+pub fn store_lock_stats(state: tauri::State<'_, MemoryStore>) -> StoreLockStats {
+    state.inner().lock_stats()
+}
+
 #[cfg(test)]
 mod store_lock_tests {
     use super::*;
@@ -358,5 +450,24 @@ mod store_lock_tests {
             "unexpected err: {msg}"
         );
         let _ = std::fs::remove_file(&dir);
+    }
+
+    #[test]
+    fn with_write_updates_lock_stats() {
+        let conn = Connection::open_in_memory().unwrap();
+        db::init_schema_for_test(&conn).unwrap();
+        let store = MemoryStore::from_connection(conn);
+        let before = store.lock_stats();
+        assert_eq!(before.write_acquires, 0);
+        store
+            .with_write(|c| {
+                let _: i64 = c.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))?;
+                Ok(())
+            })
+            .unwrap();
+        let after = store.lock_stats();
+        assert_eq!(after.write_acquires, 1);
+        assert_eq!(after.write_hold_samples, 1);
+        assert!(after.write_wait_ms_avg <= after.write_wait_ms_total);
     }
 }

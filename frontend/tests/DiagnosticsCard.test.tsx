@@ -11,17 +11,29 @@ vi.hoisted(() => {
 import { DiagnosticsCard } from "@/components/settings/DiagnosticsCard";
 
 const recentMock = vi.fn();
+const lockMock = vi.fn();
 
 vi.mock("@/lib/commands", async (importOriginal) => {
   const orig = await importOriginal<typeof import("@/lib/commands")>();
   return {
     ...orig,
     failuresRecent: (...args: unknown[]) => recentMock(...args),
+    storeLockStats: (...args: unknown[]) => lockMock(...args),
   };
 });
 
 beforeEach(() => {
   recentMock.mockReset();
+  lockMock.mockReset();
+  lockMock.mockResolvedValue({
+    write_acquires: 3,
+    write_wait_ms_total: 6,
+    write_wait_slow: 0,
+    write_hold_ms_total: 9,
+    write_hold_samples: 3,
+    write_wait_ms_avg: 2,
+    write_hold_ms_avg: 3,
+  });
   recentMock.mockResolvedValue([
     {
       source: "turn",
@@ -46,6 +58,8 @@ describe("DiagnosticsCard", () => {
     expect(screen.getByText("夜间整理")).toBeTruthy();
     expect(screen.getByText("它想太久了，没等到结果")).toBeTruthy();
     expect(screen.getByText(/timeout/)).toBeTruthy();
+    expect(await screen.findByTestId("diagnostics-lock-stats")).toBeTruthy();
+    expect(screen.getByText(/写锁 · 获取 3/)).toBeTruthy();
   });
 
   it("空列表显示占位文案", async () => {

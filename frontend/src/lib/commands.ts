@@ -47,6 +47,7 @@ import type {
   DayTimelineExport,
   FaceSkinManifest,
   FailureRecent,
+  StoreLockStats,
   LoopStatus,
 } from "./types";
 
@@ -273,6 +274,9 @@ export const loopAutorestartSet = (enabled: boolean) =>
 /** 设置页诊断：最近失败（turn + consolidate），默认 10 条。 */
 export const failuresRecent = (limit?: number) =>
   call<FailureRecent[]>("failures_recent", { limit });
+
+/** plan-store-lock T4：写锁等待/持锁采样。 */
+export const storeLockStats = () => call<StoreLockStats>("store_lock_stats");
 
 // ---------- agent 工具管线（mcp_admin.rs，spec-s2/s4/s5）----------
 export const mcpServerList = () => call<McpServerRow[]>("mcp_server_list");
