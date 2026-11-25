@@ -1,6 +1,7 @@
-//! Built-in file tools (P3-2, docs/zh/plan-files.md, roadmap G-05).
+//! Built-in file tools (P3-2 + v2 copy/move, docs/zh/plan-files.md +
+//! docs/zh/plan-files/v2, roadmap G-05).
 //!
-//! One provider, four tools, all scoped to directories the user explicitly
+//! One provider, six tools, all scoped to directories the user explicitly
 //! added in the tools pane (`tools.fs.roots` settings key, default empty =
 //! not mounted at all). The safety story rests on ONE kernel —
 //! [`resolve_in_roots`] — that every tool call must pass before any I/O:
@@ -15,8 +16,8 @@
 //!    would ban CJK filenames; the denylist below blocks the actual escape
 //!    vectors, and the prefix check above is the real boundary).
 //!
-//! Deleting / moving / renaming has NO execution branch anywhere in this
-//! file — `ToolAccess::Forbidden` as a shape, not a runtime check.
+//! Delete remains absent (no execution branch). Copy / move are Ask-tier,
+//! same-root-set, files only, never overwrite (plan-files/v2).
 //!
 //! PDF text-layer read (docs/zh/plan-pdf-read/v1): `.pdf` is a narrow
 //! exception to the binary denylist — `fs_read` extracts text via
@@ -58,6 +59,8 @@ const PDF_OUTLINE_PREVIEW_CHARS: usize = 40;
 const LOCAL_PREVIEW_CHARS: usize = 2000;
 /// 普通工具（search/list）维持 200 字惯例。
 const LIST_SUMMARY_CHARS: usize = 200;
+/// fs_copy / 跨卷 fs_move 回退拷贝的体积上限（本地磁盘操作，但仍防拖死）。
+const MAX_TRANSFER_BYTES: u64 = 32 * 1024 * 1024;
 
 /// G-12：文件内容 = 外部内容，untrusted 标签由 provider 硬注入（不依赖
 /// system prompt 的自觉）。
@@ -160,6 +163,22 @@ pub fn builtin_descriptors() -> Vec<ToolDescriptor> {
             remote: false,
             access: ToolAccess::Ask,
         },
+        ToolDescriptor {
+            name: "fs_copy".into(),
+            summary: "在授权目录内复制文件到新路径（不覆盖、不处理目录，每次复制前会询问）".into(),
+            detail: r#"{"type":"object","properties":{"from":{"type":"string","description":"源文件绝对路径（须已存在，不能是目录）"},"to":{"type":"string","description":"目标绝对路径（父目录须已存在，且目标不能已存在）"}},"required":["from","to"]}"#.into(),
+            kind: ToolKind::Builtin,
+            remote: false,
+            access: ToolAccess::Ask,
+        },
+        ToolDescriptor {
+            name: "fs_move".into(),
+            summary: "在授权目录内移动或改名文件（不覆盖、不处理目录，每次移动前会询问）".into(),
+            detail: r#"{"type":"object","properties":{"from":{"type":"string","description":"源文件绝对路径（须已存在，不能是目录）"},"to":{"type":"string","description":"目标绝对路径（父目录须已存在，且目标不能已存在）"}},"required":["from","to"]}"#.into(),
+            kind: ToolKind::Builtin,
+            remote: false,
+            access: ToolAccess::Ask,
+        },
     ]
 }
 
@@ -225,7 +244,13 @@ impl FileError {
         Self::new("fs_not_found", "文件不存在（先用 fs_search/fs_list 确认路径）")
     }
     pub fn exists() -> Self {
-        Self::new("fs_exists", "文件已存在，fs_write 只新建、不覆盖")
+        Self::new("fs_exists", "目标已存在，只新建不覆盖")
+    }
+    fn is_dir(kind: &str) -> Self {
+        Self::new("fs_is_dir", format!("{kind}是目录；本期只处理文件，不递归目录"))
+    }
+    fn same_path() -> Self {
+        Self::new("fs_same_path", "源路径与目标路径相同")
     }
     pub fn bad_filename(name: &str) -> Self {
         Self::new("fs_bad_filename", format!("非法文件名：{name}"))
@@ -762,6 +787,109 @@ fn fs_write(roots: &[PathBuf], args: &serde_json::Value) -> Result<ToolOutput, F
     })
 }
 
+// ---------------------------------------------------------------- copy / move (plan-files/v2)
+
+/// 解析 from/to：双路径均过 [`resolve_in_roots`]；源须为已存在文件；
+/// 目标不得已存在；目标父目录须存在；不代建嵌套目录。
+fn resolve_transfer(
+    roots: &[PathBuf],
+    args: &serde_json::Value,
+) -> Result<(PathBuf, PathBuf), FileError> {
+    let from = args
+        .get("from")
+        .and_then(|v| v.as_str())
+        .filter(|p| !p.is_empty())
+        .ok_or_else(|| FileError::new("fs_bad_path", "缺少源路径 from"))?;
+    let to = args
+        .get("to")
+        .and_then(|v| v.as_str())
+        .filter(|p| !p.is_empty())
+        .ok_or_else(|| FileError::new("fs_bad_path", "缺少目标路径 to"))?;
+    let (_, src) = resolve_in_roots(roots, from)?;
+    let (_, dst) = resolve_in_roots(roots, to)?;
+    if src == dst {
+        return Err(FileError::same_path());
+    }
+    if !src.exists() {
+        return Err(FileError::not_found());
+    }
+    if src.is_dir() {
+        return Err(FileError::is_dir("源"));
+    }
+    if !src.is_file() {
+        return Err(FileError::new("fs_not_file", "源不是普通文件"));
+    }
+    if dst.exists() {
+        return Err(FileError::exists());
+    }
+    let parent = dst.parent().ok_or_else(FileError::relative)?;
+    if !parent.is_dir() {
+        return Err(FileError::not_found());
+    }
+    Ok((src, dst))
+}
+
+fn transfer_size_ok(src: &Path) -> Result<u64, FileError> {
+    let meta = std::fs::metadata(src).map_err(FileError::io)?;
+    let len = meta.len();
+    if len > MAX_TRANSFER_BYTES {
+        return Err(FileError::too_large(MAX_TRANSFER_BYTES as usize));
+    }
+    Ok(len)
+}
+
+/// Unix EXDEV=18；Windows ERROR_NOT_SAME_DEVICE=17。不依赖未稳定/过新 ErrorKind。
+fn is_cross_device(e: &std::io::Error) -> bool {
+    match e.raw_os_error() {
+        #[cfg(unix)]
+        Some(18) => true,
+        #[cfg(windows)]
+        Some(17) => true,
+        _ => false,
+    }
+}
+
+fn fs_copy(roots: &[PathBuf], args: &serde_json::Value) -> Result<ToolOutput, FileError> {
+    let (src, dst) = resolve_transfer(roots, args)?;
+    let len = transfer_size_ok(&src)?;
+    std::fs::copy(&src, &dst).map_err(FileError::io)?;
+    Ok(ToolOutput {
+        summary: format!(
+            "已复制 {} → {}（{} 字节）",
+            src.display(),
+            dst.display(),
+            len
+        ),
+        full: String::new(),
+    })
+}
+
+fn fs_move(roots: &[PathBuf], args: &serde_json::Value) -> Result<ToolOutput, FileError> {
+    let (src, dst) = resolve_transfer(roots, args)?;
+    let len = transfer_size_ok(&src)?;
+    match std::fs::rename(&src, &dst) {
+        Ok(()) => {}
+        Err(e) if is_cross_device(&e) => {
+            // EXDEV：跨卷 rename 失败 → 拷贝后删源（仍不覆盖：dst 已闸门）。
+            std::fs::copy(&src, &dst).map_err(FileError::io)?;
+            if let Err(rm) = std::fs::remove_file(&src) {
+                let _ = std::fs::remove_file(&dst);
+                return Err(FileError::io(rm));
+            }
+        }
+        Err(e) => return Err(FileError::io(e)),
+    }
+    Ok(ToolOutput {
+        summary: format!(
+            "已移动 {} → {}（{} 字节）",
+            src.display(),
+            dst.display(),
+            len
+        ),
+        full: String::new(),
+    })
+}
+
 // ---------------------------------------------------------------- provider
 
 /// 挂载条件（build_agent_kit）：总开关开 && roots 非空。roots 是构建时的
@@ -788,6 +916,8 @@ impl ToolProvider for FileToolsProvider {
             "fs_list" => fs_list(&self.roots, &call.args).map_err(|e| e.to_string()),
             "fs_read" => fs_read(&self.roots, self.cloud_read, &call.args).map_err(|e| e.to_string()),
             "fs_write" => fs_write(&self.roots, &call.args).map_err(|e| e.to_string()),
+            "fs_copy" => fs_copy(&self.roots, &call.args).map_err(|e| e.to_string()),
+            "fs_move" => fs_move(&self.roots, &call.args).map_err(|e| e.to_string()),
             _ => Err("unsupported".into()),
         }
     }
@@ -1251,12 +1381,16 @@ mod tests {
     }
 
     #[test]
-    fn descriptors_expose_four_tools_with_access_labels() {
+    fn descriptors_expose_six_tools_with_access_labels() {
         let descs = builtin_descriptors();
-        assert_eq!(descs.len(), 4);
-        let write = descs.iter().find(|d| d.name == "fs_write").unwrap();
-        assert_eq!(write.access, ToolAccess::Ask);
-        for d in descs.iter().filter(|d| d.name != "fs_write") {
+        assert_eq!(descs.len(), 6);
+        let ask: Vec<&str> = descs
+            .iter()
+            .filter(|d| d.access == ToolAccess::Ask)
+            .map(|d| d.name.as_str())
+            .collect();
+        assert_eq!(ask, vec!["fs_write", "fs_copy", "fs_move"]);
+        for d in descs.iter().filter(|d| d.access != ToolAccess::Ask) {
             assert_eq!(d.access, ToolAccess::Read);
             assert_eq!(d.kind, ToolKind::Builtin);
             assert!(!d.remote);
@@ -1265,6 +1399,79 @@ mod tests {
         for d in &descs {
             serde_json::from_str::<serde_json::Value>(&d.detail).unwrap();
         }
+    }
+
+    #[test]
+    fn fs_copy_and_move_within_roots_never_overwrite() {
+        let root = temp_root("xfer");
+        let p = provider(&root);
+        let src = root.join("源.txt");
+        let copy_to = root.join("副本.txt");
+        let move_to = root.join("子").join("迁.txt");
+        std::fs::write(&src, "hello-xfer").unwrap();
+        std::fs::create_dir(root.join("子")).unwrap();
+
+        let out = p
+            .execute(&call(
+                "fs_copy",
+                serde_json::json!({
+                    "from": src.display().to_string(),
+                    "to": copy_to.display().to_string()
+                }),
+            ))
+            .unwrap();
+        assert!(out.summary.contains("已复制"));
+        assert_eq!(std::fs::read_to_string(&src).unwrap(), "hello-xfer");
+        assert_eq!(std::fs::read_to_string(&copy_to).unwrap(), "hello-xfer");
+
+        // 覆盖拒绝
+        let err = p
+            .execute(&call(
+                "fs_copy",
+                serde_json::json!({
+                    "from": src.display().to_string(),
+                    "to": copy_to.display().to_string()
+                }),
+            ))
+            .unwrap_err();
+        assert!(err.starts_with("fs_exists"), "err: {err}");
+
+        let out = p
+            .execute(&call(
+                "fs_move",
+                serde_json::json!({
+                    "from": src.display().to_string(),
+                    "to": move_to.display().to_string()
+                }),
+            ))
+            .unwrap();
+        assert!(out.summary.contains("已移动"));
+        assert!(!src.exists());
+        assert_eq!(std::fs::read_to_string(&move_to).unwrap(), "hello-xfer");
+
+        // 目录源拒绝
+        let err = p
+            .execute(&call(
+                "fs_move",
+                serde_json::json!({
+                    "from": root.join("子").display().to_string(),
+                    "to": root.join("别的").display().to_string()
+                }),
+            ))
+            .unwrap_err();
+        assert!(err.starts_with("fs_is_dir"), "err: {err}");
+
+        // 越界目标
+        let err = p
+            .execute(&call(
+                "fs_copy",
+                serde_json::json!({
+                    "from": copy_to.display().to_string(),
+                    "to": "/tmp/bonsai-evil-copy.txt"
+                }),
+            ))
+            .unwrap_err();
+        assert!(err.starts_with("fs_outside_roots"), "err: {err}");
     }
 
     #[test]

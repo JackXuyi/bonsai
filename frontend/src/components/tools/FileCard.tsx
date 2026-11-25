@@ -52,7 +52,7 @@ export function FileCard({ active }: { active: boolean }) {
       return;
     }
     setLine(
-      `已授权 ${st.roots.length} 个目录 · 写入只新建不覆盖 · 每次写入前询问`
+      `已授权 ${st.roots.length} 个目录 · 写/复制/移动只新建不覆盖 · 变更前询问`
     );
   }, [st]);
 
@@ -113,7 +113,7 @@ export function FileCard({ active }: { active: boolean }) {
       <div className="card-head">
         <div className="card-titles">
           <p className="card-title">文件</p>
-          <p className="card-sub">只在授权目录内找/读/写 · 可读 PDF 文本层 · 删除永远不做</p>
+          <p className="card-sub">只在授权目录内找/读/写/复制/移动 · 可读 PDF 文本层 · 删除永远不做</p>
         </div>
         <label className="tgl tgl-master" title="总开关">
           <span className="master-label">总开关</span>

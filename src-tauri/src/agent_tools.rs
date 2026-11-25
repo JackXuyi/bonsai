@@ -46,9 +46,9 @@ pub fn builtin_tools() -> Vec<ToolDescriptor> {
     // 在 perception_search 模块。设置页常显（让用户知道能力存在）；provider
     // 挂载由 build_agent_kit 按 might_perceive 信号门控。
     tools.push(crate::perception_search::builtin_descriptor());
-    // P3-2 文件工具（plan-files.md）：descriptor 单源在 filetools 模块。
-    // 注意：设置页常显这四个条目（让用户知道能力存在），但 provider 只在
-    // 总开关开且 roots 非空时才挂载（见 mcp_admin::build_agent_kit）。
+    // P3-2 文件工具（plan-files.md + plan-files/v2）：descriptor 单源在
+    // filetools 模块。设置页常显全部 fs_* 条目（含 copy/move），但 provider
+    // 只在总开关开且 roots 非空时才挂载（见 mcp_admin::build_agent_kit）。
     tools.extend(crate::filetools::builtin_descriptors());
     // P3-3 Web 工具（plan-web.md）：descriptor 单源在 webtools 模块。设置页
     // 常显这两个条目；provider 只在 tools.web.enabled 时才挂载（见
