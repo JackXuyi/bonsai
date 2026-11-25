@@ -17,12 +17,11 @@ pub(crate) const RETRY_BACKOFF: Duration = Duration::from_millis(500);
 
 // ---------------------------------------------------------------- tool calling
 //
-// 工具调用分流（plan-task-card v0.2，2026-11-22 用户裁决）：
+// 工具调用分流（plan-task-card v0.2；2026-11-25 日历/邮件规则腿退役）：
 //   云端模式 = DeepSeek 原生 function calling 多轮循环（§cloud_tool_loop）；
-//   本地模式 = 零模型工具调用，只保留代码层规则路由——日历（chat_turn_inner
-//   前置）+ memory_search recall（§local_recall_answer）。为 2B 手搓的三级
-//   渐进 JSON 管线（candidates/决策轮）整体退役：解析器仍留在 agent_tools.rs
-//   供单测与未来复用。
+//   日历/邮件仅云端 + 开关开时挂载，走 execute_audited（含 tool_call 迹）。
+//   本地模式 = 零模型工具调用；仅保留 memory_search / perception 代码层强制
+//   腿（§local_recall_answer / local_perception_answer）。三级渐进 JSON 管线已退役。
 //
 // 人格（D6 裁决）：云端循环的 system prompt 带完整人格宪法（L1/L2/L3 + 环境
 // 段 + skill 段）——2B「人格稀释 JSON」的教训不适用于 DeepSeek；循环自然

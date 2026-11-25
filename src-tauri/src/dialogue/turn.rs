@@ -187,109 +187,16 @@ pub(crate) fn chat_turn_inner(
         });
     }
 
-    // Tool intents (plan-calendar.md §3.5) sit between the crisis check and
-    // the model: a schedule question is answered from the calendar cache by
-    // deterministic rules, so it works with the local model down and never
-    // invents a meeting. A miss falls straight through to normal chat.
-    // One lock scope: cache read/write + both event rows (ids captured here
-    // for the trace backfill — spec-s8 §3.2).
-    // plan-store-lock T2/C1：日历命中时答 + 双事件 + trace 同一把写锁。
-    {
-        let conn = store.write_guard()?;
-        match crate::tools::maybe_answer(&conn, access, user_text, chrono::Local::now()) {
-            None => {
-                rec.simple("tool_intent", "日历规则路由", "miss", None);
-                // P3-1 邮件规则腿（plan-mail/v1）：日历 miss 后再判；本地零 tools[]。
-                // AppleMailSource 无状态；关开关时不调脚本，只回引导文案。
-                if let Some(reply) =
-                    crate::mail::maybe_answer(&conn, &crate::mail::AppleMailSource, user_text)
-                {
-                    rec.simple("tool_intent", "邮件规则路由", "hit", Some(&reply));
-                    let user_id = db::add_event_meta(
-                        &conn,
-                        "dialogue",
-                        user_text,
-                        Some("user"),
-                        Some(session_id),
-                    )?;
-                    let asst_id = db::add_event_meta(
-                        &conn,
-                        "dialogue",
-                        &reply,
-                        Some("assistant"),
-                        Some(session_id),
-                    )?;
-                    let turn_id = rec.persist(
-                        &conn,
-                        session_id,
-                        Some(user_id),
-                        Some(asst_id),
-                        "tool",
-                        false,
-                        Some("mail:unread".into()),
-                        None,
-                        Some(user_text),
-                        Some(&reply),
-                    )?;
-                    return Ok(DialogueOutcome {
-                        reply,
-                        filter: generation::FilterReport::default(),
-                        model_used: false,
-                        crisis: false,
-                        tool: Some("mail_unread".into()),
-                        task: None,
-                        turn_id: Some(turn_id),
-                        failure: None,
-                    });
-                }
-                rec.simple("tool_intent", "邮件规则路由", "miss", None);
-            }
-            Some(t) => {
-                rec.simple("tool_intent", "日历规则路由", "hit", Some(&t.reply));
-                let user_id = db::add_event_meta(
-                    &conn,
-                    "dialogue",
-                    user_text,
-                    Some("user"),
-                    Some(session_id),
-                )?;
-                let asst_id = db::add_event_meta(
-                    &conn,
-                    "dialogue",
-                    &t.reply,
-                    Some("assistant"),
-                    Some(session_id),
-                )?;
-                let turn_id = rec.persist(
-                    &conn,
-                    session_id,
-                    Some(user_id),
-                    Some(asst_id),
-                    "tool",
-                    false,
-                    Some(format!("calendar:{}", t.action)),
-                    None,
-                    Some(user_text),
-                    Some(&t.reply),
-                )?;
-                return Ok(DialogueOutcome {
-                    reply: t.reply,
-                    filter: generation::FilterReport::default(),
-                    model_used: false,
-                    crisis: false,
-                    tool: Some(t.action.to_string()),
-                    task: None,
-                    turn_id: Some(turn_id),
-                    failure: None,
-                });
-            }
-        }
-    }
+    // 日历 / 邮件：已退役对话前置规则腿（2026-11-25）。
+    // 仅云端 + 对应开关开时由 build_agent_kit 挂 CalendarToolsProvider /
+    // MailToolsProvider，走 cloud_tool_loop → execute_audited（含 tool_call 迹）。
+    // 本地模式不挂、不代答——模型需诚实提示开云端。`access` 在 kit 构建时快照。
+    let _access = access;
 
     // ---- phase: context read (one short lock) → then inference runs FREE
     // 装配统一走 `context::build`（plan-context §6.3，T2）：预算充足时与旧
     // 行为逐条等价（system = env + body，历史原样），装不下时从最旧开始丢，
-    // 最近 2 轮必留。这里仍是**唯一**装配点——云端循环 / 本地规则路由 /
+    // 最近 2 轮必留。这里仍是**唯一**装配点——云端循环 / 本地腿 /
     // 直答 / 总结全部消费这一份 system + history。
     let will_use_tools = kit.as_deref().map(|k| k.has_capabilities()).unwrap_or(false);
     let (system, history) = {

@@ -108,8 +108,8 @@
 ## 模型调用约束（全项目 MUST，2026-11-22）
 
 1. 工具与 skill **只在**云端支持 tool calling 的模型上启用（当前 DeepSeek function calling / `cloud_tool_loop`）：内置工具、MCP、skill 注入均随云端管线挂载；本地管线一律不出现。
-2. 本地模型（Ollama sidecar）**只做纯聊天、零工具调用**：不挂 tool provider、不发 `tools[]`、不做规则路由兜底之外的工具执行；需工具时诚实告知开启云端模式，绝不伪装执行。
-3. **禁止**：本地 chat 接 `tools[]`、本地路径新增工具执行分支、skill 注入本地 system prompt、为本地调工具复活 JSON 协议 hack（三级渐进 JSON 管线已退役）。
+2. 本地模型（Ollama sidecar）**只做纯聊天、零工具调用**：不挂 tool provider、不发 `tools[]`；**日历 / 邮件无对话规则腿、本地不代答**（仅云端 + 对应开关开时经 function calling 执行）；需工具时诚实告知开启云端模式，绝不伪装执行。本地仅保留 `memory_search` / `perception_search` 的代码层强制召回腿（非 `tools[]`）。
+3. **禁止**：本地 chat 接 `tools[]`、本地路径新增工具执行分支、对话前置日历/邮件规则路由、skill 注入本地 system prompt、为本地调工具复活 JSON 协议 hack（三级渐进 JSON 管线已退役）。
 4. 「本地零工具调用」约束的是 `tools[]` / function calling（对话管线挂工具）。后台管线（夜间抽取 / 巩固 / 总结）在本地模型上使用**原生结构化输出**（Ollama `format` / 云端 `response_format`）不构成工具调用，不触发本约束——工具的执行者始终是引擎，结构化输出只是让模型把话说成机器能编译的形状（plan-structured-routing，2026-11-24）。
 
 ---

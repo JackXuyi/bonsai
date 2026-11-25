@@ -42,11 +42,19 @@ pub async fn dialogue_chat(
         agent.inner().session_allow.bind_session(&session);
         let hour = chrono::Local::now().hour() as u32;
         let mut backend = crate::persona::backend().map_err(|e| e.to_string())?;
+        let cloud = backend.tool_client().is_some();
+        let cal_access = calendar.inner().source().access();
         // Short lock for the gate + kit build; the turn locks per phase.
         let mut kit = {
             let conn = store.inner().write_guard().map_err(|e| e.to_string())?;
             crate::onboarding::ensure_not_minor(&conn)?;
-            crate::mcp_admin::build_agent_kit(&conn, agent.inner(), &user_text)
+            crate::mcp_admin::build_agent_kit(
+                &conn,
+                agent.inner(),
+                &user_text,
+                cal_access,
+                cloud,
+            )
         };
         chat_turn_with_kit(
             store.inner(),
@@ -56,7 +64,7 @@ pub async fn dialogue_chat(
             &user_text,
             hour,
             raining.unwrap_or(false),
-            calendar.inner().source().access(),
+            cal_access,
             &mut kit,
         )
         .map_err(|e| e.to_string())
@@ -100,11 +108,19 @@ pub async fn dialogue_chat_stream(
             agent.inner().session_allow.bind_session(&session);
             let hour = chrono::Local::now().hour() as u32;
             let mut backend = crate::persona::backend().map_err(|e| e.to_string())?;
+            let cloud = backend.tool_client().is_some();
+            let cal_access = calendar.inner().source().access();
             // Short lock for the gate + kit build; the turn locks per phase.
             let mut kit = {
                 let conn = store.inner().write_guard().map_err(|e| e.to_string())?;
                 crate::onboarding::ensure_not_minor(&conn)?;
-                crate::mcp_admin::build_agent_kit(&conn, agent.inner(), &user_text)
+                crate::mcp_admin::build_agent_kit(
+                    &conn,
+                    agent.inner(),
+                    &user_text,
+                    cal_access,
+                    cloud,
+                )
             };
             let mut emit = |delta: &str| {
                 let _ = on_delta.send(serde_json::json!({ "delta": delta }));
@@ -122,7 +138,7 @@ pub async fn dialogue_chat_stream(
                 &user_text,
                 hour,
                 raining.unwrap_or(false),
-                calendar.inner().source().access(),
+                cal_access,
                 &mut kit,
                 &mut emit,
                 &mut emit_task,

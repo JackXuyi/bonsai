@@ -1830,11 +1830,9 @@ fn card() -> Persona {
         assert!(out_text.contains("kept="));
     }
 
-    /// Spec-s7 §1/§3: the kit must never jump the queue — crisis and the
-    /// calendar rule router both sit *before* the pipeline, so an enabled
-    /// skill/tool can't change compliance or steal an existing intent.
+    /// Spec-s7：kit 不得抢在危机拦截之前；日历规则腿已退役，日程问句进管线。
     #[test]
-    fn kit_never_preempts_crisis_or_calendar_routing() {
+    fn kit_never_preempts_crisis() {
         let s = mem();
         let c = card();
         let mut kit = weather_kit();
@@ -1868,20 +1866,20 @@ fn card() -> Persona {
         assert!(!out.model_used);
         assert_eq!(out.reply, crate::onboarding::CRISIS_REPLY);
 
-        // Schedule question with a tool enabled → rule router answers, the
-        // pipeline stays out (Denied access ⇒ honest "not permitted" reply).
-        let mut backend2 = SeqBackend::new(&[]);
+        // 日程问句：无规则腿劫持；云端 kit 可走 FC（此处 Mock 直答）。
+        let mut backend2 = MockBackend::new("请开日历权限后再问我。");
         let out2 = chat_turn_with_kit(
             &s, &mut backend2, &c, "s1", "今天有什么会", 10, false,
             crate::calendar::CalendarAccess::Denied, &mut kit,
         )
         .unwrap();
-        assert!(!out2.model_used);
-        assert!(out2.tool.is_some(), "rule router owns schedule questions");
+        assert!(out2.model_used);
         assert_ne!(out2.tool.as_deref(), Some("mcp:weather"));
-        // Only the calendar router's own audit row exists — no mcp/skill row.
         let rows = with_conn(&s, |conn| db::tool_call_records(conn, 10).unwrap());
-        assert!(rows.iter().all(|r| r.tool == "calendar"), "unexpected: {rows:?}");
+        assert!(
+            rows.iter().all(|r| r.tool != "calendar"),
+            "无规则腿 calendar 行: {rows:?}"
+        );
     }
 
     #[test]
@@ -2235,16 +2233,16 @@ fn card() -> Persona {
             app: None,
         };
         assert!(
-            !with_conn(&s, |conn| crate::mcp_admin::build_agent_kit(conn, &state, "我今天好累").has_capabilities()),
+            !with_conn(&s, |conn| crate::mcp_admin::build_agent_kit(conn, &state, "我今天好累", crate::calendar::CalendarAccess::Denied, true).has_capabilities()),
             "plain chat must not grow a catalog"
         );
-        let kit = with_conn(&s, |conn| crate::mcp_admin::build_agent_kit(conn, &state, "总结一下我18号说了啥"));
+        let kit = with_conn(&s, |conn| crate::mcp_admin::build_agent_kit(conn, &state, "总结一下我18号说了啥", crate::calendar::CalendarAccess::Denied, true));
         assert!(kit.has_capabilities());
         assert!(kit.catalog().iter().any(|d| d.name == "memory_search"));
         // plan-perception-tool §4：感知门独立于 recall 门——裸日期不挂感知工具。
-        let kit = with_conn(&s, |conn| crate::mcp_admin::build_agent_kit(conn, &state, "18号说了啥"));
+        let kit = with_conn(&s, |conn| crate::mcp_admin::build_agent_kit(conn, &state, "18号说了啥", crate::calendar::CalendarAccess::Denied, true));
         assert!(!kit.catalog_all().iter().any(|d| d.name == "perception_search"));
-        let kit = with_conn(&s, |conn| crate::mcp_admin::build_agent_kit(conn, &state, "我今天在用什么应用"));
+        let kit = with_conn(&s, |conn| crate::mcp_admin::build_agent_kit(conn, &state, "我今天在用什么应用", crate::calendar::CalendarAccess::Denied, true));
         assert!(kit.has_capabilities());
         assert!(kit.catalog().iter().any(|d| d.name == "perception_search"));
     }
@@ -2465,35 +2463,8 @@ fn card() -> Persona {
         assert_eq!(records[0].action, "tool119");
     }
 
-    /// 云端循环护栏（v0.2 §4 D2）：请求次数打满 → 强制去 tools 收尾。
-    #[test]
-    fn cloud_loop_forces_wrap_up_at_request_cap() {
-        let s = mem();
-        let c = card();
-        // 5 轮 tool_calls（每轮 1 个调用）→ 第 6 个请求必须不带 tools。
-        let mut script = Vec::new();
-        for _ in 0..5 {
-            script.push(tool_calls_reply(&[("weather", serde_json::json!({}))]));
-        }
-        script.push(content_reply("结果都在这儿，收尾。"));
-        let (client, seen) = tool_client(script);
-        let mut backend =
-            crate::persona::eval::LocalBackend::with_client(client, crate::llm::ClientKind::Cloud);
-        let mut kit = weather_kit();
-        let out = chat_turn_with_kit(
-            &s, &mut backend, &c, "s1", "连查五次", 10, false,
-            crate::calendar::CalendarAccess::Denied, &mut kit,
-        )
-        .unwrap();
-        assert_eq!(out.reply, "结果都在这儿，收尾。");
-        assert_eq!(out.tool.as_deref(), Some("mcp:weather"));
-        let cap = seen.lock().unwrap();
-        assert_eq!(cap.len(), 6, "5 轮工具 + 1 轮收尾");
-        assert!(cap[5].1.is_empty(), "强制收尾轮不带 tools: {:?}", cap[5].1);
-        assert_eq!(cap[..5].iter().filter(|(_, tools, _)| tools.len() == 1).count(), 5);
-        let records = with_conn(&s, |conn| db::tool_call_records(conn, 10).unwrap());
-        assert_eq!(records.len(), 5, "每次执行都落审计");
-    }
+    // 旧「5 轮即收尾」用例已失效（CLOUD_REQUEST_CAP=32）；触顶见
+    // `budget_guard_skips_remaining_with_reason`。
 
     /// 任务卡外壳（v12 §8）：云端循环落 tasks 行（done + 步骤数），审计行
     /// 带 task_id 关联；模型直答（未执行任何工具）不产生任务卡噪音。
@@ -2654,17 +2625,16 @@ fn card() -> Persona {
         let kinds: Vec<&str> = steps.iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(
             kinds,
-            ["user_input", "crisis_check", "tool_intent", "context_budget", "llm_round", "filter"]
+            ["user_input", "crisis_check", "context_budget", "llm_round", "filter"]
         );
         assert_eq!(steps[1].1, "miss");
-        assert_eq!(steps[2].1, "miss");
-        assert_eq!(steps[4].1, "answered");
+        assert_eq!(steps[3].1, "answered");
         // Full prompt stored (D1): the llm_round carries the whole system prompt.
         with_conn(&s, |conn| {
             let t = db::turn_trace_get(conn, tid).unwrap().unwrap();
-            let prompt = t.steps[4].prompt.as_deref().expect("prompt stored");
+            let prompt = t.steps[3].prompt.as_deref().expect("prompt stored");
             assert!(prompt.contains("# 环境（系统注入，不可变）"));
-            assert!(t.steps[4].output.as_deref().unwrap().contains("我知道了"));
+            assert!(t.steps[3].output.as_deref().unwrap().contains("我知道了"));
         });
     }
 
@@ -2686,10 +2656,13 @@ fn card() -> Persona {
         let steps = steps_of(&s, tid);
         // plan-retry §5.1：失败不再被抹平成空串 + answered——round 照记，
         // 但结论是 error，output 带 kind/attempts/detail。
-        assert_eq!(steps[4].1, "error");
+        // 规则腿退役后无 tool_intent：user_input / crisis / budget / llm_round。
+        assert_eq!(steps.len(), 4);
+        assert_eq!(steps[3].0, "llm_round");
+        assert_eq!(steps[3].1, "error");
         with_conn(&s, |conn| {
             let t = db::turn_trace_get(conn, tid).unwrap().unwrap();
-            let out = t.steps[4].output.as_deref().unwrap_or("");
+            let out = t.steps[3].output.as_deref().unwrap_or("");
             assert!(
                 out.starts_with("kind=transport attempts="),
                 "output 要说清失败是什么：{out}"
@@ -2743,24 +2716,29 @@ fn card() -> Persona {
         }
     }
 
+    /// 规则腿退役后：日程问句不再被前置劫持，走普通模型回合。
     #[test]
-    fn trace_tool_router_hit_records_calendar_turn() {
+    fn schedule_question_no_longer_hijacked_by_rule_leg() {
         let s = mem();
         let c = card();
-        let out = chat_turn(&s, &mut MockBackend::new("x"), &c, "s1", "今天有什么会", 10, false, crate::calendar::CalendarAccess::Denied).unwrap();
-        assert!(!out.model_used);
-        let tid = out.turn_id.expect("tool turn carries a trace id");
-        let trace = trace_of(&s, tid);
-        assert_eq!(trace.kind, "tool");
+        let out = chat_turn(
+            &s,
+            &mut MockBackend::new("你开云端并打开日历，我才能查日程。"),
+            &c,
+            "s1",
+            "今天有什么会",
+            10,
+            false,
+            crate::calendar::CalendarAccess::Denied,
+        )
+        .unwrap();
+        assert!(out.model_used, "无规则腿代答");
+        assert!(out.tool.is_none());
+        let rows = with_conn(&s, |conn| db::tool_call_records(conn, 10).unwrap());
         assert!(
-            trace.tool_label.as_deref().unwrap_or("").starts_with("calendar:"),
-            "got {}",
-            trace.tool_label.unwrap_or_default()
+            rows.iter().all(|r| r.tool != "calendar"),
+            "不应再有规则腿 calendar 审计: {rows:?}"
         );
-        let steps = steps_of(&s, tid);
-        let kinds: Vec<&str> = steps.iter().map(|(k, _)| k.as_str()).collect();
-        assert_eq!(kinds, ["user_input", "crisis_check", "tool_intent"]);
-        assert_eq!(steps[2].1, "hit");
     }
 
     #[test]
@@ -2786,12 +2764,11 @@ fn card() -> Persona {
         // 云端循环 trace：输入 → 请求 1（tool_calls）→ 执行 → 请求 2（最终作答）。
         assert_eq!(
             kinds,
-            ["user_input", "crisis_check", "tool_intent", "context_budget", "llm_round", "tool_call", "llm_round", "filter"]
+            ["user_input", "crisis_check", "context_budget", "llm_round", "tool_call", "llm_round", "filter"]
         );
-        assert_eq!(steps[2].1, "miss");
-        assert_eq!(steps[4].1, "tool_calls");
-        assert_eq!(steps[5].1, "ok");
-        assert_eq!(steps[6].1, "answered");
+        assert_eq!(steps[3].1, "tool_calls");
+        assert_eq!(steps[4].1, "ok");
+        assert_eq!(steps[5].1, "answered");
         // 每轮请求的完整消息序列都存（spec-s8 D1），user_text 随步携带。
         with_conn(&s, |conn| {
             let t = db::turn_trace_get(conn, tid).unwrap().unwrap();

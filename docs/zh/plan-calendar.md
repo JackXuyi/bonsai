@@ -1,6 +1,7 @@
 # 方案：日历 / 邮件工具调用（MVP P2 第 2 项）
 
 > **状态**：T0–T4 已实施（2026-11-19，162 单测全过）；T5 邮件按 §7 建议不做；真机 TCC 授权验收已通过（2026-11-20）
+> **后续**：对话规则腿退役、云端 FC 见 [plan-calendar-cloud-fc/v1](plan-calendar-cloud-fc/v1/index.md)、[plan-mail-cloud-fc/v1](plan-mail-cloud-fc/v1/index.md)（2026-11-25）
 > **日期**：2026-11-19
 > **依赖**：决策层 `should_speak`（decision.rs，已落地，含 `in_meeting` 静默）、感知层轮询与逐项授权模式（perception.rs，已落地）、settings KV 与 events 审计链（memory/db.rs，已落地）、日报生成器（report.rs，已落地）、本地 LLM（llm.rs，已落地，可降级）
 > **对应调研**：docs/zh/research-report.md §3.3 macOS TCC 四条约束、§6.4 打断成本与「会议中绝不开口」、§8.2 分层架构、§8.3 P2 第 2 项

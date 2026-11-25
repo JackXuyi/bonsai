@@ -55,7 +55,9 @@ pub fn builtin_tools() -> Vec<ToolDescriptor> {
     // mcp_admin::build_agent_kit）。默认关——搜索词与网页内容会外发，
     // 开启是知情选择。
     tools.extend(crate::webtools::builtin_descriptors());
-    // P3-1 邮件（plan-mail/v1）：设置页常显；provider 仅 tools.mail.enabled 时挂载。
+    // 日历（plan-calendar）：设置页常显；provider 仅云端 + tools.calendar.enabled。
+    tools.extend(crate::tools::builtin_descriptors());
+    // P3-1 邮件（plan-mail）：设置页常显；provider 仅云端 + tools.mail.enabled。
     tools.extend(crate::mail::builtin_descriptors());
     tools
 }

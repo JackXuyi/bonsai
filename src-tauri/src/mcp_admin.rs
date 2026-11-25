@@ -815,7 +815,15 @@ fn audit_log(
 /// see memory_search::might_recall). Without the signal — and with no
 /// MCP/skill capabilities — the kit stays empty and the turn keeps the
 /// legacy single-round chat path.
-pub fn build_agent_kit(conn: &Connection, state: &AgentState, user_text: &str) -> AgentKit {
+/// `cloud`：当前回合是否具备云端 function calling（`tool_client` 非空）。
+/// 日历 / 邮件 **仅**在云端且对应开关开时挂载——本地零规则腿、零代答。
+pub fn build_agent_kit(
+    conn: &Connection,
+    state: &AgentState,
+    user_text: &str,
+    calendar_access: crate::calendar::CalendarAccess,
+    cloud: bool,
+) -> AgentKit {
     let mut providers: Vec<Box<dyn ToolProvider>> = Vec::new();
 
     if crate::memory_search::might_recall(user_text) {
@@ -846,8 +854,13 @@ pub fn build_agent_kit(conn: &Connection, state: &AgentState, user_text: &str) -
         providers.push(Box::new(crate::webtools::WebToolsProvider::new()));
     }
 
-    // P3-1 邮件（plan-mail/v1）：默认关；开了才进 kit。Denied ≠ empty。
-    if crate::mail::is_enabled(conn) {
+    // 日历 / 邮件：仅云端 FC（2026-11-25 退役对话规则腿）。
+    if cloud && crate::calendar::is_enabled(conn) {
+        providers.push(Box::new(crate::tools::CalendarToolsProvider::new(
+            calendar_access,
+        )));
+    }
+    if cloud && crate::mail::is_enabled(conn) {
         providers.push(Box::new(crate::mail::MailToolsProvider::apple()));
     }
 
@@ -2036,7 +2049,7 @@ pub(crate) mod tests {
         };
         // Separate scopes: execute_audited locks internally, so no guard may
         // be alive here.
-        let kit = with_conn(&s, |conn| build_agent_kit(conn, &state, "今天有什么会"));
+        let kit = with_conn(&s, |conn| build_agent_kit(conn, &state, "今天有什么会", crate::calendar::CalendarAccess::Denied, true));
         assert!(kit.has_capabilities());
         let err = execute_audited(&s, &kit, "weather", serde_json::json!({})).unwrap_err();
         assert_eq!(err, "denied");
@@ -2217,7 +2230,7 @@ pub(crate) mod tests {
             session_allow: Arc::new(SessionToolAllow::default()),
             app: None,
         };
-        let off = with_conn(&s, |conn| build_agent_kit(conn, &state, "今天有什么邮件"));
+        let off = with_conn(&s, |conn| build_agent_kit(conn, &state, "今天有什么邮件", crate::calendar::CalendarAccess::Denied, true));
         assert!(
             !off.catalog_all().iter().any(|d| d.name.starts_with("mail_")),
             "默认关时 kit 不得出现 mail_*"
@@ -2225,7 +2238,7 @@ pub(crate) mod tests {
         with_conn(&s, |conn| {
             crate::mail::set_enabled(conn, true).unwrap();
         });
-        let on = with_conn(&s, |conn| build_agent_kit(conn, &state, "今天有什么邮件"));
+        let on = with_conn(&s, |conn| build_agent_kit(conn, &state, "今天有什么邮件", crate::calendar::CalendarAccess::Denied, true));
         let names: Vec<_> = on
             .catalog_all()
             .into_iter()
@@ -2233,6 +2246,28 @@ pub(crate) mod tests {
             .filter(|n| n.starts_with("mail_"))
             .collect();
         assert!(names.contains(&"mail_unread".to_string()));
+        assert!(names.contains(&"mail_mark_read".to_string()));
         assert!(names.contains(&"mail_draft".to_string()));
+
+        // 本地（cloud=false）即使开关开也不挂 mail / calendar。
+        with_conn(&s, |conn| {
+            db::set_setting(conn, crate::calendar::SETTING_ENABLED, "1").unwrap();
+        });
+        let local = with_conn(&s, |conn| {
+            build_agent_kit(
+                conn,
+                &state,
+                "今天有什么邮件",
+                crate::calendar::CalendarAccess::Denied,
+                false,
+            )
+        });
+        assert!(
+            !local
+                .catalog_all()
+                .iter()
+                .any(|d| d.name.starts_with("mail_") || d.name.starts_with("calendar_")),
+            "本地不得挂 mail/calendar"
+        );
     }
 }
