@@ -50,6 +50,7 @@
 | Rust | 根目录 `pnpm check`；相关 `pnpm test` |
 | 前端 | `cd frontend && npx tsc --noEmit`；`npm run test`；改组件时 `npm run lint` |
 
+- PR / `main` 推送由 `.github/workflows/ci.yml` 机检上表；发版与关键路径改动前 **SHOULD** 跑 L3 真机清单 [`docs/zh/runbook-l3-acceptance/v1`](docs/zh/runbook-l3-acceptance/v1/index.md)。
 - **MUST NOT** 删除、跳过或弱化测试，或吞错 / 整文件关 lint/type 来「变绿」。
 - 新增组件 / hook / 公共 lib / 关键 Rust 路径 **MUST** 附最小测试（`frontend/tests/` 或 crate 单测）。
 - 无法自动化验证时，在回复/PR 写明未验证项与原因。
@@ -77,7 +78,7 @@
 
 - **MUST NOT** 提交密钥、凭证、`.env` 实值、私钥；示例用占位符。
 - 新增或升级依赖评估必要性与许可证；高风险变更跑 `cargo audit` / `npm audit`（或等价）并处理高危。
-- CSP、isolation、外部 origin 白名单宜收紧；`csp: null` 或过宽 scope 的变更 **MUST** 附收口计划或书面风险接受。
+- CSP、isolation、外部 origin 白名单宜收紧；放宽 CSP / asset scope **MUST** 在 PR 说明攻击面；`csp: null` **MUST NOT** 合入（生产 `csp` + 开发 `devCsp` 分写；皮肤仅 `$APPDATA/face_skins/**/*`）。
 
 ### 10. 可访问与可观测（前端 SHOULD，关键路径 MUST）
 

@@ -85,6 +85,7 @@ Rust 核心已实现：L1 感知层（逐项授权、默认关闭）、L2 记忆
   - [方案：关系线成长](./docs/zh/plan-relationship.md) — MVP P2 第 1 项的实施计划（Q1–Q4 已实施）
   - [方案：日历 / 邮件工具调用](./docs/zh/plan-calendar.md) — MVP P2 第 2 项的实施计划（T0–T4 已实施，邮件 T5 未做）
   - [方案：MCP 调用 + Skill 支持](./docs/zh/plan-agent-mcp-skill.md) — 通用 Agent 能力（S1–S6 已实施，spec 见 [docs/zh/specs/agent](./docs/zh/specs/agent/README.md)）
+  - [Runbook：L3 真机验收短清单](./docs/zh/runbook-l3-acceptance/v1/index.md) — 发版前人工勾选（测试绿 ≠ 产品效果）
 - English
   - [Research report](./docs/en/research-report.md) — founding research: market, feasibility, memory, personality, growth, compliance, MVP, risks
 
