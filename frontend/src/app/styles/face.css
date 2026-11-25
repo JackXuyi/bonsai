@@ -53,16 +53,16 @@
   background: var(--card);
 }
 
-/* ChatPet：右上角完整展示 1:1 素材 */
+/* ChatPet：透明底完整展示 1:1 抠图素材 */
 .face-md {
   width: 96px;
   height: 96px;
   overflow: hidden;
-  border: 1px solid var(--line);
+  border: 0;
   border-radius: 16px;
   box-sizing: border-box;
-  background: var(--card);
-  box-shadow: var(--shadow);
+  background: transparent;
+  box-shadow: none;
 }
 
 .face-md::before {
@@ -75,22 +75,23 @@
 
 .face-md img {
   object-fit: contain;
-  padding: 2px;
+  padding: 0;
 }
 
+/* 空态 / 设置预览：同样透明底，只留人物 */
 .face-lg {
   width: 128px;
   height: 128px;
   overflow: hidden;
   border-radius: 18px;
-  background: var(--card);
-  border: 1px solid var(--line);
+  background: transparent;
+  border: 0;
   box-sizing: border-box;
 }
 
 .face-lg img {
   object-fit: contain;
-  padding: 4px;
+  padding: 0;
 }
 
 .face::before {

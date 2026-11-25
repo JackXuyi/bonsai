@@ -9,26 +9,6 @@
   min-height: 0;
 }
 
-.chat-stage {
-  position: relative;
-  display: flex;
-  flex: 1;
-  min-width: 0;
-  min-height: 0;
-}
-
-.chat-pet {
-  position: absolute;
-  top: 4px;
-  right: 8px;
-  z-index: 3;
-  pointer-events: none;
-}
-
-.chat-pet .face {
-  pointer-events: auto;
-}
-
 .messages {
   flex: 1;
   min-height: 0;
@@ -60,6 +40,14 @@
 .empty-face .face-lg {
   width: 128px;
   height: 128px;
+  /* 透明 PNG 人物：不要卡片白底/描边 */
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+}
+
+.empty-face .face-lg img {
+  padding: 0;
 }
 
 .empty-title {
@@ -429,6 +417,40 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+/* 输入框舞台：ChatPet 挂在 composer 右上沿，略压住边框 = 偷看/注视 */
+.composer-stage {
+  position: relative;
+  flex: none;
+}
+
+.chat-pet {
+  position: absolute;
+  right: 10px;
+  bottom: calc(100% - 14px);
+  z-index: 5;
+  pointer-events: none;
+  filter: drop-shadow(0 2px 6px rgba(30, 36, 51, 0.12));
+}
+
+.chat-pet .face {
+  pointer-events: auto;
+  /* 无边框底板：表情本身带「盒子」透视，更像趴在输入框上看你 */
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+}
+
+.chat-pet .face-md {
+  width: 88px;
+  height: 88px;
+  border-radius: 12px;
+}
+
+.chat-pet .face-md img {
+  padding: 0;
+  object-fit: contain;
 }
 
 /* 聊天内授权条（plan-chat-agent-inline）：非模态，贴 composer 上方 */

@@ -42,7 +42,7 @@ describe("内置皮肤", () => {
     expect(button.getAttribute("data-skin")).toBe("fatfish");
 
     const img = container.querySelector("img")!;
-    expect(img.getAttribute("src")).toBe("/skins/fatfish/calm.webp");
+    expect(img.getAttribute("src")).toBe("/skins/fatfish/calm.png");
     expect(img.getAttribute("data-skin")).toBe("fatfish");
     expect(img.getAttribute("data-frame")).toBe("1");
   });
@@ -59,7 +59,7 @@ describe("内置皮肤", () => {
     expect(screen.getByTestId("skin-fatfish").getAttribute("aria-checked")).toBe("true");
     expect(screen.queryByTestId("skin-bonsai")).toBeNull();
     const previewImg = screen.getByTestId("skin-fatfish").querySelector("img");
-    expect(previewImg?.getAttribute("src")).toBe("/skins/fatfish/calm.webp");
+    expect(previewImg?.getAttribute("src")).toBe("/skins/fatfish/calm.png");
   });
 
   it("切到小鲸 → store 更新且 PokeFace 跟随", () => {

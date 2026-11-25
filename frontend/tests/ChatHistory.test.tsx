@@ -84,9 +84,10 @@ describe("ChatPane 启动回放", () => {
     // 日期只在操作条的 msg-time 里。
     expect(msgs[0].note).toBeUndefined();
     expect(msgs[3].note).toBeUndefined();
-    // 空态消失，正文可见。
+    // 空态消失，正文可见；有消息后显示输入框右上角偷看脸。
     expect(screen.queryByText("还没聊过")).toBeNull();
     expect(screen.getByText("早。今天有雨。")).toBeTruthy();
+    expect(screen.getByTestId("chat-pet")).toBeTruthy();
   });
 
   it("消息流已有内容（本次启动先聊过）时不覆盖，也不白跑一次 IPC", async () => {
@@ -123,6 +124,8 @@ describe("ChatPane 启动回放", () => {
     await new Promise((r) => setTimeout(r, 20));
     expect(historyMock).not.toHaveBeenCalled();
     expect(screen.getByText("还没聊过")).toBeTruthy();
+    // 空会话不挂 ChatPet，避免和大脸重复
+    expect(screen.queryByTestId("chat-pet")).toBeNull();
   });
 });
 

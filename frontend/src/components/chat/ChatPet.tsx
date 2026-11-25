@@ -1,16 +1,14 @@
 "use client";
 
-// 聊天框右上角互动头像（plan-presence-im v2/v4）。
-// 有消息时常驻；空态隐藏，避免与居中大脸双脸。
+// 输入框右上角互动头像（plan-presence-im）：贴在 composer 上沿，
+// 默认「偷看」表情，有在注视你的感觉；流式中切 thinking。
 import { useEffect } from "react";
 import { PokeFace } from "@/components/face/PokeFace";
 import { useFaceFrame } from "@/hooks/useFaceFrame";
 import { usePersonaStore } from "@/lib/stores/personaStore";
-import { useChatStore } from "@/lib/stores/chatStore";
 import type { FaceState } from "@/lib/types";
 
 export function ChatPet({ chatting }: { chatting: boolean }) {
-  const messages = useChatStore((s) => s.messages);
   const frame = useFaceFrame();
   const ensurePersona = usePersonaStore((s) => s.ensureLoaded);
 
@@ -18,12 +16,10 @@ export function ChatPet({ chatting }: { chatting: boolean }) {
     ensurePersona();
   }, [ensurePersona]);
 
-  if (messages.length === 0) return null;
-
   const override: FaceState | undefined = chatting ? "thinking" : undefined;
 
   return (
-    <div className="chat-pet" data-testid="chat-pet">
+    <div className="chat-pet" data-testid="chat-pet" aria-hidden={false}>
       <PokeFace size="md" frame={frame} stateOverride={override} />
     </div>
   );

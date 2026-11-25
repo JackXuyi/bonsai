@@ -29,14 +29,15 @@ export const REMOVED_BUILTIN_SKINS: Record<string, string> = {
   bonsai: DEFAULT_SKIN,
 };
 
+/** dsh-meme dafeiyu-001：白底已抠除为透明 PNG；calm=偷看。 */
 const FATFISH_SLOTS: Record<FaceState, string> = {
-  calm: "/skins/fatfish/calm.webp",
-  focused: "/skins/fatfish/focused.webp",
-  sleepy: "/skins/fatfish/sleepy.webp",
-  greeted: "/skins/fatfish/greeted.webp",
-  displeased: "/skins/fatfish/displeased.webp",
-  thinking: "/skins/fatfish/thinking.webp",
-  proud: "/skins/fatfish/proud.webp",
+  calm: "/skins/fatfish/calm.png",
+  focused: "/skins/fatfish/focused.png",
+  sleepy: "/skins/fatfish/sleepy.png",
+  greeted: "/skins/fatfish/greeted.png",
+  displeased: "/skins/fatfish/displeased.png",
+  thinking: "/skins/fatfish/thinking.png",
+  proud: "/skins/fatfish/proud.png",
 };
 
 /** 内置皮肤（只读，不允许覆盖上传）。 */
@@ -45,7 +46,7 @@ export const BUILTIN_SKINS: FaceSkin[] = [
     kind: "image-set",
     id: "fatfish",
     name: "大肥鱼",
-    desc: "社区同人表情 · 非 DeepSeek 官方（猫鲸 CC0）",
+    desc: "dsh-meme 大肥鱼表情 · 非 DeepSeek 官方",
     slots: FATFISH_SLOTS,
   },
   {

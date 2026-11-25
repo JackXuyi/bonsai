@@ -7,7 +7,6 @@ import { MessageBubble } from "./MessageBubble";
 import { Composer } from "./Composer";
 import { SessionDrawer } from "./SessionDrawer";
 import { ChatChrome } from "@/components/layout/ChatChrome";
-import { ChatPet } from "@/components/chat/ChatPet";
 import { PokeFace } from "@/components/face/PokeFace";
 import { useFaceFrame } from "@/hooks/useFaceFrame";
 import { useChat } from "@/hooks/useChat";
@@ -242,62 +241,59 @@ export function ChatPane() {
       <ChatChrome />
 
       <div className="chat-body">
-        <div className="chat-stage">
-          <ChatPet chatting={chatting} />
-          <div className="messages" ref={scrollRef} onScroll={onMessagesScroll}>
-            {empty && (
-              <div className="empty">
-                <EmptyStateFace />
-                <p className="empty-hint">还没聊过</p>
-                <p className="empty-sub">说句话，或者等它自己开口。</p>
-                <div className="chips">
-                  <button
-                    className="chip"
-                    onClick={() => send("在忙什么？")}
-                  >
-                    在忙什么？
-                  </button>
-                  <button
-                    className="chip"
-                    onClick={() => send("帮我记一下今天的事")}
-                  >
-                    帮我记一下今天的事
-                  </button>
-                </div>
+        <div className="messages" ref={scrollRef} onScroll={onMessagesScroll}>
+          {empty && (
+            <div className="empty">
+              <EmptyStateFace />
+              <p className="empty-hint">还没聊过</p>
+              <p className="empty-sub">说句话，或者等它自己开口。</p>
+              <div className="chips">
+                <button
+                  className="chip"
+                  onClick={() => send("在忙什么？")}
+                >
+                  在忙什么？
+                </button>
+                <button
+                  className="chip"
+                  onClick={() => send("帮我记一下今天的事")}
+                >
+                  帮我记一下今天的事
+                </button>
               </div>
-            )}
-            {!empty &&
-              messages.map((m: ChatMessage) => (
-                <MessageBubble
-                  key={m.id}
-                  message={m}
-                  onStick={stick}
-                  onRetry={m.kind === "bot" && m.failure?.retryable ? retry : undefined}
-                />
-              ))}
-          </div>
-          {showToBottom && (
-            <button
-              className="to-bottom"
-              aria-label="回到最新"
-              onClick={() => {
-                const el = scrollRef.current;
-                if (!el) return;
-                programmaticScrollRef.current = true;
-                el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-                requestAnimationFrame(() => {
-                  programmaticScrollRef.current = false;
-                  syncToBottom();
-                });
-              }}
-            >
-              ↓
-            </button>
+            </div>
           )}
+          {!empty &&
+            messages.map((m: ChatMessage) => (
+              <MessageBubble
+                key={m.id}
+                message={m}
+                onStick={stick}
+                onRetry={m.kind === "bot" && m.failure?.retryable ? retry : undefined}
+              />
+            ))}
         </div>
+        {showToBottom && (
+          <button
+            className="to-bottom"
+            aria-label="回到最新"
+            onClick={() => {
+              const el = scrollRef.current;
+              if (!el) return;
+              programmaticScrollRef.current = true;
+              el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+              requestAnimationFrame(() => {
+                programmaticScrollRef.current = false;
+                syncToBottom();
+              });
+            }}
+          >
+            ↓
+          </button>
+        )}
       </div>
 
-      <Composer onSend={send} onCancel={cancel} chatBusy={chatting} />
+      <Composer onSend={send} onCancel={cancel} chatBusy={chatting} showPet={!empty} />
       <SessionDrawer open={drawerOpen} onClose={closeDrawer} busy={chatting} />
     </>
   );
