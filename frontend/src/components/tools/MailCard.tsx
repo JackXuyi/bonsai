@@ -36,7 +36,7 @@ export function MailCard({ active }: { active: boolean }) {
       return;
     }
     setLine(
-      `已开启 · 今日读 ${st.today_reads} 次 · 草稿 ${st.today_drafts} 次 · ${st.note}`
+      `已开启 · 今日读 ${st.today_reads} · 标已读 ${st.today_marks ?? 0} · 草稿 ${st.today_drafts} · ${st.note}`
     );
   }, [st]);
 
@@ -74,7 +74,7 @@ export function MailCard({ active }: { active: boolean }) {
       <div className="card-head">
         <div className="card-titles">
           <p className="card-title">邮件（实验）</p>
-          <p className="card-sub">只读未读 · 草稿不发送 · 仅 Mail.app</p>
+          <p className="card-sub">未读 · 标已读 · 草稿不发送 · 仅 Mail.app</p>
         </div>
         <label className="tgl tgl-master" title="总开关">
           <span className="master-label">总开关</span>

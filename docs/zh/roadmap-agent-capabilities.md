@@ -119,7 +119,7 @@
 
 | 编号 | 事项 | 方案要点 | 验收标准 | 依赖 |
 |---|---|---|---|---|
-| P3-1 | 邮件只读 + 摘要 | ✅ **已实施（2026-11-24）**：AppleScript 只读未读（发件人+主题）；`mail_unread` Read / `mail_draft` Ask（可见草稿永不 send）；`tools.mail.enabled` 默认关；本地规则腿 + kit 挂载；见 docs/zh/plan-mail/v1 | Given 授权，When 用户问「今天有什么邮件」，Then 摘要准确且原文不出机器；Given 未授权，Then Err(mail_denied)（对齐日历 TCC 教训） | 日历 TCC 验收经验 |
+| P3-1 | 邮件只读 + 摘要 | ✅ **已实施（2026-11-24）**；**标已读 v2（2026-11-25）**：`mail_unread` Read / `mail_mark_read` Ask / `mail_draft` Ask；见 docs/zh/plan-mail/v1–v2 | Given 授权，When 用户问「今天有什么邮件」，Then 摘要准确且原文不出机器；Given 未授权，Then Err(mail_denied)（对齐日历 TCC 教训） | 日历 TCC 验收经验 |
 | P3-2 | 文件操作（分级） | T0：指定目录内搜索+读取+摘要；T1：写文件（仅用户显式给的目录+二次确认）；v2：同范围复制/移动（Ask、不覆盖）；禁止删除 | Given T0 授权目录，When 查询，Then 仅返回该目录内容；Given 删除请求，Then 永远拒绝 | P4-2 权限框架可并行设计 |
 | P3-3 | Web 检索 | 系统默认浏览器打开 + 本地抓取（HTTP 客户端）→ 本地 LLM 总结；外部内容强制打 untrusted 标签 | Given 断网，When 触发搜索，Then 明示「当前离线」不虚构；Given 抓取到网页，When 总结，Then 引用含 URL 可溯源 | G-12 同期落地 |
 | P3-4 | MCP 客户端（stdio + HTTP） | ✅ **已实施（2026-11-20）**：rmcp 官方 SDK 双传输（stdio 子进程 / Streamable HTTP）、schema v8 `mcp_servers`、三级渐进注入（名称→候选→详情）、`ApprovalGate`（默认 auto；ask 弹卡 30s 超时拒绝）、tool_calls 审计（脱敏参数摘要 + result_status + prompt_trace）、Skill 包提示注入同期落地 | 见 docs/zh/plan-agent-mcp-skill.md §8；真机项待验（MCP 实连 / 2B 误触发率） | P4-2 审批框架的**钩子**已先行（分级仍在 P4-2） |

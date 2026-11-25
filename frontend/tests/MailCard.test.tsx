@@ -38,6 +38,7 @@ function fixture(over: Partial<MailStatus> = {}): MailStatus {
     supported: true,
     today_reads: 0,
     today_drafts: 0,
+    today_marks: 0,
     note: "默认关闭",
     ...over,
   };

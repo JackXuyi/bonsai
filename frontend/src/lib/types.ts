@@ -156,6 +156,7 @@ export interface MailStatus {
   supported: boolean;
   today_reads: number;
   today_drafts: number;
+  today_marks: number;
   note: string;
 }
 

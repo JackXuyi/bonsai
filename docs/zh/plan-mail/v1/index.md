@@ -5,6 +5,8 @@
 | 版本 | v1 |
 | 日期 | 2026-11-24 |
 | 状态 | **已实施**（按推荐默认；真机 Automation 授权待勾） |
+| 后续 | 标已读见 [`../v2/index.md`](../v2/index.md) |
+| 后续 | 规则腿退役见 [plan-mail/v2](../v2/index.md)（2026-11-25） |
 | 上游 | [`roadmap-agent-capabilities.md`](../../roadmap-agent-capabilities.md) P3-1 / G-04；[`plan-calendar.md`](../../plan-calendar.md) §3.9 |
 | 定位约束 | 只读优先；Denied ≠ empty；原文/主题不落长期记忆；发送永不执行，仅草稿 |
 | 一句话 | **未读发件人+主题可查可摘要；关掉就看不见；绝不用空列表假装没邮件** |

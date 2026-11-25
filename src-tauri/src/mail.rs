@@ -1,6 +1,6 @@
-//! P3-1 — 邮件只读 + 草稿（docs/zh/plan-mail/v1；roadmap G-04）。
+//! P3-1 — 邮件只读 + 草稿 + 标已读（docs/zh/plan-mail/v2；roadmap G-04）。
 //!
-//! Apple Mail 无公开 API：只读路径走 AppleScript（Automation 权限）。
+//! Apple Mail 无公开 API：路径走 AppleScript（Automation 权限）。
 //! 不变量见 plan：Denied ≠ empty；不读正文；不落长期记忆；永不 send。
 
 use std::process::{Command, Stdio};
@@ -72,6 +72,7 @@ pub struct MailStatus {
     pub supported: bool,
     pub today_reads: i64,
     pub today_drafts: i64,
+    pub today_marks: i64,
     pub note: String,
 }
 
@@ -82,6 +83,10 @@ pub trait MailSource: Send + Sync {
     fn unread(&self, limit: usize) -> Result<Vec<MailItem>, MailError>;
     /// 仅建草稿，可见；**禁止发送**。
     fn create_draft(&self, to: &str, subject: &str, body: &str) -> Result<(), MailError>;
+    /// 将收件箱当前未读列表中的若干封标为已读。
+    /// `indexes` 为 **1-based**，顺序与 [`Self::unread`] 一致；空切片表示不改。
+    /// 返回实际标记成功的条数（跳过越界 index）。
+    fn mark_read(&self, indexes: &[usize]) -> Result<usize, MailError>;
 }
 
 /// 测试夹具：可控未读与错误。
@@ -89,6 +94,9 @@ pub struct MockMail {
     pub unread: Mutex<Result<Vec<MailItem>, MailError>>,
     pub drafts: Mutex<Vec<(String, String, String)>>,
     pub fail_draft: Mutex<Option<MailError>>,
+    pub fail_mark: Mutex<Option<MailError>>,
+    /// 已标已读的 1-based 序号（按调用追加）。
+    pub marked: Mutex<Vec<usize>>,
 }
 
 impl Default for MockMail {
@@ -97,6 +105,8 @@ impl Default for MockMail {
             unread: Mutex::new(Ok(Vec::new())),
             drafts: Mutex::new(Vec::new()),
             fail_draft: Mutex::new(None),
+            fail_mark: Mutex::new(None),
+            marked: Mutex::new(Vec::new()),
         }
     }
 }
@@ -119,6 +129,45 @@ impl MailSource for MockMail {
             .map_err(|_| MailError::Unavailable("lock".into()))?
             .push((to.into(), subject.into(), body.into()));
         Ok(())
+    }
+
+    fn mark_read(&self, indexes: &[usize]) -> Result<usize, MailError> {
+        if let Some(e) = self.fail_mark.lock().ok().and_then(|g| g.clone()) {
+            return Err(e);
+        }
+        let n = self.unread(MAX_UNREAD)?.len();
+        let mut marked = self
+            .marked
+            .lock()
+            .map_err(|_| MailError::Unavailable("lock".into()))?;
+        let mut count = 0usize;
+        for &i in indexes {
+            if i >= 1 && i <= n {
+                marked.push(i);
+                count += 1;
+            }
+        }
+        // 从可读列表移除已标序号（按降序删，避免移位）——便于后续 unread 反映状态。
+        if count > 0 {
+            drop(marked);
+            let mut g = self
+                .unread
+                .lock()
+                .map_err(|_| MailError::Unavailable("lock".into()))?;
+            if let Ok(v) = g.as_mut() {
+                let mut idxs: Vec<usize> = indexes
+                    .iter()
+                    .copied()
+                    .filter(|&i| i >= 1 && i <= v.len())
+                    .collect();
+                idxs.sort_unstable();
+                idxs.dedup();
+                for i in idxs.into_iter().rev() {
+                    v.remove(i - 1);
+                }
+            }
+        }
+        Ok(count)
     }
 }
 
@@ -256,6 +305,44 @@ end tell"#
         let _ = run_osascript(&script)?;
         Ok(())
     }
+
+    fn mark_read(&self, indexes: &[usize]) -> Result<usize, MailError> {
+        if indexes.is_empty() {
+            return Ok(0);
+        }
+        // 按降序标，避免 AppleScript 列表在标已读后从「未读集合」里抽掉导致序号漂移。
+        let mut ordered: Vec<usize> = indexes
+            .iter()
+            .copied()
+            .filter(|&i| i >= 1 && i <= MAX_UNREAD)
+            .collect();
+        ordered.sort_unstable();
+        ordered.dedup();
+        ordered.reverse();
+        if ordered.is_empty() {
+            return Ok(0);
+        }
+        // 先快照未读条数，越界 index 跳过。
+        let current = self.unread(MAX_UNREAD)?;
+        let n = current.len();
+        let valid: Vec<usize> = ordered.into_iter().filter(|&i| i <= n).collect();
+        if valid.is_empty() {
+            return Ok(0);
+        }
+        let mut steps = String::new();
+        for i in &valid {
+            steps.push_str(&format!(
+                "  if (count of unreadMsgs) >= {i} then set read status of item {i} of unreadMsgs to true\n"
+            ));
+        }
+        let script = format!(
+            r#"tell application "Mail"
+  set unreadMsgs to (messages of inbox whose read status is false)
+{steps}end tell"#
+        );
+        let _ = run_osascript(&script)?;
+        Ok(valid.len())
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -267,6 +354,9 @@ impl MailSource for AppleMailSource {
         Err(MailError::Unavailable("邮件工具仅支持 macOS Mail.app".into()))
     }
     fn create_draft(&self, _: &str, _: &str, _: &str) -> Result<(), MailError> {
+        Err(MailError::Unavailable("邮件工具仅支持 macOS Mail.app".into()))
+    }
+    fn mark_read(&self, _: &[usize]) -> Result<usize, MailError> {
         Err(MailError::Unavailable("邮件工具仅支持 macOS Mail.app".into()))
     }
 }
@@ -284,11 +374,16 @@ pub fn set_enabled(conn: &Connection, on: bool) -> rusqlite::Result<()> {
     db::set_setting(conn, SETTING_ENABLED, if on { "1" } else { "0" })
 }
 
-fn count_audit(conn: &Connection, action: &str, start: &str, end: &str) -> i64 {
+/// 云端 execute_audited 落 `tool=builtin, action=mail_*`；与本地 `tool=mail` 一并计数。
+fn count_mail_action(conn: &Connection, local_action: &str, builtin_action: &str, start: &str, end: &str) -> i64 {
     conn.query_row(
         "SELECT COUNT(*) FROM tool_calls
-          WHERE tool = 'mail' AND action = ?1 AND ts >= ?2 AND ts < ?3",
-        rusqlite::params![action, start, end],
+          WHERE ts >= ?3 AND ts < ?4
+            AND (
+              (tool = 'mail' AND action = ?1)
+              OR (tool = 'builtin' AND action = ?2)
+            )",
+        rusqlite::params![local_action, builtin_action, start, end],
         |r| r.get(0),
     )
     .unwrap_or(0)
@@ -301,8 +396,9 @@ pub fn status(conn: &Connection) -> MailStatus {
     MailStatus {
         enabled,
         supported: cfg!(target_os = "macos"),
-        today_reads: count_audit(conn, "unread", &day_start, &day_end),
-        today_drafts: count_audit(conn, "draft", &day_start, &day_end),
+        today_reads: count_mail_action(conn, "unread", "mail_unread", &day_start, &day_end),
+        today_drafts: count_mail_action(conn, "draft", "mail_draft", &day_start, &day_end),
+        today_marks: count_mail_action(conn, "mark_read", "mail_mark_read", &day_start, &day_end),
         note: if !cfg!(target_os = "macos") {
             "仅 macOS Mail.app".into()
         } else if !enabled {
@@ -378,6 +474,36 @@ impl MailToolsProvider {
     }
 }
 
+/// 解析 mark_read 参数：`all=true` → 1..=n；否则取 `index`（1-based）。
+pub fn resolve_mark_indexes(args: &serde_json::Value, unread_len: usize) -> Result<Vec<usize>, String> {
+    let all = args.get("all").and_then(|v| v.as_bool()).unwrap_or(false);
+    if all {
+        if unread_len == 0 {
+            return Ok(Vec::new());
+        }
+        return Ok((1..=unread_len.min(MAX_UNREAD)).collect());
+    }
+    let index = args
+        .get("index")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize)
+        .ok_or_else(|| "mail_mark_read: 需要 index（1-based）或 all=true".to_string())?;
+    if index < 1 || index > MAX_UNREAD {
+        return Err(format!(
+            "mail_mark_read: index 须在 1..={MAX_UNREAD}，收到 {index}"
+        ));
+    }
+    if unread_len == 0 {
+        return Ok(Vec::new());
+    }
+    if index > unread_len {
+        return Err(format!(
+            "mail_mark_read: 当前只有 {unread_len} 封未读，没有第 {index} 封"
+        ));
+    }
+    Ok(vec![index])
+}
+
 /// 设置页常显；provider 仅在 `tools.mail.enabled` 时挂载。
 pub fn builtin_descriptors() -> Vec<ToolDescriptor> {
     vec![
@@ -388,6 +514,14 @@ pub fn builtin_descriptors() -> Vec<ToolDescriptor> {
             kind: ToolKind::Builtin,
             remote: false,
             access: ToolAccess::Read,
+        },
+        ToolDescriptor {
+            name: "mail_mark_read".into(),
+            summary: "把收件箱未读标为已读（按 mail_unread 列表序号，或全部）".into(),
+            detail: r#"{"type":"object","properties":{"index":{"type":"integer","description":"1-based，与 mail_unread 列表顺序对应"},"all":{"type":"boolean","description":"true 时把当前列表内未读（最多 5 封）全部标已读"}},"additionalProperties":false}"#.into(),
+            kind: ToolKind::Builtin,
+            remote: false,
+            access: ToolAccess::Ask,
         },
         ToolDescriptor {
             name: "mail_draft".into(),
@@ -412,6 +546,34 @@ impl ToolProvider for MailToolsProvider {
                 let body = format_unread_list(&items);
                 Ok(ToolOutput {
                     summary: format!("{UNTRUSTED}\n{body}"),
+                    full: body,
+                })
+            }
+            "mail_mark_read" => {
+                let items = self.source.unread(MAX_UNREAD).map_err(|e| e.to_string())?;
+                let indexes = resolve_mark_indexes(&call.args, items.len())?;
+                if indexes.is_empty() {
+                    return Ok(ToolOutput {
+                        summary: "没有可标记的未读邮件。".into(),
+                        full: "mark_read_none".into(),
+                    });
+                }
+                let labeled: Vec<String> = indexes
+                    .iter()
+                    .filter_map(|&i| items.get(i - 1))
+                    .map(|m| format!("{} — {}", m.sender, m.subject))
+                    .collect();
+                let n = self
+                    .source
+                    .mark_read(&indexes)
+                    .map_err(|e| e.to_string())?;
+                let body = if labeled.is_empty() {
+                    format!("已标记 {n} 封为已读。")
+                } else {
+                    format!("已标记 {n} 封为已读：\n{}", labeled.join("\n"))
+                };
+                Ok(ToolOutput {
+                    summary: body.clone(),
                     full: body,
                 })
             }
@@ -630,11 +792,90 @@ end tell"#;
     #[test]
     fn draft_is_ask_unread_is_read() {
         let descs = builtin_descriptors();
-        assert_eq!(descs.len(), 2);
+        assert_eq!(descs.len(), 3);
         let unread = descs.iter().find(|d| d.name == "mail_unread").unwrap();
+        let mark = descs.iter().find(|d| d.name == "mail_mark_read").unwrap();
         let draft = descs.iter().find(|d| d.name == "mail_draft").unwrap();
         assert_eq!(unread.access, ToolAccess::Read);
+        assert_eq!(mark.access, ToolAccess::Ask);
         assert_eq!(draft.access, ToolAccess::Ask);
+    }
+
+    #[test]
+    fn resolve_mark_indexes_all_and_single() {
+        assert_eq!(
+            resolve_mark_indexes(&serde_json::json!({"all": true}), 3).unwrap(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            resolve_mark_indexes(&serde_json::json!({"index": 2}), 3).unwrap(),
+            vec![2]
+        );
+        assert!(resolve_mark_indexes(&serde_json::json!({}), 3).is_err());
+        assert!(resolve_mark_indexes(&serde_json::json!({"index": 9}), 3).is_err());
+        assert!(resolve_mark_indexes(&serde_json::json!({"index": 2}), 1).is_err());
+    }
+
+    #[test]
+    fn provider_mark_read_by_index() {
+        let mock = MockMail::default();
+        *mock.unread.lock().unwrap() = Ok(vec![
+            MailItem {
+                sender: "A".into(),
+                subject: "一".into(),
+            },
+            MailItem {
+                sender: "B".into(),
+                subject: "二".into(),
+            },
+        ]);
+        let p = MailToolsProvider::new(Box::new(mock));
+        let out = p
+            .execute(&ToolCall {
+                name: "mail_mark_read".into(),
+                args: serde_json::json!({"index": 1}),
+            })
+            .unwrap();
+        assert!(out.summary.contains("已标记"));
+        assert!(out.summary.contains("A"));
+        let left = p
+            .execute(&ToolCall {
+                name: "mail_unread".into(),
+                args: serde_json::json!({}),
+            })
+            .unwrap();
+        assert!(left.full.contains("B"));
+        assert!(!left.full.contains("1. A"));
+    }
+
+    #[test]
+    fn provider_mark_read_all() {
+        let mock = MockMail::default();
+        *mock.unread.lock().unwrap() = Ok(vec![
+            MailItem {
+                sender: "A".into(),
+                subject: "一".into(),
+            },
+            MailItem {
+                sender: "B".into(),
+                subject: "二".into(),
+            },
+        ]);
+        let p = MailToolsProvider::new(Box::new(mock));
+        let out = p
+            .execute(&ToolCall {
+                name: "mail_mark_read".into(),
+                args: serde_json::json!({"all": true}),
+            })
+            .unwrap();
+        assert!(out.summary.contains("已标记 2 封"));
+        let left = p
+            .execute(&ToolCall {
+                name: "mail_unread".into(),
+                args: serde_json::json!({}),
+            })
+            .unwrap();
+        assert!(left.full.contains("没有未读") || left.summary.contains("没有未读"));
     }
 
     #[test]
