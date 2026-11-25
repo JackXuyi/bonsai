@@ -30,7 +30,7 @@ export function WebCard({ active }: { active: boolean }) {
     if (!st) return;
     setLine(
       st.enabled
-        ? "已开启 · 阿盆可以搜索网页、读取网页正文并总结"
+        ? "已开启 · 可以搜索网页、读取网页正文并总结"
         : "Web 检索未开启（默认关闭）"
     );
   }, [st]);
@@ -77,7 +77,7 @@ export function WebCard({ active }: { active: boolean }) {
           DeepSeek）用于总结
         </p>
         <p className="row-label">
-          断网或搜索失败时阿盆会明说，不会编造搜索结果；网页内容不存进记忆
+          断网或搜索失败时会明说，不会编造搜索结果；网页内容不存进记忆
         </p>
       </div>
 

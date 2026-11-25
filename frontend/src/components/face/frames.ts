@@ -3,7 +3,7 @@
 import type { GrowthStatus } from "@/lib/types";
 
 export const CAPTIONS: Record<string, string> = {
-  calm: "平静地在窗台上待着",
+  calm: "安静待着",
   focused: "在看你写代码，不打扰",
   sleepy: "深夜了，话变少",
   greeted: "嘿，你来啦",
@@ -61,10 +61,10 @@ export const MICRO_SLOTS: [number, number][] = [
 ];
 
 export const POKE_LINES = [
-  "阿盆抖了抖叶子",
-  "阿盆摇了摇新枝",
-  "阿盆把树冠晃了晃",
-  "阿盆把花朝你转了转",
+  "它晃了晃脑袋",
+  "它甩了甩尾巴",
+  "它朝你眨眨眼",
+  "它得意地挺了挺胸",
 ];
 
 // Each state has exactly 2 frames: [eyeL rx,ry, eyeR rx,ry], mouth path, transform.

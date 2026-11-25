@@ -162,7 +162,7 @@ export function OnboardingFlow() {
         setVisible(true);
         return;
       }
-      toast(`阿盆记住了 ${r.boundaries_added} 条底线、${r.preferences_added} 条偏好`);
+      toast(`已记住 ${r.boundaries_added} 条底线、${r.preferences_added} 条偏好`);
       router.push("/");
     } catch (err) {
       setToolResult({ title: "引导提交失败", text: String(err) });
@@ -174,7 +174,7 @@ export function OnboardingFlow() {
   return (
     <section className="onboarding" aria-label="初次引导">
       <header className="ob-head">
-        <p className="ob-name">阿盆</p>
+        <p className="ob-name">大肥鱼</p>
         <p className="ob-sub">先说清楚几件事，我们再开始。</p>
       </header>
 

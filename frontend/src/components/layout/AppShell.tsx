@@ -11,6 +11,8 @@ import { useEffect } from "react";
 import { useAppEvents } from "@/hooks/useAppEvents";
 import { useAppShortcuts } from "@/hooks/useAppShortcuts";
 import { useLlmStore } from "@/lib/stores/llmStore";
+import { applyTheme, readStoredThemeId } from "@/lib/theme";
+import { usePersonaStore } from "@/lib/stores/personaStore";
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   useAppEvents();
@@ -20,6 +22,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     void useLlmStore.getState().load();
+    applyTheme(readStoredThemeId());
+    usePersonaStore.getState().ensureLoaded();
   }, []);
 
   return (

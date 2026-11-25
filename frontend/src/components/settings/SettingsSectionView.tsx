@@ -4,6 +4,8 @@
 import { useState } from "react";
 import { SecondaryChrome } from "@/components/layout/SecondaryChrome";
 import { FaceSkinCard } from "@/components/settings/FaceSkinCard";
+import { PersonaNameField } from "@/components/settings/PersonaNameField";
+import { ThemeCard } from "@/components/settings/ThemeCard";
 import { ModelSection } from "@/components/settings/ModelSection";
 import { McpSection } from "@/components/agent/McpSection";
 import { SkillSection } from "@/components/agent/SkillSection";
@@ -115,9 +117,11 @@ function PresenceSection() {
     <>
       <div className="presence-preview card">
         <PokeFace size="lg" frame={frame} />
-        <p className="hint-line">点脸打个招呼；皮肤在下方选择。</p>
+        <p className="hint-line">点脸打个招呼；称呼与皮肤在下方。</p>
       </div>
+      <PersonaNameField />
       <FaceSkinCard />
+      <ThemeCard />
       <PreviewPane />
     </>
   );

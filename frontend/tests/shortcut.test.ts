@@ -28,7 +28,7 @@ describe("shortcut v2", () => {
     expect(titleForPath("/")).toBe("对话");
     expect(titleForPath("/settings")).toBe("设置");
     expect(titleForPath("/trace?turn=1")).toBe("生成链路");
-    expect(titleForPath("/unknown")).toBe("阿盆");
+    expect(titleForPath("/unknown")).toBe("大肥鱼");
     expect(normalizePath("/index.html")).toBe("/");
     expect(normalizePath("/settings.html")).toBe("/settings");
   });

@@ -246,6 +246,9 @@ export const llmCloudTest = (entry: CloudEntryInput) =>
 
 // ---------- misc ----------
 export const getPersona = () => call<Record<string, unknown>>("get_persona");
+/** 更新人格显示名（plan-presence-im v4）；Rust 校验 1–12 字。 */
+export const setPersonaName = (name: string) =>
+  call<Record<string, unknown>>("set_persona_name", { name });
 export const scaffoldReply = (args: Record<string, unknown>) =>
   call<string>("scaffold_reply", args);
 export const evaluate = (args: Record<string, unknown>) =>

@@ -65,7 +65,7 @@ describe("WebCard", () => {
     render(<WebCard active />);
     await waitFor(() =>
       expect(screen.getByTestId("web-card").textContent).toContain(
-        "已开启 · 阿盆可以搜索网页、读取网页正文并总结"
+        "已开启 · 可以搜索网页、读取网页正文并总结"
       )
     );
     const toggle = screen

@@ -158,7 +158,9 @@ pub fn run() {
 
             // L3: persona card is plain text + state machine — model-independent.
             // Swapping models swaps only expression, not the being.
-            app.manage(persona::load());
+            // Mutex：显示名可在设置里改写（plan-presence-im v4）。
+            let data_dir = app.path().app_data_dir()?;
+            app.manage(std::sync::Mutex::new(persona::load_runtime(&data_dir)));
 
             // Agent tool pipeline (plan-agent-mcp-skill.md): live MCP
             // connections + the skills directory, managed once, shared by
@@ -284,6 +286,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             persona::get_persona,
+            persona::set_persona_name,
             memory::add_event,
             memory::add_fact,
             memory::search,

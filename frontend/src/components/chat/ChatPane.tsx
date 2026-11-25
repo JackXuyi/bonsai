@@ -7,12 +7,14 @@ import { MessageBubble } from "./MessageBubble";
 import { Composer } from "./Composer";
 import { SessionDrawer } from "./SessionDrawer";
 import { ChatChrome } from "@/components/layout/ChatChrome";
+import { ChatPet } from "@/components/chat/ChatPet";
 import { PokeFace } from "@/components/face/PokeFace";
 import { useFaceFrame } from "@/hooks/useFaceFrame";
 import { useChat } from "@/hooks/useChat";
 import { useChatStore, type ChatMessage } from "@/lib/stores/chatStore";
 import { useSessionStore } from "@/lib/stores/sessionStore";
 import { useUiStore } from "@/lib/stores/uiStore";
+import { usePersonaStore } from "@/lib/stores/personaStore";
 import { dialogueHistory } from "@/lib/commands";
 import { inTauri } from "@/lib/tauriInvoke";
 
@@ -23,9 +25,16 @@ function nearBottom(el: HTMLElement) {
 /** 空态大脸：单独挂 useFaceFrame，避免有消息时整页 600ms 重渲。 */
 function EmptyStateFace() {
   const frame = useFaceFrame();
+  const name = usePersonaStore((s) => s.name);
+  const ensurePersona = usePersonaStore((s) => s.ensureLoaded);
+  useEffect(() => {
+    ensurePersona();
+  }, [ensurePersona]);
   return (
     <div className="empty-face">
       <PokeFace size="lg" frame={frame} />
+      <p className="empty-title">{name}</p>
+      <p className="empty-sub">社区同人形象 · 非官方</p>
     </div>
   );
 }
@@ -233,60 +242,59 @@ export function ChatPane() {
       <ChatChrome />
 
       <div className="chat-body">
-        <div className="messages" ref={scrollRef} onScroll={onMessagesScroll}>
-          {empty && (
-            <div className="empty">
-              <EmptyStateFace />
-              <p className="empty-title">还没聊过</p>
-              <p className="empty-sub">
-                说句话，或者等它自己开口。
-                <br />
-                它不会没话找话。
-              </p>
-              <div className="chips">
-                <button
-                  className="chip"
-                  onClick={() => send("在忙什么？")}
-                >
-                  在忙什么？
-                </button>
-                <button
-                  className="chip"
-                  onClick={() => send("帮我记一下今天的事")}
-                >
-                  帮我记一下今天的事
-                </button>
+        <div className="chat-stage">
+          <ChatPet chatting={chatting} />
+          <div className="messages" ref={scrollRef} onScroll={onMessagesScroll}>
+            {empty && (
+              <div className="empty">
+                <EmptyStateFace />
+                <p className="empty-hint">还没聊过</p>
+                <p className="empty-sub">说句话，或者等它自己开口。</p>
+                <div className="chips">
+                  <button
+                    className="chip"
+                    onClick={() => send("在忙什么？")}
+                  >
+                    在忙什么？
+                  </button>
+                  <button
+                    className="chip"
+                    onClick={() => send("帮我记一下今天的事")}
+                  >
+                    帮我记一下今天的事
+                  </button>
+                </div>
               </div>
-            </div>
+            )}
+            {!empty &&
+              messages.map((m: ChatMessage) => (
+                <MessageBubble
+                  key={m.id}
+                  message={m}
+                  onStick={stick}
+                  onRetry={m.kind === "bot" && m.failure?.retryable ? retry : undefined}
+                />
+              ))}
+          </div>
+          {showToBottom && (
+            <button
+              className="to-bottom"
+              aria-label="回到最新"
+              onClick={() => {
+                const el = scrollRef.current;
+                if (!el) return;
+                programmaticScrollRef.current = true;
+                el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+                requestAnimationFrame(() => {
+                  programmaticScrollRef.current = false;
+                  syncToBottom();
+                });
+              }}
+            >
+              ↓
+            </button>
           )}
-          {!empty &&
-            messages.map((m: ChatMessage) => (
-              <MessageBubble
-                key={m.id}
-                message={m}
-                onStick={stick}
-                onRetry={m.kind === "bot" && m.failure?.retryable ? retry : undefined}
-              />
-            ))}
         </div>
-        {showToBottom && (
-          <button
-            className="to-bottom"
-            aria-label="回到最新"
-            onClick={() => {
-              const el = scrollRef.current;
-              if (!el) return;
-              programmaticScrollRef.current = true;
-              el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-              requestAnimationFrame(() => {
-                programmaticScrollRef.current = false;
-                syncToBottom();
-              });
-            }}
-          >
-            ↓
-          </button>
-        )}
       </div>
 
       <Composer onSend={send} onCancel={cancel} chatBusy={chatting} />

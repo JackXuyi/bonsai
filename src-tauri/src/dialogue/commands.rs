@@ -5,7 +5,7 @@ use tauri::Manager;
 
 use crate::memory::db;
 use crate::memory::MemoryStore;
-use crate::persona::Persona;
+use crate::persona::{Persona, PersonaState};
 
 use super::proactive::proactive_text;
 use super::turn::{chat_turn_streaming_with_kit, chat_turn_with_kit};
@@ -31,7 +31,11 @@ pub async fn dialogue_chat(
 ) -> Result<DialogueOutcome, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let store = app.state::<MemoryStore>();
-        let card = app.state::<Persona>();
+        let card: Persona = app
+            .state::<PersonaState>()
+            .lock()
+            .map_err(|e| e.to_string())?
+            .clone();
         let calendar = app.state::<crate::calendar::CalendarState>();
         let agent = app.state::<crate::mcp_admin::AgentState>();
         let session = session_id.unwrap_or_else(|| "default".to_string());
@@ -84,7 +88,11 @@ pub async fn dialogue_chat_stream(
     tauri::async_runtime::spawn(async move {
         let res = tauri::async_runtime::spawn_blocking(move || {
             let store = app.state::<MemoryStore>();
-            let card = app.state::<Persona>();
+            let card: Persona = app
+                .state::<PersonaState>()
+                .lock()
+                .map_err(|e| e.to_string())?
+                .clone();
             let calendar = app.state::<crate::calendar::CalendarState>();
             let agent = app.state::<crate::mcp_admin::AgentState>();
             let session = session_id.unwrap_or_else(|| "default".to_string());
@@ -154,7 +162,11 @@ pub async fn dialogue_proactive_now(
 ) -> Result<Option<ProactiveReply>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let store = app.state::<MemoryStore>();
-        let card = app.state::<Persona>();
+        let card: Persona = app
+            .state::<PersonaState>()
+            .lock()
+            .map_err(|e| e.to_string())?
+            .clone();
         let hour = chrono::Local::now().hour() as u32;
         let mut backend = crate::persona::backend().map_err(|e| e.to_string())?;
         {

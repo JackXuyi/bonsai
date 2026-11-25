@@ -25,7 +25,7 @@ export async function drainGrowthAnnouncements() {
     addAnnouncement(p.note, `它长大了 · ${STAGE_NAMES[p.stage] ?? "成长"}`);
     await growthAck(p.id).catch(() => {});
   }
-  if (pending.length) toast("阿盆长大了点");
+  if (pending.length) toast("它长大了点");
 }
 
 export async function drainRelationshipAnnouncements() {
@@ -40,7 +40,7 @@ export async function drainRelationshipAnnouncements() {
     addAnnouncement(p.note, label);
     await relationshipAck(p.id).catch(() => {});
   }
-  if (pending.length) toast("阿盆和你熟了点");
+  if (pending.length) toast("它和你熟了点");
 }
 
 export function applyRelationship(st: RelationshipStatus | null) {
@@ -56,7 +56,7 @@ export async function drainAbilityAnnouncements() {
     addAnnouncement(p.note, `本事 · ${ABILITY_LABELS[p.stage] ?? ""}`);
     await abilityAck(p.id).catch(() => {});
   }
-  if (pending.length) toast("阿盆办事更稳了");
+  if (pending.length) toast("它办事更稳了");
 }
 
 export function applyAbility(st: AbilityStatus | null) {

@@ -28,7 +28,7 @@ vi.mock("@/lib/tauriListen", async (importOriginal) => {
 function fixture(mode: PersonaSnapshot["relationshipMode"]): PersonaSnapshot {
   return {
     card: {
-      name: "阿盆",
+      name: "大肥鱼",
       tone: "回复偏慢偏短，先想后说",
       constitutionItems: ["宁可说不知道，也不编", "不评价用户的外貌"],
       bannedForms: ["虽然很有道理，但"],

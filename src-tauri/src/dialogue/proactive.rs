@@ -9,7 +9,7 @@ use crate::face::{self, FaceState};
 use crate::memory::db;
 use crate::memory::MemoryStore;
 use crate::perception::PerceptionState;
-use crate::persona::{eval::DialogueBackend, Persona};
+use crate::persona::{eval::DialogueBackend, Persona, PersonaState};
 use crate::report;
 use crate::AppState;
 
@@ -171,9 +171,10 @@ pub fn spawn_proactive(app: tauri::AppHandle) {
                 };
                 let hour = chrono::Local::now().hour() as u32;
                 let message = (|| -> Option<(String, i64)> {
-                    let card = app.try_state::<Persona>()?;
+                    let state = app.try_state::<PersonaState>()?;
+                    let card = state.lock().ok()?.clone();
                     // proactive_text locks per phase itself — no guard held here.
-                    proactive_text(store.inner(), backend.as_mut(), card.inner(), hour, false)
+                    proactive_text(store.inner(), backend.as_mut(), &card, hour, false)
                         .ok()
                         .flatten()
                 })();

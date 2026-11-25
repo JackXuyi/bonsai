@@ -47,7 +47,7 @@ export function FaceSkinCard() {
     baseDir ? convertFileSrc(`${baseDir}/face_skins/${sid}/${file}`) : undefined;
 
   // 选中 id 失效（皮肤被删 / persist 残留）→ 兜底内置默认
-  const skin = faceSkinById(skinId, customSkins) ?? faceSkinById("deepseek")!;
+  const skin = faceSkinById(skinId, customSkins) ?? faceSkinById(DEFAULT_SKIN)!;
   const all: FaceSkin[] = [
     ...BUILTIN_SKINS,
     ...customSkins.map((m) => faceSkinById(m.id, customSkins)!),
@@ -116,8 +116,8 @@ export function FaceSkinCard() {
   return (
     <div className="card" data-testid="face-skin-card">
       <div className="card-head">
-        <span className="card-title">形象</span>
-        <span className="card-sub">盆栽的样子，选一个顺眼的</span>
+        <span className="card-title">皮肤</span>
+        <span className="card-sub">选一个顺眼的样子</span>
       </div>
 
       <div className="skin-options" role="radiogroup" aria-label="形象选择">
@@ -162,7 +162,8 @@ export function FaceSkinCard() {
             onClear={handleClear}
           />
           <p className="skin-slot-hint">
-            calm 是兜底表情（<b>必传</b>）；其余表情缺图时回退 calm。每个表情对应一张图，建议 200×200 以上、方形、透明背景。
+            calm 是兜底表情（<b>必传</b>）；其余缺图回退 calm。规格：
+            <b>正方形 1:1</b>，边长 <b>256–1024px</b>（推荐 512–1024，与默认大肥鱼一致），PNG / JPEG / WebP，单张 ≤2MB。
           </p>
         </div>
       )}
@@ -190,7 +191,7 @@ export function FaceSkinCard() {
       </div>
 
       <p className="skin-note">
-        当前形象：{skin.name}。图片只保存在本机（≤2MB/张、≤10 套），不会上传到任何地方；形象只是外观，阿盆的记忆和成长不受影响。
+        当前皮肤：{skin.name}。图片只保存在本机（≤10 套），界面完整展示整图、不裁切。大肥鱼为社区同人素材，非 DeepSeek 官方。
       </p>
     </div>
   );

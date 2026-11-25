@@ -88,7 +88,7 @@ pub fn payload(
 /// `relationship:stage` / `growth:stage` / `face:state` events.
 #[tauri::command]
 pub fn persona_snapshot(
-    persona: tauri::State<'_, super::Persona>,
+    persona: tauri::State<'_, super::PersonaState>,
     store: tauri::State<'_, crate::memory::MemoryStore>,
     face: tauri::State<'_, std::sync::Mutex<crate::face::FaceController>>,
 ) -> Result<PersonaSnapshot, String> {
@@ -104,7 +104,12 @@ pub fn persona_snapshot(
         .current(base)
         .as_str()
         .to_string();
-    Ok(payload(persona.inner(), &conn, &face_state))
+    let card = persona
+        .inner()
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone();
+    Ok(payload(&card, &conn, &face_state))
 }
 
 // ------------------------------------------------------------------ tests
@@ -184,7 +189,7 @@ mod tests {
         assert_eq!(s.face_state, "thinking");
         assert_eq!(s.growth_stage, 0);
         assert!(!s.dormant);
-        assert_eq!(s.card.name, "阿盆");
+        assert_eq!(s.card.name, "大肥鱼");
         assert!(!s.card.banned_forms.is_empty());
         assert!(!s.card.tone.is_empty());
     }

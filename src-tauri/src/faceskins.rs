@@ -7,6 +7,8 @@
 // - skin_id 由本模块生成（`c-` + 8 位 alnum），用户输入只进 name，
 //   永不进路径；所有文件操作前对 id 做白名单校验 + canonicalize 界内校验。
 // - 图片格式以 magic bytes 为准（不信扩展名），单文件 ≤ 2MB。
+// - 像素规格（对齐默认大肥鱼素材 1024×1024）：必须正方 1:1，
+//   边长 ∈ [MIN_IMAGE_SIDE, MAX_IMAGE_SIDE]（推荐 512–1024）。
 // - 所有失败返回 `face_<reason>: 中文说明` 结构化错误，绝不静默成功。
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -26,6 +28,12 @@ pub const SLOTS: [&str; 7] = [
 
 pub const MAX_SKINS: usize = 10;
 pub const MAX_IMAGE_BYTES: u64 = 2 * 1024 * 1024;
+/// 表情图最短边（像素）。低于此清晰度不足 ChatPet / 空态。
+pub const MIN_IMAGE_SIDE: u32 = 256;
+/// 表情图最长边（像素）。与默认大肥鱼素材 1024 对齐，禁止过大图。
+pub const MAX_IMAGE_SIDE: u32 = 1024;
+/// 允许的宽高差（像素）；默认要求严格正方形，容 1px 压缩误差。
+pub const MAX_ASPECT_DELTA: u32 = 1;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct FaceSkinManifest {
@@ -173,6 +181,130 @@ pub fn detect_image_kind(bytes: &[u8]) -> Option<&'static str> {
     None
 }
 
+/// 从文件头读宽高（不整图解码）。失败 → None。
+pub fn read_image_dims(bytes: &[u8]) -> Option<(u32, u32)> {
+    match detect_image_kind(bytes)? {
+        "png" => png_dims(bytes),
+        "jpg" => jpeg_dims(bytes),
+        "webp" => webp_dims(bytes),
+        _ => None,
+    }
+}
+
+fn png_dims(bytes: &[u8]) -> Option<(u32, u32)> {
+    // signature(8) + len(4) + "IHDR"(4) + width(4) + height(4)
+    if bytes.len() < 24 || &bytes[12..16] != b"IHDR" {
+        return None;
+    }
+    let w = u32::from_be_bytes(bytes[16..20].try_into().ok()?);
+    let h = u32::from_be_bytes(bytes[20..24].try_into().ok()?);
+    Some((w, h))
+}
+
+fn jpeg_dims(bytes: &[u8]) -> Option<(u32, u32)> {
+    // 扫描 SOF0/2 标记取高宽
+    let mut i = 2usize;
+    while i + 9 < bytes.len() {
+        if bytes[i] != 0xFF {
+            i += 1;
+            continue;
+        }
+        while i < bytes.len() && bytes[i] == 0xFF {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        let marker = bytes[i];
+        i += 1;
+        if marker == 0xD8 || marker == 0xD9 || (0xD0..=0xD7).contains(&marker) {
+            continue;
+        }
+        if i + 1 >= bytes.len() {
+            break;
+        }
+        let seglen = u16::from_be_bytes([bytes[i], bytes[i + 1]]) as usize;
+        if seglen < 2 || i + seglen > bytes.len() {
+            break;
+        }
+        // SOF0..SOF3 / SOF5..SOF7 / SOF9..SOF11 / SOF13..SOF15（基线/渐进等）
+        if matches!(
+            marker,
+            0xC0 | 0xC1 | 0xC2 | 0xC3 | 0xC5 | 0xC6 | 0xC7 | 0xC9 | 0xCA | 0xCB | 0xCD | 0xCE | 0xCF
+        ) && seglen >= 7
+        {
+            let h = u16::from_be_bytes([bytes[i + 3], bytes[i + 4]]) as u32;
+            let w = u16::from_be_bytes([bytes[i + 5], bytes[i + 6]]) as u32;
+            return Some((w, h));
+        }
+        i += seglen;
+    }
+    None
+}
+
+fn webp_dims(bytes: &[u8]) -> Option<(u32, u32)> {
+    // RIFF(12) 后逐块扫描 VP8X / VP8 / VP8L
+    let mut i = 12usize;
+    while i + 8 <= bytes.len() {
+        let tag = &bytes[i..i + 4];
+        let size = u32::from_le_bytes(bytes[i + 4..i + 8].try_into().ok()?) as usize;
+        let data_start = i + 8;
+        let data_end = data_start.checked_add(size)?;
+        if data_end > bytes.len() {
+            break;
+        }
+        let data = &bytes[data_start..data_end];
+        if tag == b"VP8X" && data.len() >= 10 {
+            let w = 1 + u32::from_le_bytes([data[4], data[5], data[6], 0]);
+            let h = 1 + u32::from_le_bytes([data[7], data[8], data[9], 0]);
+            return Some((w, h));
+        }
+        if tag == b"VP8 " && data.len() >= 10 && data[3] == 0x9d && data[4] == 0x01 && data[5] == 0x2a
+        {
+            let w = u16::from_le_bytes([data[6], data[7]]) as u32 & 0x3fff;
+            let h = u16::from_le_bytes([data[8], data[9]]) as u32 & 0x3fff;
+            return Some((w, h));
+        }
+        if tag == b"VP8L" && data.len() >= 5 && data[0] == 0x2f {
+            let b1 = data[1] as u32;
+            let b2 = data[2] as u32;
+            let b3 = data[3] as u32;
+            let b4 = data[4] as u32;
+            let w = 1 + (b1 | ((b2 & 0x3f) << 8));
+            let h = 1 + (((b2 & 0xc0) >> 6) | (b3 << 2) | ((b4 & 0x0f) << 10));
+            return Some((w, h));
+        }
+        // 块大小为奇数时有 pad byte
+        i = data_end + (size % 2);
+    }
+    None
+}
+
+/// 校验表情图像素规格：正方 + 边长范围。
+pub fn validate_image_dims(w: u32, h: u32) -> Result<(), String> {
+    if w == 0 || h == 0 {
+        return Err("face_bad_dims:无法识别图片尺寸".into());
+    }
+    let delta = w.abs_diff(h);
+    if delta > MAX_ASPECT_DELTA {
+        return Err(format!(
+            "face_bad_aspect:表情图须为正方形（1:1），当前 {w}×{h}"
+        ));
+    }
+    let side = w.max(h);
+    if side < MIN_IMAGE_SIDE {
+        return Err(format!(
+            "face_too_small:边长至少 {MIN_IMAGE_SIDE}px（推荐 512–1024），当前 {side}"
+        ));
+    }
+    if side > MAX_IMAGE_SIDE {
+        return Err(format!(
+            "face_too_big:边长最多 {MAX_IMAGE_SIDE}px（与默认大肥鱼素材一致），当前 {side}"
+        ));
+    }
+    Ok(())
+}
+
 pub fn import_inner(base: &Path, skin_id: &str, slot: &str, src: &Path) -> Result<FaceSkinManifest, String> {
     if !SLOTS.contains(&slot) {
         return Err("face_bad_slot:表情槽位不合法".into());
@@ -188,6 +320,8 @@ pub fn import_inner(base: &Path, skin_id: &str, slot: &str, src: &Path) -> Resul
     let bytes = fs::read(src).map_err(|_| "face_no_file:文件不可读".to_string())?;
     let ext = detect_image_kind(&bytes)
         .ok_or("face_bad_image:仅支持 PNG / JPEG / WebP 图片（以文件内容为准，改名无效）")?;
+    let (w, h) = read_image_dims(&bytes).ok_or("face_bad_dims:无法识别图片尺寸")?;
+    validate_image_dims(w, h)?;
 
     // 新文件落盘 `<slot>.<ext>`；旧槽位文件扩展名不同则一并清掉
     let filename = format!("{slot}.{ext}");
@@ -342,10 +476,20 @@ mod tests {
         dir
     }
 
-    fn png_bytes() -> Vec<u8> {
+    /// 最小可读 PNG 头（仅 IHDR 有意义，供 magic + 尺寸校验）。
+    fn png_bytes_sized(w: u32, h: u32) -> Vec<u8> {
         let mut v = vec![0x89u8, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
-        v.extend(std::iter::repeat(0u8).take(64));
+        v.extend_from_slice(&13u32.to_be_bytes()); // IHDR length
+        v.extend_from_slice(b"IHDR");
+        v.extend_from_slice(&w.to_be_bytes());
+        v.extend_from_slice(&h.to_be_bytes());
+        v.extend_from_slice(&[8, 2, 0, 0, 0]); // bit depth / color / filter / interlace
+        v.extend_from_slice(&[0, 0, 0, 0]); // fake CRC
         v
+    }
+
+    fn png_bytes() -> Vec<u8> {
+        png_bytes_sized(512, 512)
     }
 
     #[test]
@@ -422,21 +566,18 @@ mod tests {
         // 非法槽位
         assert!(import_inner(&base, &m.id, "angry", &PathBuf::from("x")).is_err());
 
-        // 真 PNG
+        // 真 PNG（512 正方）
         let png = base.join("src.png");
         fs::write(&png, png_bytes()).unwrap();
         let m = import_inner(&base, &m.id, "calm", &png).unwrap();
         assert_eq!(m.slots.get("calm").unwrap(), "calm.png");
         assert!(skins_dir(&base).join(&m.id).join("calm.png").exists());
 
-        // 同槽位换格式：旧文件清掉
-        let mut jpg = vec![0xFF, 0xD8, 0xFF, 0xE0];
-        jpg.extend(std::iter::repeat(0u8).take(32));
-        let jpg_path = base.join("src.jpg");
-        fs::write(&jpg_path, jpg).unwrap();
-        let m = import_inner(&base, &m.id, "calm", &jpg_path).unwrap();
-        assert_eq!(m.slots.get("calm").unwrap(), "calm.jpg");
-        assert!(!skins_dir(&base).join(&m.id).join("calm.png").exists());
+        // 同槽位换图：旧文件清掉
+        let png2 = base.join("src2.png");
+        fs::write(&png2, png_bytes_sized(256, 256)).unwrap();
+        let m = import_inner(&base, &m.id, "calm", &png2).unwrap();
+        assert_eq!(m.slots.get("calm").unwrap(), "calm.png");
 
         // 假 PNG（文本改名 .png）→ face_bad_image
         let fake = base.join("fake.png");
@@ -444,10 +585,25 @@ mod tests {
         let err = import_inner(&base, &m.id, "proud", &fake).unwrap_err();
         assert!(err.starts_with("face_bad_image"), "err: {err}");
 
-        // 超限
-        let big = base.join("big.png");
-        fs::write(&big, [0x89u8, b'P', b'N', b'G'].into_iter().chain(std::iter::repeat(0u8).take(64)).collect::<Vec<u8>>()).unwrap();
-        // 正常大小通过后再测超限：写一个 >2MB 的文件
+        // 非正方 → face_bad_aspect
+        let wide = base.join("wide.png");
+        fs::write(&wide, png_bytes_sized(512, 400)).unwrap();
+        let err = import_inner(&base, &m.id, "proud", &wide).unwrap_err();
+        assert!(err.starts_with("face_bad_aspect"), "err: {err}");
+
+        // 边长过小
+        let tiny = base.join("tiny.png");
+        fs::write(&tiny, png_bytes_sized(64, 64)).unwrap();
+        let err = import_inner(&base, &m.id, "proud", &tiny).unwrap_err();
+        assert!(err.starts_with("face_too_small"), "err: {err}");
+
+        // 边长过大
+        let huge = base.join("huge.png");
+        fs::write(&huge, png_bytes_sized(2048, 2048)).unwrap();
+        let err = import_inner(&base, &m.id, "proud", &huge).unwrap_err();
+        assert!(err.starts_with("face_too_big"), "err: {err}");
+
+        // 字节超限
         let big = base.join("big2.png");
         let mut content = png_bytes();
         content.extend(std::iter::repeat(0u8).take((2 * 1024 * 1024 + 1) as usize));
@@ -458,9 +614,20 @@ mod tests {
         // clear_slot：文件删除 + manifest 置空
         let m = clear_slot_inner(&base, &m.id, "calm").unwrap();
         assert!(!m.slots.contains_key("calm"));
-        assert!(!skins_dir(&base).join(&m.id).join("calm.jpg").exists());
+        assert!(!skins_dir(&base).join(&m.id).join("calm.png").exists());
         // 再 clear 已空槽位：幂等
         clear_slot_inner(&base, &m.id, "calm").unwrap();
+    }
+
+    #[test]
+    fn image_dims_and_validate() {
+        assert_eq!(read_image_dims(&png_bytes_sized(512, 512)), Some((512, 512)));
+        assert!(validate_image_dims(512, 512).is_ok());
+        assert!(validate_image_dims(256, 256).is_ok());
+        assert!(validate_image_dims(1024, 1024).is_ok());
+        assert!(validate_image_dims(512, 500).is_err());
+        assert!(validate_image_dims(128, 128).is_err());
+        assert!(validate_image_dims(2048, 2048).is_err());
     }
 
     #[test]

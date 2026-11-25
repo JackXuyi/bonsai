@@ -82,6 +82,39 @@ pub fn load() -> Persona {
         .expect("persona.json is invalid — it is versioned like code and must always parse")
 }
 
+/// Runtime persona handle（plan-presence-im v4）：compiled card + 可改写的显示名。
+pub type PersonaState = std::sync::Mutex<Persona>;
+
+const NAME_OVERRIDE_FILE: &str = "persona_name.txt";
+const NAME_MIN_CHARS: usize = 1;
+const NAME_MAX_CHARS: usize = 12;
+
+/// 启动时：编译进二进制的卡 + app_data 里可选的称呼覆盖。
+pub fn load_runtime(app_data_dir: &std::path::Path) -> Persona {
+    let mut card = load();
+    let path = app_data_dir.join(NAME_OVERRIDE_FILE);
+    if let Ok(raw) = std::fs::read_to_string(&path) {
+        if let Ok(name) = validate_display_name(&raw) {
+            card.name = name;
+        }
+    }
+    card
+}
+
+/// 称呼校验：trim 后 1–12 个 Unicode scalar；拒绝控制字符。
+pub fn validate_display_name(raw: &str) -> Result<String, String> {
+    let name: String = raw.trim().chars().filter(|c| !c.is_control()).collect();
+    let name = name.trim().to_string();
+    let n = name.chars().count();
+    if n < NAME_MIN_CHARS {
+        return Err("persona_name_empty:称呼不能为空".into());
+    }
+    if n > NAME_MAX_CHARS {
+        return Err(format!("persona_name_too_long:称呼最多 {NAME_MAX_CHARS} 个字"));
+    }
+    Ok(name)
+}
+
 /// The dialogue backend used at runtime: the local LLM (decision
 /// 2026-11-18, local-first). Tests construct `MockBackend` directly.
 pub fn backend() -> Result<Box<dyn eval::DialogueBackend>, String> {
@@ -235,8 +268,35 @@ fn map_legacy(l: LegacyCard) -> Persona {
 }
 
 #[tauri::command]
-pub fn get_persona(persona: tauri::State<'_, Persona>) -> Persona {
-    persona.inner().clone()
+pub fn get_persona(persona: tauri::State<'_, PersonaState>) -> Result<Persona, String> {
+    persona
+        .inner()
+        .lock()
+        .map(|g| g.clone())
+        .map_err(|e| e.to_string())
+}
+
+/// 更新显示名并持久化到 app_data（plan-presence-im v4）。
+#[tauri::command]
+pub fn set_persona_name(
+    app: tauri::AppHandle,
+    persona: tauri::State<'_, PersonaState>,
+    name: String,
+) -> Result<Persona, String> {
+    use tauri::Manager;
+    let name = validate_display_name(&name)?;
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("persona_name_io:无法定位数据目录：{e}"))?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("persona_name_io:无法创建数据目录：{e}"))?;
+    let path = dir.join(NAME_OVERRIDE_FILE);
+    std::fs::write(&path, &name)
+        .map_err(|e| format!("persona_name_io:无法写入称呼：{e}"))?;
+    let mut guard = persona.inner().lock().map_err(|e| e.to_string())?;
+    guard.name = name;
+    Ok(guard.clone())
 }
 
 #[cfg(test)]
@@ -247,7 +307,10 @@ mod tests {
     fn v11_card_parses_and_validates() {
         let p = load();
         assert_eq!(p.version, "1.1");
-        assert_eq!(p.name, "阿盆");
+        assert_eq!(p.name, "大肥鱼");
+        assert!(validate_display_name("大肥鱼").is_ok());
+        assert!(validate_display_name("").is_err());
+        assert!(validate_display_name(&"啊".repeat(13)).is_err());
         assert!(p.l1.traits.iter().all(|t| !t.scenario_tag.is_empty()));
         assert!(p.l1.boundaries.iter().all(|b| !b.detect.is_empty()));
         assert_eq!(p.disagreement_policy.per_turns, 5);

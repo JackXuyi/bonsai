@@ -63,7 +63,7 @@ export function useAppEvents() {
       note: "它自己开口的",
     });
     router.push("/");
-    toast("阿盆说了句什么");
+    toast("它说了句什么");
     facePreview("greeted").catch(() => {});
   });
 
@@ -77,7 +77,7 @@ export function useAppEvents() {
         prediction: { id: p.id, guess: p.guess },
       });
     router.push("/");
-    toast("阿盆猜了一件事");
+    toast("它猜了一件事");
   });
 
   // 提醒已由 Rust 去重限频；隐藏窗口保持沉默（不是通知中心）

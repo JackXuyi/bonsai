@@ -131,7 +131,7 @@ export function FileCard({ active }: { active: boolean }) {
 
       <div className={`subs${enabled ? "" : " off"}`}>
         <p className="row-label">
-          允许阿盆读写的目录（逐个添加，随时可删）
+          允许读写的目录（逐个添加，随时可删）
         </p>
         {roots.map((path) => (
           <div className="row" key={path}>
