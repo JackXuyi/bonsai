@@ -2,10 +2,10 @@
 
 > **状态**：T0–T4 已实施（2026-11-22 代码；2026-11-24 T4 真机验收通过，见 §11）
 > **日期**：2026-11-22
-> **后续**：复制/移动见 [plan-files/v2](plan-files/v2/index.md)（2026-11-25；删除仍不做）
+> **后续**：复制/移动见 [plan-files/v2](plan-files/v2/index.md)；单文件删除见 [plan-files/v3](plan-files/v3/index.md)（2026-11-25）
 > **依赖**：权限三档（agent_tools.rs `ToolAccess`，已落地）、审批门（mcp_admin.rs `AskFirstGate`，已落地）、云端工具循环（dialogue.rs `cloud_tool_loop`，已落地）、工具调用审计（db.rs `tool_calls` + `log_agent_tool_call`，已落地）、内置工具挂载模式（memory_search.rs `builtin_descriptor` + `build_agent_kit` 信号门控，已落地）
 > **对应 roadmap**：docs/zh/roadmap-agent-capabilities.md G-05（改造档）、G-10/G-12（权限与外部内容约束）、RK-02（隐私稀释风险）
-> **一句话**：让阿盆能在**用户逐个指定的目录**里找文件、读文件、写文件——并且**永远**不能删除、移动、改名。（移动/改名例外见 v2。）
+> **一句话**：让阿盆能在**用户逐个指定的目录**里找/读/写文件；移动/复制见 v2，单文件删除见 v3（均 Ask；目录递归删除仍不做）。
 
 ---
 

@@ -86,7 +86,7 @@
 | G-02 | 屏幕感知（截图/窗口理解） | 仅 App 名称粗标签 → **P2-4 已落地**（2026-11-24） | 改造 | 窗口标题白名单 + 教名词；不截屏 | P2-4（docs/zh/plan-screen-l2/v1） |
 | G-03 | 记忆导出/导入（可携带） | 无 | 采纳 | 原规划 P2-5；用户对本地数据有所有权预期，也是迁移主因 | P2-5 |
 | G-04 | 邮件工具 | 无 → **P3-1 已落地**（2026-11-24） | 改造 | 只读未读+草稿 Ask；Denied≠empty；仅 Mail.app | P3-1（docs/zh/plan-mail/v1） |
-| G-05 | 文件系统操作 | 无 → **T0–T4 已实施**（2026-11-22 代码；2026-11-24 T4 真机通过，plan-files.md §11）；**PDF 文本层可读**（2026-11-24，plan-pdf-read/v1）；**copy/move**（2026-11-25，plan-files/v2） | 改造 | 只读搜索/摘要先行；写/复制/移动仅限用户指定目录且二次确认（Ask）；delete 仍无执行分支；PDF 仅文本层抽取（无 OCR） | P3-2（docs/zh/plan-files.md；docs/zh/plan-files/v2；docs/zh/plan-pdf-read/v1） |
+| G-05 | 文件系统操作 | 无 → **T0–T4 已实施**（2026-11-22 代码；2026-11-24 T4 真机通过，plan-files.md §11）；**PDF 文本层可读**（2026-11-24，plan-pdf-read/v1）；**copy/move**（2026-11-25，plan-files/v2）；**delete 单文件**（2026-11-25，plan-files/v3） | 改造 | 只读搜索/摘要先行；写/复制/移动/删文件仅限用户指定目录且二次确认（Ask）；不删目录、不递归；PDF 仅文本层抽取（无 OCR） | P3-2（docs/zh/plan-files.md；docs/zh/plan-files/v2；docs/zh/plan-files/v3；docs/zh/plan-pdf-read/v1） |
 | G-06 | Web 检索 | 无 → **T0–T3 已落地**（2026-11-23 代码；2026-11-24 T3 真机通过） | 改造 | 本地 LLM 总结网页/搜索结果；无网时明示不可用 | P3-3（plan-web.md §11） |
 | G-07 | MCP 客户端 | 无 → **已落地** | 采纳 | 行业标准工具协议；本地 stdio MCP 服务器不影响隐私定位 | P3-4（2026-11-20 实施，stdio + Streamable HTTP） |
 | G-08 | 定时/常驻任务 | 仅夜间 consolidate、提醒 lane → **P3-5 已落地**（2026-11-24） | 改造 | 统一 `jobs` 表 + scheduler；consolidate / calendar_remind / daily_digest | P3-5（docs/zh/plan-jobs/v1） |

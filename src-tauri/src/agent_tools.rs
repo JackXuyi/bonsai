@@ -46,9 +46,9 @@ pub fn builtin_tools() -> Vec<ToolDescriptor> {
     // 在 perception_search 模块。设置页常显（让用户知道能力存在）；provider
     // 挂载由 build_agent_kit 按 might_perceive 信号门控。
     tools.push(crate::perception_search::builtin_descriptor());
-    // P3-2 文件工具（plan-files.md + plan-files/v2）：descriptor 单源在
-    // filetools 模块。设置页常显全部 fs_* 条目（含 copy/move），但 provider
-    // 只在总开关开且 roots 非空时才挂载（见 mcp_admin::build_agent_kit）。
+    // P3-2 文件工具（plan-files.md + v2/v3）：descriptor 单源在 filetools。
+    // 设置页常显全部 fs_*（含 copy/move/delete），provider 仅总开关开且
+    // roots 非空时挂载（见 mcp_admin::build_agent_kit）。
     tools.extend(crate::filetools::builtin_descriptors());
     // P3-3 Web 工具（plan-web.md）：descriptor 单源在 webtools 模块。设置页
     // 常显这两个条目；provider 只在 tools.web.enabled 时才挂载（见
@@ -199,6 +199,97 @@ pub fn mask_secrets(s: &str) -> String {
 /// Cap the model-visible summary at `n` chars (spec-s3: 200).
 pub fn clip_chars(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
+}
+
+/// 审批卡 / 审计参数摘要上限（可读优先；脱敏后再截断）。
+pub const ARGS_SUMMARY_CHARS: usize = 800;
+
+/// 把工具参数整理成可读摘要（脱敏 + 按工具分行；通用 JSON 缩进）。
+/// 审批卡与 `tool_calls.params_summary` 共用，避免两套格式漂移。
+pub fn format_args_summary(tool: &str, args: &serde_json::Value) -> String {
+    let raw = format_args_body(tool, args);
+    clip_chars(&mask_secrets(&raw), ARGS_SUMMARY_CHARS)
+}
+
+fn format_args_body(tool: &str, args: &serde_json::Value) -> String {
+    let obj = args.as_object();
+    match tool {
+        "fs_write" => {
+            let path = str_field(obj, "path");
+            let content = str_field(obj, "content");
+            let preview = clip_chars(&content, 160);
+            let more = if content.chars().count() > 160 { "…" } else { "" };
+            format!("路径：{path}\n内容预览：{preview}{more}")
+        }
+        "fs_delete" => format!("删除：{}", str_field(obj, "path")),
+        "fs_copy" | "fs_move" => {
+            format!(
+                "从：{}\n到：{}",
+                str_field(obj, "from"),
+                str_field(obj, "to")
+            )
+        }
+        "fs_read" => {
+            let mut lines = vec![format!("路径：{}", str_field(obj, "path"))];
+            if let Some(o) = obj {
+                if let Some(v) = o.get("offset").and_then(|x| x.as_i64()) {
+                    lines.push(format!("偏移：{v}"));
+                }
+                if let Some(v) = o.get("max_chars").and_then(|x| x.as_i64()) {
+                    lines.push(format!("本次最多：{v} 字"));
+                }
+            }
+            lines.join("\n")
+        }
+        "fs_search" => {
+            let mut lines = vec![format!("关键词：{}", str_field(obj, "query"))];
+            let path = str_field(obj, "path");
+            if !path.is_empty() && path != "—" {
+                lines.push(format!("范围：{path}"));
+            }
+            lines.join("\n")
+        }
+        "fs_list" => {
+            let path = str_field(obj, "path");
+            if path.is_empty() || path == "—" {
+                "目录：（全部授权根）".into()
+            } else {
+                format!("目录：{path}")
+            }
+        }
+        _ => pretty_args(args),
+    }
+}
+
+fn str_field(obj: Option<&serde_json::Map<String, serde_json::Value>>, key: &str) -> String {
+    obj.and_then(|o| o.get(key))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("—")
+        .to_string()
+}
+
+fn pretty_args(args: &serde_json::Value) -> String {
+    if let Some(obj) = args.as_object() {
+        if obj.is_empty() {
+            return "（无参数）".into();
+        }
+        let mut keys: Vec<&String> = obj.keys().collect();
+        keys.sort();
+        return keys
+            .into_iter()
+            .map(|k| {
+                let v = &obj[k];
+                let shown = match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                format!("{k}：{shown}")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    serde_json::to_string_pretty(args).unwrap_or_else(|_| args.to_string())
 }
 
 /// Name-only catalog line (level 0): `a · b · c`, ≤100 entries (D-裁决
@@ -441,5 +532,30 @@ mod tests {
     fn clip_chars_counts_graphemes_not_bytes() {
         assert_eq!(clip_chars("你好世界", 3), "你好世");
         assert_eq!(clip_chars("abcdef", 200), "abcdef");
+    }
+
+    #[test]
+    fn format_args_summary_is_readable_and_masks_secrets() {
+        let fs = format_args_summary(
+            "fs_write",
+            &serde_json::json!({"path": "/Users/xuyi/a.md", "content": "hello\nworld"}),
+        );
+        assert!(fs.contains("路径："), "{fs}");
+        assert!(fs.contains("内容预览："), "{fs}");
+        assert!(!fs.contains('{'), "不应再是一坨 JSON: {fs}");
+
+        let copy = format_args_summary(
+            "fs_copy",
+            &serde_json::json!({"from": "/a/x.txt", "to": "/b/y.txt"}),
+        );
+        assert!(copy.contains("从：") && copy.contains("到："), "{copy}");
+
+        let weather = format_args_summary(
+            "weather",
+            &serde_json::json!({"city": "杭州", "token": "Bearer sk-abcdefgh123"}),
+        );
+        assert!(weather.contains("city：杭州"), "{weather}");
+        assert!(weather.contains("••••"), "应脱敏: {weather}");
+        assert!(!weather.contains("abcdefgh123"), "{weather}");
     }
 }

@@ -1,8 +1,8 @@
 "use client";
 
-// 文件卡（P3-2，plan-files.md §3.6）：授权目录逐个添加（系统选择器，禁手输），
+// 文件卡（P3-2 + v2/v3）：授权目录逐个添加（系统选择器，禁手输），
 // 默认零授权——roots 为空时 provider 不挂载，模型根本看不到 fs 工具。
-// 写入走 ask 档每次弹卡询问；cloud_read 关闭时文件内容不出机器。
+// 写/复制/移动/删文件走 ask 档每次弹卡；cloud_read 关则正文不出机器。
 import { useCallback, useEffect, useState } from "react";
 import {
   fsPickDirectory,
@@ -113,7 +113,7 @@ export function FileCard({ active }: { active: boolean }) {
       <div className="card-head">
         <div className="card-titles">
           <p className="card-title">文件</p>
-          <p className="card-sub">只在授权目录内找/读/写/复制/移动 · 可读 PDF 文本层 · 删除永远不做</p>
+          <p className="card-sub">只在授权目录内找/读/写/复制/移动/删文件 · 可读 PDF 文本层 · 删目录不做 · 删文件每次询问</p>
         </div>
         <label className="tgl tgl-master" title="总开关">
           <span className="master-label">总开关</span>

@@ -2,7 +2,8 @@
 
 > **状态**：已实施（2026-11-25）  
 > **承接**：[plan-files.md](../../plan-files.md)（P3-2 T0–T4；原「永远不做移动」裁决在本版对 **文件** 复制/移动开例外）  
-> **一句话**：在授权目录内增加 `fs_copy` / `fs_move`（Ask、不覆盖、仅文件）；**删除仍不做**。
+> **一句话**：在授权目录内增加 `fs_copy` / `fs_move`（Ask、不覆盖、仅文件）。  
+> **后续**：单文件删除见 [plan-files/v3](../v3/index.md)（本版写作时删除仍不做；v3 已开例外）。
 
 ---
 
@@ -16,7 +17,7 @@ v1 把移动/改名与删除绑在一起拒绝，是为挡住不可逆破坏。�
 | --- | --- | --- |
 | `fs_copy` | **Ask** | `from` → `to`；双路径均过 `resolve_in_roots`；源须为已存在**文件**；目标不得已存在；父目录须存在；≤32MB |
 | `fs_move` | **Ask** | 同上；优先 `rename`；跨卷（EXDEV）回退 copy + 删源；删源失败则回滚目标副本 |
-| ~~`fs_delete`~~ | — | **仍不存在** |
+| ~~`fs_delete`~~ | — | 本版不做 → 见 [v3](../v3/index.md) |
 
 其余 `fs_search` / `fs_list` / `fs_read` / `fs_write` 不变。权威实现：`src-tauri/src/filetools.rs`。
 

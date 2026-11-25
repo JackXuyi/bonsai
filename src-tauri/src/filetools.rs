@@ -1,7 +1,7 @@
-//! Built-in file tools (P3-2 + v2 copy/move, docs/zh/plan-files.md +
-//! docs/zh/plan-files/v2, roadmap G-05).
+//! Built-in file tools (P3-2 + v2 copy/move + v3 delete, docs/zh/plan-files.md +
+//! docs/zh/plan-files/v2 + docs/zh/plan-files/v3, roadmap G-05).
 //!
-//! One provider, six tools, all scoped to directories the user explicitly
+//! One provider, seven tools, all scoped to directories the user explicitly
 //! added in the tools pane (`tools.fs.roots` settings key, default empty =
 //! not mounted at all). The safety story rests on ONE kernel —
 //! [`resolve_in_roots`] — that every tool call must pass before any I/O:
@@ -16,8 +16,8 @@
 //!    would ban CJK filenames; the denylist below blocks the actual escape
 //!    vectors, and the prefix check above is the real boundary).
 //!
-//! Delete remains absent (no execution branch). Copy / move are Ask-tier,
-//! same-root-set, files only, never overwrite (plan-files/v2).
+//! Copy / move / delete are Ask-tier, same-root-set, **files only** (no
+//! recursive dir ops, no overwrite on copy/move) — plan-files/v2 + v3.
 //!
 //! PDF text-layer read (docs/zh/plan-pdf-read/v1): `.pdf` is a narrow
 //! exception to the binary denylist — `fs_read` extracts text via
@@ -175,6 +175,14 @@ pub fn builtin_descriptors() -> Vec<ToolDescriptor> {
             name: "fs_move".into(),
             summary: "在授权目录内移动或改名文件（不覆盖、不处理目录，每次移动前会询问）".into(),
             detail: r#"{"type":"object","properties":{"from":{"type":"string","description":"源文件绝对路径（须已存在，不能是目录）"},"to":{"type":"string","description":"目标绝对路径（父目录须已存在，且目标不能已存在）"}},"required":["from","to"]}"#.into(),
+            kind: ToolKind::Builtin,
+            remote: false,
+            access: ToolAccess::Ask,
+        },
+        ToolDescriptor {
+            name: "fs_delete".into(),
+            summary: "删除授权目录内的单个文件（不删目录、不递归，每次删除前会询问）".into(),
+            detail: r#"{"type":"object","properties":{"path":{"type":"string","description":"要删除的文件的绝对路径（须已存在，不能是目录）"}},"required":["path"]}"#.into(),
             kind: ToolKind::Builtin,
             remote: false,
             access: ToolAccess::Ask,
@@ -890,6 +898,32 @@ fn fs_move(roots: &[PathBuf], args: &serde_json::Value) -> Result<ToolOutput, Fi
     })
 }
 
+// ---------------------------------------------------------------- delete (plan-files/v3)
+
+fn fs_delete(roots: &[PathBuf], args: &serde_json::Value) -> Result<ToolOutput, FileError> {
+    let path = args
+        .get("path")
+        .and_then(|v| v.as_str())
+        .filter(|p| !p.is_empty())
+        .ok_or_else(|| FileError::new("fs_bad_path", "缺少要删除的文件路径 path"))?;
+    let (_, resolved) = resolve_in_roots(roots, path)?;
+    if !resolved.exists() {
+        return Err(FileError::not_found());
+    }
+    if resolved.is_dir() {
+        return Err(FileError::is_dir("目标"));
+    }
+    if !resolved.is_file() {
+        return Err(FileError::new("fs_not_file", "目标不是普通文件"));
+    }
+    let len = std::fs::metadata(&resolved).map(|m| m.len()).unwrap_or(0);
+    std::fs::remove_file(&resolved).map_err(FileError::io)?;
+    Ok(ToolOutput {
+        summary: format!("已删除 {}（{} 字节）", resolved.display(), len),
+        full: String::new(),
+    })
+}
+
 // ---------------------------------------------------------------- provider
 
 /// 挂载条件（build_agent_kit）：总开关开 && roots 非空。roots 是构建时的
@@ -918,6 +952,7 @@ impl ToolProvider for FileToolsProvider {
             "fs_write" => fs_write(&self.roots, &call.args).map_err(|e| e.to_string()),
             "fs_copy" => fs_copy(&self.roots, &call.args).map_err(|e| e.to_string()),
             "fs_move" => fs_move(&self.roots, &call.args).map_err(|e| e.to_string()),
+            "fs_delete" => fs_delete(&self.roots, &call.args).map_err(|e| e.to_string()),
             _ => Err("unsupported".into()),
         }
     }
@@ -1381,15 +1416,15 @@ mod tests {
     }
 
     #[test]
-    fn descriptors_expose_six_tools_with_access_labels() {
+    fn descriptors_expose_seven_tools_with_access_labels() {
         let descs = builtin_descriptors();
-        assert_eq!(descs.len(), 6);
+        assert_eq!(descs.len(), 7);
         let ask: Vec<&str> = descs
             .iter()
             .filter(|d| d.access == ToolAccess::Ask)
             .map(|d| d.name.as_str())
             .collect();
-        assert_eq!(ask, vec!["fs_write", "fs_copy", "fs_move"]);
+        assert_eq!(ask, vec!["fs_write", "fs_copy", "fs_move", "fs_delete"]);
         for d in descs.iter().filter(|d| d.access != ToolAccess::Ask) {
             assert_eq!(d.access, ToolAccess::Read);
             assert_eq!(d.kind, ToolKind::Builtin);
@@ -1399,6 +1434,53 @@ mod tests {
         for d in &descs {
             serde_json::from_str::<serde_json::Value>(&d.detail).unwrap();
         }
+    }
+
+    #[test]
+    fn fs_delete_file_only_never_dirs_or_outside() {
+        let root = temp_root("delete");
+        let p = provider(&root);
+        let file = root.join("草稿.txt");
+        let nested = root.join("子");
+        std::fs::write(&file, "bye").unwrap();
+        std::fs::create_dir(&nested).unwrap();
+
+        let out = p
+            .execute(&call(
+                "fs_delete",
+                serde_json::json!({ "path": file.display().to_string() }),
+            ))
+            .unwrap();
+        assert!(out.summary.contains("已删除"));
+        assert!(!file.exists());
+
+        // 缺文件
+        let err = p
+            .execute(&call(
+                "fs_delete",
+                serde_json::json!({ "path": file.display().to_string() }),
+            ))
+            .unwrap_err();
+        assert!(err.starts_with("fs_not_found"), "err: {err}");
+
+        // 目录拒绝（无递归）
+        let err = p
+            .execute(&call(
+                "fs_delete",
+                serde_json::json!({ "path": nested.display().to_string() }),
+            ))
+            .unwrap_err();
+        assert!(err.starts_with("fs_is_dir"), "err: {err}");
+        assert!(nested.exists());
+
+        // 越界
+        let err = p
+            .execute(&call(
+                "fs_delete",
+                serde_json::json!({ "path": "/tmp/bonsai-evil-delete.txt" }),
+            ))
+            .unwrap_err();
+        assert!(err.starts_with("fs_outside_roots"), "err: {err}");
     }
 
     #[test]
