@@ -25,6 +25,9 @@ pub struct SkillView {
     pub auto_source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_confidence: Option<f64>,
+    /// plan-skill-auto-extract M3：启用后被注入对话的次数。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_use_count: Option<u64>,
 }
 
 #[tauri::command]
@@ -53,6 +56,7 @@ pub fn skill_list(
                         )
                     }),
                     auto_confidence: m.map(|e| e.confidence),
+                    auto_use_count: m.map(|e| e.use_count),
                     id: p.id,
                     name: p.name,
                     description: p.description,
@@ -70,6 +74,7 @@ pub fn skill_list(
                     auto_extracted: None,
                     auto_source: None,
                     auto_confidence: None,
+                    auto_use_count: None,
                 }
             }
         })
@@ -253,6 +258,16 @@ pub fn skill_auto_set_enabled(
 ) -> Result<(), String> {
     let conn = now_conn(&store)?;
     crate::skill_auto::set_feature_enabled(&conn, enabled).map_err(|e| e.to_string())
+}
+
+/// M3：立即清理超时未启用的自动草稿（默认 14 天）。
+#[tauri::command]
+pub fn skill_auto_prune_drafts(
+    store: tauri::State<'_, crate::memory::MemoryStore>,
+    agent: tauri::State<'_, AgentState>,
+) -> Result<Vec<String>, String> {
+    let conn = now_conn(&store)?;
+    crate::skill_auto::gc_stale_drafts(&conn, &agent.skills_dir)
 }
 
 /// Load a pack from a remote URL (GitHub repo/tree/raw, GitLab blob, or any

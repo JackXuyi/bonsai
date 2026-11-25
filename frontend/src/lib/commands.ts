@@ -333,6 +333,9 @@ export const skillAutoDismiss = (taskId: string) =>
 export const skillAutoGetEnabled = () => call<boolean>("skill_auto_get_enabled");
 export const skillAutoSetEnabled = (enabled: boolean) =>
   call<void>("skill_auto_set_enabled", { enabled });
+/** M3：清理超时未启用的自动草稿，返回被删 id。 */
+export const skillAutoPruneDrafts = () =>
+  call<string[]>("skill_auto_prune_drafts");
 export const toolCallRecords = (limit?: number) =>
   call<ToolCallRecord[]>("tool_call_records", { limit });
 /** 计划历史（plan-planning §5.6）：进度面板首屏基线，含解析后的 plan_json。 */

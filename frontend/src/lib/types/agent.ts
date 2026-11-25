@@ -38,6 +38,8 @@ export interface SkillView {
   autoExtracted?: boolean | null;
   autoSource?: string | null;
   autoConfidence?: number | null;
+  /** M3：启用后注入对话次数。 */
+  autoUseCount?: number | null;
 }
 
 export interface SkillAutoCandidate {

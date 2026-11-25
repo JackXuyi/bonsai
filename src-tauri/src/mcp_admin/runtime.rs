@@ -475,6 +475,14 @@ pub fn build_agent_kit(
             .filter(|p| !crate::skill::is_engine_pack(&p.id))
             .collect();
         if !packs.is_empty() {
+            // M3：自动提取包被注入 kit 时记一次使用反馈。
+            let meta = crate::skill_auto::load_meta(conn);
+            let auto_ids: Vec<String> = packs
+                .iter()
+                .map(|p| p.id.clone())
+                .filter(|id| meta.contains_key(id))
+                .collect();
+            crate::skill_auto::record_skill_use(conn, &auto_ids);
             providers.push(Box::new(crate::skill::SkillProvider { packs }));
         }
     }

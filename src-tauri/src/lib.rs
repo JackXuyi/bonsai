@@ -385,6 +385,7 @@ pub fn run() {
             mcp_admin::skill_cmds::skill_auto_dismiss,
             mcp_admin::skill_cmds::skill_auto_get_enabled,
             mcp_admin::skill_cmds::skill_auto_set_enabled,
+            mcp_admin::skill_cmds::skill_auto_prune_drafts,
             mcp_admin::gate_cmds::tool_call_records,
             mcp_admin::gate_cmds::plan_list,
             mcp_admin::gate_cmds::task_resume,

@@ -7,6 +7,7 @@ import {
   skillAutoCandidates,
   skillAutoDismiss,
   skillAutoGetEnabled,
+  skillAutoPruneDrafts,
   skillAutoSetEnabled,
   skillExtractNow,
   skillList,
@@ -24,6 +25,7 @@ export function SkillSection() {
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [extracting, setExtracting] = useState<string | null>(null);
+  const [pruning, setPruning] = useState(false);
   const [previewId, setPreviewId] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
 
@@ -83,7 +85,24 @@ export function SkillSection() {
     }
   }
 
+  async function pruneDrafts() {
+    setPruning(true);
+    try {
+      const ids = await skillAutoPruneDrafts();
+      setError(null);
+      await refresh();
+      if (ids.length === 0) {
+        setError(null);
+      }
+    } catch (e) {
+      setError(humanizeAgentError(e));
+    } finally {
+      setPruning(false);
+    }
+  }
+
   const enabledCount = rows.filter((r) => r.enabled).length;
+  const staleDrafts = rows.filter((r) => r.autoExtracted && !r.enabled).length;
 
   return (
     <div className="card agent-card" data-testid="skill-section">
@@ -108,6 +127,18 @@ export function SkillSection() {
           </span>
         </div>
         <div className="agent-row-actions">
+          {staleDrafts > 0 ? (
+            <button
+              type="button"
+              className="btn-ghost"
+              data-testid="skill-auto-prune"
+              disabled={pruning}
+              title="删除超过 14 天仍未启用的自动草稿"
+              onClick={() => void pruneDrafts()}
+            >
+              {pruning ? "清理中…" : `清理过期草稿 (${staleDrafts})`}
+            </button>
+          ) : null}
           <button
             type="button"
             className={autoOn ? "btn-danger" : "btn"}
@@ -176,7 +207,9 @@ export function SkillSection() {
                   {s.valid
                     ? s.autoExtracted && !s.enabled
                       ? `自动提取 · 未启用${s.autoSource ? ` · ${s.autoSource}` : ""}`
-                      : s.description
+                      : s.autoExtracted && s.enabled
+                        ? `${s.description || "自动提取"} · 已用 ${s.autoUseCount ?? 0} 次`
+                        : s.description
                     : "拒载"}
                 </span>
               </div>
